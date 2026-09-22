@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Actions are SHA-pinned, so nothing bumps them without Dependabot.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # pyproject.toml + uv.lock; CI installs with `uv sync --frozen`.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
