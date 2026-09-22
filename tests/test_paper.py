@@ -63,9 +63,9 @@ def test_bad_observation_does_not_trade(bars, cfg, tmp_path, fault):
     quote = quote_at(bars)
     now = quote.timestamp
     if fault == "stale":
-        now += timedelta(seconds=31)
+        now += timedelta(seconds=61)
     elif fault == "future":
-        now -= timedelta(seconds=1)
+        now -= timedelta(seconds=11)
     elif fault == "closed":
         quote = quote.model_copy(update={"status": "CLOSE"})
     elif fault == "wide":
@@ -80,6 +80,14 @@ def test_bad_observation_does_not_trade(bars, cfg, tmp_path, fault):
         assert paper_status(path)["events"] == 0
 
 
+def test_small_future_quote_is_accepted(bars, cfg, tmp_path):
+    quote = quote_at(bars)
+    result = paper_step(
+        bars, quote, cfg, tmp_path / "paper.sqlite", quote.timestamp - timedelta(seconds=10)
+    )
+    assert result["action"] == "buy"
+
+
 def test_config_change_rejected_without_corrupting_state(bars, cfg, tmp_path):
     path = tmp_path / "paper.sqlite"
     quote = quote_at(bars)
@@ -88,6 +96,19 @@ def test_config_change_rejected_without_corrupting_state(bars, cfg, tmp_path):
     with pytest.raises(ValueError, match="different config"):
         paper_step(bars, quote, changed, path, quote.timestamp)
     assert paper_status(path)["events"] == 1
+
+
+def test_quote_tolerance_change_preserves_existing_paper_account(bars, cfg, tmp_path):
+    path = tmp_path / "paper.sqlite"
+    quote = quote_at(bars)
+    paper_step(bars, quote, cfg, path, quote.timestamp)
+
+    changed = cfg.model_copy(update={"max_quote_age_seconds": 60})
+    next_quote = quote.model_copy(update={"timestamp": quote.timestamp + timedelta(seconds=5)})
+    result = paper_step(bars, next_quote, changed, path, next_quote.timestamp)
+
+    assert result["state"]["units"] == 1000
+    assert paper_status(path)["config_sha256"] == changed.fingerprint
 
 
 def test_incomplete_future_bars_do_not_influence_signal(bars, cfg, tmp_path):

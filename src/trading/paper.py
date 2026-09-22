@@ -41,7 +41,7 @@ def paper_step(
     if quote.symbol != cfg.symbol or quote.status != "OPEN":
         raise ValueError("symbol mismatch or market not OPEN")
     age = (now - quote.timestamp).total_seconds()
-    if not 0 <= age <= cfg.max_quote_age_seconds:
+    if not -cfg.max_future_quote_seconds <= age <= cfg.max_quote_age_seconds:
         raise ValueError("stale or future quote")
     frame = validate_bars(frame, cfg)
     close_times = frame.timestamp + pd.Timedelta(seconds=cfg.bar_seconds)
@@ -60,7 +60,10 @@ def paper_step(
             row = connection.execute(
                 "SELECT config_hash, state_json FROM account WHERE id = 1",
             ).fetchone()
-            if row and row[0] != cfg.fingerprint:
+            if row and row[0] not in {
+                cfg.fingerprint,
+                *cfg.paper_tolerance_legacy_fingerprints,
+            }:
                 raise ValueError("paper database belongs to a different config; use a new database")
             state = (
                 json.loads(row[1])
@@ -129,7 +132,8 @@ def paper_step(
             }
             connection.execute(
                 "INSERT INTO account VALUES (1, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json",
+                "ON CONFLICT(id) DO UPDATE SET "
+                "config_hash = excluded.config_hash, state_json = excluded.state_json",
                 (cfg.fingerprint, json.dumps(state)),
             )
             connection.execute(
