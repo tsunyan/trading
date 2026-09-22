@@ -11,6 +11,86 @@ from trading.config import Settings
 from trading.data import validate_bars
 from trading.strategy import drawdown_halt, entry_units, wants_long
 
+TRADE_COLUMNS = [
+    "entry_timestamp",
+    "exit_timestamp",
+    "units",
+    "entry_price",
+    "exit_price",
+    "gross_pnl_jpy",
+    "commission_jpy",
+    "net_pnl_jpy",
+]
+
+
+def completed_trades(fills: pd.DataFrame) -> pd.DataFrame:
+    """Pair long-only fills with FIFO accounting to expose realized performance."""
+    trades: list[dict] = []
+    open_lots: list[dict] = []
+
+    for fill in fills.itertuples(index=False):
+        units = int(fill.filled_units)
+        if units > 0:
+            open_lots.append(
+                {
+                    "timestamp": fill.timestamp,
+                    "units": units,
+                    "price": float(fill.price),
+                    "commission_per_unit": float(fill.commission) / units,
+                }
+            )
+            continue
+
+        remaining = -units
+        exit_commission_per_unit = float(fill.commission) / remaining
+        while remaining and open_lots:
+            entry = open_lots[0]
+            matched_units = min(remaining, entry["units"])
+            commission = matched_units * (entry["commission_per_unit"] + exit_commission_per_unit)
+            gross_pnl = matched_units * (float(fill.price) - entry["price"])
+            trades.append(
+                {
+                    "entry_timestamp": entry["timestamp"],
+                    "exit_timestamp": fill.timestamp,
+                    "units": matched_units,
+                    "entry_price": entry["price"],
+                    "exit_price": float(fill.price),
+                    "gross_pnl_jpy": gross_pnl,
+                    "commission_jpy": commission,
+                    "net_pnl_jpy": gross_pnl - commission,
+                }
+            )
+            entry["units"] -= matched_units
+            remaining -= matched_units
+            if entry["units"] == 0:
+                open_lots.pop(0)
+
+        if remaining:
+            raise ValueError("sell fill exceeds the open long position")
+
+    return pd.DataFrame(trades, columns=TRADE_COLUMNS)
+
+
+def performance_metrics(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
+    """Return only realized-trade metrics; open positions remain in account equity."""
+    closed_trades = len(trades)
+    winners = trades[trades.net_pnl_jpy > 0]
+    losers = trades[trades.net_pnl_jpy < 0]
+    gross_profit = float(winners.net_pnl_jpy.sum())
+    gross_loss = float(-losers.net_pnl_jpy.sum())
+    return {
+        "closed_trades": closed_trades,
+        "winning_trades": len(winners),
+        "losing_trades": len(losers),
+        "win_rate_pct": (len(winners) / closed_trades * 100) if closed_trades else None,
+        "gross_profit_jpy": gross_profit,
+        "gross_loss_jpy": gross_loss,
+        "net_realized_pnl_jpy": float(trades.net_pnl_jpy.sum()),
+        "average_trade_pnl_jpy": (float(trades.net_pnl_jpy.mean()) if closed_trades else None),
+        "profit_factor": gross_profit / gross_loss if gross_loss else None,
+        "exposure_pct": float((equity.units != 0).mean() * 100) if len(equity) else 0.0,
+    }
+
 
 class ResearchStrategy(bt.Strategy):
     params = (("cfg", None),)
@@ -108,6 +188,7 @@ def run_backtest(frame: pd.DataFrame, cfg: Settings) -> tuple[dict, pd.DataFrame
         ],
     )
     fills = orders[orders.status == "Completed"]
+    trades = completed_trades(fills)
     final_equity = float(engine.broker.getvalue())
     report = {
         "mode": "backtest",
@@ -121,6 +202,7 @@ def run_backtest(frame: pd.DataFrame, cfg: Settings) -> tuple[dict, pd.DataFrame
         "open_units": int(strategy.position.size),
         "pending_orders": len(engine.broker.get_orders_open()),
         "halted": bool(strategy.halted),
+        "performance": performance_metrics(trades, equity),
         "limitations": [
             "Long-only, unlevered JPY accounting; no FX swap or dividends/corporate actions.",
             "Fixed spread/slippage assumptions; no order book, liquidity or price-limit model.",
@@ -133,11 +215,13 @@ def run_backtest(frame: pd.DataFrame, cfg: Settings) -> tuple[dict, pd.DataFrame
 
 def save_run(frame: pd.DataFrame, cfg: Settings, directory: Path) -> dict:
     report, equity, orders = run_backtest(frame, cfg)
+    trades = completed_trades(orders[orders.status == "Completed"])
     directory.mkdir(parents=True, exist_ok=False)
     frame.to_parquet(directory / "bars.parquet", index=False)
     equity.to_csv(directory / "equity.csv", index=False)
     orders.to_csv(directory / "orders.csv", index=False)
     orders[orders.status == "Completed"].to_csv(directory / "fills.csv", index=False)
+    trades.to_csv(directory / "trades.csv", index=False)
     report["data_sha256"] = hashlib.sha256(frame.to_csv(index=False).encode()).hexdigest()
     report["config_sha256"] = cfg.fingerprint
     report["created_at"] = datetime.now(UTC).isoformat()
