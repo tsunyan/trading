@@ -1,0 +1,15 @@
+market = "jp_equity"
+symbol = "7203"
+bar_seconds = 86400
+initial_cash = 1000000.0
+fast = 10
+slow = 30
+allocation = 0.30
+lot_size = 100
+min_units = 100
+max_units = 1000
+# Conservative research assumption; replace with your account's actual fee schedule.
+commission_rate = 0.001
+spread = 1.0
+slippage = 1.0
+max_drawdown = 0.05

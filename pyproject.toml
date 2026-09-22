@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trading-lab"
+version = "0.1.0"
+description = "JPY-denominated backtests and local FX paper trading"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "backtrader==1.9.78.123",
+  "httpx>=0.28,<0.29",
+  "numpy>=1.26,<2.4",
+  "pandas>=2.2,<3",
+  "pyarrow>=19,<24",
+  "pydantic>=2.10,<3",
+]
+
+[project.scripts]
+trading = "trading.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trading"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
