@@ -148,7 +148,7 @@ def paper_step(
 
 
 def paper_status(database: Path) -> dict:
-    """Read-only snapshot; state is None when the database holds no account yet."""
+    """Read-only snapshot. Requires an existing database; state is None until a step writes one."""
     with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         row = conn.execute("SELECT config_hash, state_json FROM account WHERE id = 1").fetchone()
         if not row:
