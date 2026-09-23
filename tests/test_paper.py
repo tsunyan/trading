@@ -88,6 +88,24 @@ def test_small_future_quote_is_accepted(bars, cfg, tmp_path):
     assert result["action"] == "buy"
 
 
+def test_late_local_clock_does_not_pull_in_a_later_bar(bars, cfg, tmp_path):
+    """Bar completeness is judged against the quote clock, not the local one.
+
+    `now` is always taken after the quote round-trip, so it trails the quote by
+    up to max_quote_age_seconds. Judging completeness by `now` would count a bar
+    that closed after the price we are about to fill at.
+    """
+    quote = quote_at(bars, index=3, seconds=-15)
+    now = quote.timestamp + timedelta(seconds=25)
+    bar_closing_between = bars.timestamp.iloc[3] + pd.Timedelta(hours=1)
+    assert quote.timestamp < bar_closing_between < now
+
+    result = paper_step(bars, quote, cfg, tmp_path / "paper.sqlite", now)
+
+    expected = bars.timestamp.iloc[2] + pd.Timedelta(hours=1)
+    assert result["signal_time"] == expected.isoformat()
+
+
 def test_config_change_rejected_without_corrupting_state(bars, cfg, tmp_path):
     path = tmp_path / "paper.sqlite"
     quote = quote_at(bars)
