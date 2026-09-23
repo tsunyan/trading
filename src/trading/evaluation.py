@@ -90,8 +90,13 @@ def buy_and_hold_benchmark(
     liquidation_equity = (
         cfg.initial_cash + units * (exit_price - entry_price) - entry_fee - exit_fee + total_swap
     )
+    held_units = pd.Series(float(units), index=path.index)
     if forced_exit is not None:
         equities.iloc[forced_exit:] = liquidation_equity
+        held_units.iloc[forced_exit:] = 0.0
+    # Averaged over every evaluated bar, including the decision bar before the entry fill,
+    # so it lines up with the strategy's equity rows.
+    average_notional = float((held_units * closes).sum() / (len(path) + 1))
     peaks = equities.cummax().clip(lower=cfg.initial_cash)
     marked_equity = float(equities.iloc[-1])
     return {
@@ -99,6 +104,7 @@ def buy_and_hold_benchmark(
         "entry_price": entry_price,
         "units": units,
         "gross_notional_jpy": units * entry_price,
+        "average_notional_jpy": average_notional,
         "initial_effective_leverage": units * entry_price / cfg.initial_cash,
         "entry_commission_jpy": entry_fee,
         "swap_pnl_jpy": total_swap,
@@ -109,6 +115,31 @@ def buy_and_hold_benchmark(
         "liquidation_final_equity_jpy": liquidation_equity,
         "liquidation_return_pct": (liquidation_equity / cfg.initial_cash - 1) * 100,
         "max_drawdown_pct": float((1 - equities / peaks).max() * 100),
+    }
+
+
+def exposure_matched_buy_hold(
+    equity: pd.DataFrame,
+    buy_hold: dict,
+    strategy_return_pct: float,
+) -> dict:
+    """Buy-and-hold scaled to the strategy's average signed exposure.
+
+    A strategy that holds half the buy-and-hold notional on average is expected to earn
+    half its return from market direction alone; only the excess over that is edge.
+    Shorts count as negative exposure, so a falling market raises the bar for them.
+    """
+    signed_notional = equity.gross_notional.where(equity.units >= 0, -equity.gross_notional)
+    strategy_notional = float(signed_notional.mean()) if len(equity) else 0.0
+    benchmark_notional = buy_hold["average_notional_jpy"]
+    ratio = strategy_notional / benchmark_notional if benchmark_notional > 0 else None
+    return_pct = ratio * buy_hold["marked_return_pct"] if ratio is not None else 0.0
+    return {
+        "strategy_average_signed_notional_jpy": strategy_notional,
+        "buy_hold_average_notional_jpy": benchmark_notional,
+        "exposure_ratio": ratio,
+        "return_pct": return_pct,
+        "strategy_excess_return_pct": strategy_return_pct - return_pct,
     }
 
 
@@ -204,6 +235,9 @@ def _evidence_gate(
     baseline_continuous: dict,
     stressed_continuous: dict,
     active_start: pd.Timestamp | None = None,
+    *,
+    baseline_matched_excess_pct: float,
+    stressed_matched_excess_pct: float,
 ) -> dict:
     # Warm-up bars never trade, so they do not count toward the evaluated span.
     evaluation_start = frame.timestamp.iloc[0] if active_start is None else active_start
@@ -230,6 +264,8 @@ def _evidence_gate(
     performance_checks = {
         "positive_baseline_continuous_return": baseline_continuous["return_pct"] > 0,
         "positive_stressed_continuous_return": stressed_continuous["return_pct"] > 0,
+        "baseline_beats_exposure_matched_buy_hold": baseline_matched_excess_pct > 0,
+        "stressed_beats_exposure_matched_buy_hold": stressed_matched_excess_pct > 0,
         "fold_consistency": baseline_folds["profitable_folds"] >= required_profitable_folds,
         "stressed_fold_consistency": (
             stressed_folds["profitable_folds"] >= required_profitable_folds
@@ -259,6 +295,12 @@ def _evidence_gate(
         reason_names = {
             "positive_baseline_continuous_return": "baseline_continuous_return_not_positive",
             "positive_stressed_continuous_return": "stressed_continuous_return_not_positive",
+            "baseline_beats_exposure_matched_buy_hold": (
+                "baseline_not_above_exposure_matched_buy_hold"
+            ),
+            "stressed_beats_exposure_matched_buy_hold": (
+                "stressed_not_above_exposure_matched_buy_hold"
+            ),
             "fold_consistency": "insufficient_profitable_folds",
             "stressed_fold_consistency": "insufficient_stressed_profitable_folds",
             "baseline_drawdown_within_limit": "baseline_drawdown_limit_exceeded",
@@ -375,6 +417,9 @@ def evaluate_strategy(
                     "result": report,
                 }
             )
+        matched = exposure_matched_buy_hold(
+            continuous_equity, buy_hold, continuous_report["return_pct"]
+        )
         scenario_reports[scenario] = {
             "cost_multiplier": cost_multiplier,
             "continuous": continuous_report,
@@ -388,6 +433,7 @@ def evaluate_strategy(
                 "strategy_excess_return_vs_buy_hold_pct": (
                     continuous_report["return_pct"] - buy_hold["marked_return_pct"]
                 ),
+                "exposure_matched_buy_hold": matched,
             },
             "summary": _summary(fold_reports),
             "folds": fold_reports,
@@ -415,6 +461,12 @@ def evaluate_strategy(
             scenario_reports["baseline"]["continuous"],
             scenario_reports["stressed"]["continuous"],
             continuous_active_start,
+            baseline_matched_excess_pct=scenario_reports["baseline"]["benchmarks"][
+                "exposure_matched_buy_hold"
+            ]["strategy_excess_return_pct"],
+            stressed_matched_excess_pct=scenario_reports["stressed"]["benchmarks"][
+                "exposure_matched_buy_hold"
+            ]["strategy_excess_return_pct"],
         ),
         "limitations": [
             "The strategy and parameters are fixed; this is not parameter optimization.",
@@ -583,6 +635,15 @@ def _write_comparison(
                 "excess_return_vs_buy_hold_pct": baseline["benchmarks"][
                     "strategy_excess_return_vs_buy_hold_pct"
                 ],
+                "exposure_ratio": baseline["benchmarks"]["exposure_matched_buy_hold"][
+                    "exposure_ratio"
+                ],
+                "excess_return_vs_exposure_matched_buy_hold_pct": baseline["benchmarks"][
+                    "exposure_matched_buy_hold"
+                ]["strategy_excess_return_pct"],
+                "stressed_excess_return_vs_exposure_matched_buy_hold_pct": stressed["benchmarks"][
+                    "exposure_matched_buy_hold"
+                ]["strategy_excess_return_pct"],
                 "verdict": report["verdict"]["status"],
                 "reason_codes": report["verdict"]["reason_codes"],
             }

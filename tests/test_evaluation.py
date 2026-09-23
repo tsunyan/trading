@@ -8,6 +8,7 @@ from trading.evaluation import (
     buy_and_hold_benchmark,
     chronological_folds,
     evaluate_strategy,
+    exposure_matched_buy_hold,
     save_comparison,
     save_evaluation,
 )
@@ -74,6 +75,9 @@ def test_evaluation_reports_unclassified_interval_gaps(cfg):
     assert "unclassified" in report["data_quality"]["classification"]
 
 
+MATCHED_EXCESS = {"baseline_matched_excess_pct": 1.0, "stressed_matched_excess_pct": 0.5}
+
+
 def gate_inputs(*, stressed_drawdown=1.0, stressed_halted=False):
     frame = pd.DataFrame(
         {"timestamp": [pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2026-01-01", tz="UTC")]}
@@ -103,7 +107,7 @@ def gate_inputs(*, stressed_drawdown=1.0, stressed_halted=False):
 def test_evidence_gate_accepts_only_research_candidate(cfg):
     frame, folds, baseline, stressed = gate_inputs()
 
-    verdict = _evidence_gate(frame, cfg, folds, folds, baseline, stressed)
+    verdict = _evidence_gate(frame, cfg, folds, folds, baseline, stressed, **MATCHED_EXCESS)
 
     assert verdict["status"] == "candidate"
     assert "not a profit guarantee" in verdict["note"]
@@ -115,7 +119,7 @@ def test_evidence_gate_rejects_stressed_drawdown_and_halt(cfg):
         stressed_halted=True,
     )
 
-    verdict = _evidence_gate(frame, cfg, folds, folds, baseline, stressed)
+    verdict = _evidence_gate(frame, cfg, folds, folds, baseline, stressed, **MATCHED_EXCESS)
 
     assert verdict["status"] == "rejected"
     assert "stressed_drawdown_limit_exceeded" in verdict["reason_codes"]
@@ -175,7 +179,9 @@ def test_evidence_gate_requires_stressed_fold_consistency(cfg):
     frame, folds, baseline, stressed = gate_inputs()
     stressed_folds = {**folds, "profitable_folds": 1}
 
-    verdict = _evidence_gate(frame, cfg, folds, stressed_folds, baseline, stressed)
+    verdict = _evidence_gate(
+        frame, cfg, folds, stressed_folds, baseline, stressed, **MATCHED_EXCESS
+    )
 
     assert verdict["status"] == "rejected"
     assert verdict["reason_codes"] == ["insufficient_stressed_profitable_folds"]
@@ -192,6 +198,7 @@ def test_evidence_gate_measures_calendar_days_from_evaluation_start(cfg):
         baseline,
         stressed,
         pd.Timestamp("2025-12-01", tz="UTC"),
+        **MATCHED_EXCESS,
     )
 
     assert verdict["evidence_checks"]["calendar_days"]["actual"] == pytest.approx(31)
@@ -330,3 +337,52 @@ def test_buy_and_hold_margin_is_tested_at_the_candle_low(cfg):
 
     assert result["liquidation_reason"] == "maintenance_margin"
     assert result["forced_exit_timestamp"] == frame.timestamp.iloc[5].isoformat()
+
+
+def test_exposure_matched_buy_hold_scales_by_signed_exposure():
+    equity = pd.DataFrame({"units": [0, 100, 100, -100], "gross_notional": [0.0, 1e3, 1e3, 1e3]})
+    buy_hold = {"average_notional_jpy": 1_000.0, "marked_return_pct": 8.0}
+
+    matched = exposure_matched_buy_hold(equity, buy_hold, strategy_return_pct=5.0)
+
+    # Long 2 bars and short 1 bar out of 4: net a quarter of buy-and-hold's exposure.
+    assert matched["exposure_ratio"] == pytest.approx(0.25)
+    assert matched["return_pct"] == pytest.approx(2.0)
+    assert matched["strategy_excess_return_pct"] == pytest.approx(3.0)
+
+
+def test_evidence_gate_rejects_returns_explained_by_market_exposure(cfg):
+    frame, folds, baseline, stressed = gate_inputs()
+
+    verdict = _evidence_gate(
+        frame,
+        cfg,
+        folds,
+        folds,
+        baseline,
+        stressed,
+        baseline_matched_excess_pct=0.4,
+        stressed_matched_excess_pct=-0.1,
+    )
+
+    assert verdict["status"] == "rejected"
+    assert verdict["reason_codes"] == ["stressed_not_above_exposure_matched_buy_hold"]
+
+
+def test_evaluation_reports_exposure_matched_benchmark_per_scenario(cfg):
+    report, _, _, _ = evaluate_strategy(evaluation_bars(cfg), cfg, fold_count=3)
+
+    for scenario in ("baseline", "stressed"):
+        benchmarks = report["scenarios"][scenario]["benchmarks"]
+        matched = benchmarks["exposure_matched_buy_hold"]
+        strategy_return = report["scenarios"][scenario]["continuous"]["return_pct"]
+        assert benchmarks["buy_and_hold"]["average_notional_jpy"] > 0
+        assert matched["return_pct"] == pytest.approx(
+            matched["exposure_ratio"] * benchmarks["buy_and_hold"]["marked_return_pct"]
+        )
+        assert matched["strategy_excess_return_pct"] == pytest.approx(
+            strategy_return - matched["return_pct"]
+        )
+    checks = report["verdict"]["performance_checks"]
+    assert "baseline_beats_exposure_matched_buy_hold" in checks
+    assert "stressed_beats_exposure_matched_buy_hold" in checks
