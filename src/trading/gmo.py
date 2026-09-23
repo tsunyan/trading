@@ -107,9 +107,14 @@ class GmoPublic:
             raise ValueError("BID/ASK candles do not align")
         if (ask < bid).any().any():
             raise ValueError("crossed BID/ASK candles")
-        # Midpoint OHLC is an approximation: side extrema need not occur simultaneously.
+        # Midpoint OHLC remains the strategy input; preserve both source sides for later audits.
         frame = (bid + ask) / 2
+        for side_name, side_frame in (("bid", bid), ("ask", ask)):
+            for column in ("open", "high", "low", "close"):
+                frame[f"{side_name}_{column}"] = side_frame[column]
         frame = frame[frame.index + pd.Timedelta(seconds=cfg.bar_seconds) <= pd.Timestamp(now)]
         frame["symbol"] = cfg.symbol
         frame["volume"] = 0
+        frame["received_at"] = datetime.now(UTC)
+        frame["source"] = "GMO public API"
         return validate_bars(frame.reset_index(), cfg)

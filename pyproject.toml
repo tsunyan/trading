@@ -31,6 +31,8 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Review notes quote code as written by the reviewer; do not reformat them.
+extend-exclude = ["reviews"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

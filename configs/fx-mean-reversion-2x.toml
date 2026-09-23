@@ -2,16 +2,20 @@ market = "fx"
 symbol = "USD_JPY"
 bar_seconds = 3600
 initial_cash = 1000000.0
-strategy = "sma_cross"
+strategy = "mean_reversion"
+# Hypothesis fixed before comparison: a 0.5% move over 24 hourly bars partially reverses.
+lookback = 24
+signal_threshold = 0.005
 fast = 12
 slow = 48
 allocation = 0.20
 lot_size = 1
 min_units = 100
 max_units = 10000
-# GMO API fee per fill, excluding the introductory waiver (2026-09-22).
+allow_short = true
+max_leverage = 2.0
+maintenance_margin_ratio = 0.5
 commission_rate = 0.00002
-# Research assumptions, not broker guarantees. Full spread and adverse slippage in JPY.
 spread = 0.01
 slippage = 0.002
 max_drawdown = 0.05

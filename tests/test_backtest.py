@@ -1,7 +1,9 @@
+import pandas as pd
 import pytest
 
-from trading.backtest import run_backtest, save_run
+from trading.backtest import completed_trades, run_backtest, save_run
 from trading.data import validate_bars
+from trading.strategy import entry_units
 
 
 def test_next_open_costs_and_cash_accounting(bars, cfg):
@@ -51,6 +53,69 @@ def test_drawdown_halts_future_entries(bars, cfg):
     assert report["open_units"] == 0
 
 
+def test_short_fifo_accounts_for_profitable_and_losing_trades():
+    fills = pd.DataFrame(
+        [
+            {"timestamp": "t1", "filled_units": -100, "price": 150, "commission": 10},
+            {"timestamp": "t2", "filled_units": 40, "price": 145, "commission": 4},
+            {"timestamp": "t3", "filled_units": 60, "price": 155, "commission": 6},
+        ]
+    )
+
+    trades = completed_trades(fills)
+
+    assert trades.side.tolist() == ["short", "short"]
+    assert trades.units.tolist() == [40, 60]
+    assert trades.gross_pnl_jpy.tolist() == pytest.approx([200, -300])
+    assert trades.net_pnl_jpy.tolist() == pytest.approx([192, -312])
+
+
+def test_backtest_enters_short_when_enabled(bars, cfg):
+    cfg = cfg.model_copy(update={"allow_short": True})
+    descending = bars.copy()
+    descending.loc[:3, "open"] = [154.0, 153.0, 152.0, 150.0]
+    descending.loc[:3, "close"] = [154.0, 153.0, 152.0, 150.0]
+    descending.loc[:3, "high"] = [155.0, 154.0, 153.0, 151.0]
+    descending.loc[:3, "low"] = [153.0, 152.0, 151.0, 149.0]
+
+    _, _, orders = run_backtest(descending, cfg)
+
+    fills = orders[orders.status == "Completed"]
+    assert fills.filled_units.iloc[0] < 0
+    assert fills.price.iloc[0] == pytest.approx(149.98)
+
+
+def test_leverage_increases_sizing_without_scaling_pnl_afterward(cfg):
+    unlevered_cfg = cfg.model_copy(update={"max_units": 10_000})
+    unlevered = entry_units(1_000_000, 1_000_000, 150, unlevered_cfg)
+    leveraged_cfg = unlevered_cfg.model_copy(update={"max_leverage": 2})
+    leveraged = entry_units(1_000_000, 1_000_000, 150, leveraged_cfg)
+
+    assert leveraged > unlevered
+    assert leveraged <= unlevered * 2
+
+
+def test_margin_breach_halts_and_liquidates_at_next_open(bars, cfg):
+    cfg = cfg.model_copy(
+        update={
+            "allocation": 1,
+            "max_units": 100_000,
+            "max_leverage": 10,
+            "maintenance_margin_ratio": 0.9,
+            "max_drawdown": 0.9,
+        }
+    )
+
+    report, equity, orders = run_backtest(bars, cfg)
+
+    assert report["halted"]
+    assert report["liquidation_reason"] == "maintenance_margin"
+    assert report["open_units"] == 0
+    assert (equity.effective_leverage > cfg.max_leverage).any()
+    fills = orders[orders.status == "Completed"]
+    assert fills.reason.iloc[-1] == "maintenance_margin"
+
+
 def test_equity_lots(bars, cfg):
     cfg = cfg.model_copy(
         update={
@@ -94,3 +159,93 @@ def test_report_does_not_overwrite_existing_run(bars, cfg, tmp_path):
     assert (path / "trades.csv").exists()
     with pytest.raises(FileExistsError):
         save_run(bars, cfg, path)
+
+
+def rising_bars(cfg, count=10):
+    prices = [100.0 + index for index in range(count)]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-06", periods=count, freq="h", tz="UTC"),
+            "symbol": cfg.symbol,
+            "open": prices,
+            "high": [price + 0.5 for price in prices],
+            "low": [price - 0.5 for price in prices],
+            "close": prices,
+            "volume": 0,
+        }
+    )
+
+
+def test_maintenance_margin_is_tested_at_the_adverse_intrabar_extreme(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 0.9, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    bars = rising_bars(cfg)
+    bars.loc[7, "low"] = 95.0  # deep intrabar dip; the close is unchanged
+
+    report, equity, _ = run_backtest(bars, leveraged)
+
+    assert report["liquidation_reason"] == "maintenance_margin"
+    assert equity.halted.iloc[7]
+    assert not equity.halted.iloc[6]
+
+
+def test_strategy_swap_is_marked_through_each_candle_close_once(cfg):
+    bars = rising_bars(cfg)
+    events = [bars.timestamp.iloc[5], bars.timestamp.iloc[-1]]
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [time + pd.Timedelta(minutes=30) for time in events],
+            "symbol": cfg.symbol,
+            "long_jpy_per_10k": 100.0,
+            "short_jpy_per_10k": -100.0,
+            "days": 1,
+        }
+    )
+
+    report, equity, _ = run_backtest(bars, cfg, swap_schedule=schedule)
+
+    units = int(equity.units.iloc[-1])
+    assert units > 0
+    per_event = units / 10_000 * 100
+    # The event inside the final candle counts, and neither event is counted twice.
+    assert report["swap_pnl_jpy"] == pytest.approx(2 * per_event)
+    assert equity.swap_pnl.iloc[5] == pytest.approx(per_event)
+
+
+def test_open_position_reports_liquidation_value(cfg):
+    report, _, _ = run_backtest(rising_bars(cfg), cfg)
+
+    units = report["open_units"]
+    assert units > 0
+    close = 109.0
+    exit_price = close - (cfg.spread / 2 + cfg.slippage)
+    expected = (
+        report["final_equity_jpy"]
+        - units * (close - exit_price)
+        - units * exit_price * cfg.commission_rate
+    )
+    assert report["liquidation_equity_jpy"] == pytest.approx(expected)
+    assert report["liquidation_return_pct"] < report["return_pct"]
+
+
+def test_intrabar_margin_breach_is_not_rescued_by_a_later_credit(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 0.9, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    bars = rising_bars(cfg)
+    bars.loc[7, "low"] = 95.0
+    # A large credit inside the same candle; the bars cannot say it came before the low.
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [bars.timestamp.iloc[7] + pd.Timedelta(minutes=30)],
+            "symbol": cfg.symbol,
+            "long_jpy_per_10k": 1_000_000.0,
+            "short_jpy_per_10k": -1_000_000.0,
+            "days": 1,
+        }
+    )
+
+    report, _, _ = run_backtest(bars, leveraged, swap_schedule=schedule)
+
+    assert report["liquidation_reason"] == "maintenance_margin"

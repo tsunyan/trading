@@ -4,6 +4,7 @@ import httpx
 import pandas as pd
 import pytest
 
+from trading.data import validate_bars
 from trading.gmo import GmoPublic
 
 
@@ -39,6 +40,9 @@ def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
         )
     assert len(result) == 1
     assert result.close.iloc[0] == pytest.approx(150.51)
+    assert result.bid_close.iloc[0] == pytest.approx(150.5)
+    assert result.ask_close.iloc[0] == pytest.approx(150.52)
+    assert result.received_at.dt.tz is not None
     assert all(r.method == "GET" and r.url.path == "/public/v1/klines" for r in requests)
     assert all("authorization" not in r.headers for r in requests)
 
@@ -58,3 +62,28 @@ def test_api_error_is_not_empty_success():
 def test_private_endpoint_not_available():
     with httpx.Client() as client, pytest.raises(ValueError, match="unsupported"):
         GmoPublic(client).get("order")
+
+
+def test_side_columns_must_substantiate_mid_prices(cfg, bars):
+    sided = bars.copy()
+    for column in ["open", "high", "low", "close"]:
+        sided[f"bid_{column}"] = sided[column] - 0.01
+        sided[f"ask_{column}"] = sided[column] + 0.01
+    validate_bars(sided, cfg)
+
+    sided.loc[2, "close"] += 0.5
+    with pytest.raises(ValueError, match="midpoint"):
+        validate_bars(sided, cfg)
+
+
+def test_each_side_must_have_a_valid_ohlc_envelope(cfg, bars):
+    sided = bars.copy()
+    for column in ["open", "high", "low", "close"]:
+        sided[f"bid_{column}"] = sided[column] - 0.01
+        sided[f"ask_{column}"] = sided[column] + 0.01
+    # BID high below its open, offset on the ASK side so the mid candle stays valid.
+    sided.loc[2, "bid_high"] = sided.loc[2, "bid_open"] - 0.5
+    sided.loc[2, "ask_high"] += 0.49
+
+    with pytest.raises(ValueError, match="BID OHLC envelope"):
+        validate_bars(sided, cfg)
