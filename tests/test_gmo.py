@@ -39,6 +39,9 @@ def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
         )
     assert len(result) == 1
     assert result.close.iloc[0] == pytest.approx(150.51)
+    assert result.bid_close.iloc[0] == pytest.approx(150.5)
+    assert result.ask_close.iloc[0] == pytest.approx(150.52)
+    assert result.received_at.dt.tz is not None
     assert all(r.method == "GET" and r.url.path == "/public/v1/klines" for r in requests)
     assert all("authorization" not in r.headers for r in requests)
 

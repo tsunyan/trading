@@ -6,6 +6,7 @@ import pandas as pd
 from trading.config import Settings
 
 PRICE_COLUMNS = ["open", "high", "low", "close"]
+SIDE_PRICE_COLUMNS = [f"{side}_{column}" for side in ("bid", "ask") for column in PRICE_COLUMNS]
 
 
 def validate_bars(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
@@ -35,6 +36,24 @@ def validate_bars(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
         frame.low > frame[["open", "close", "high"]].min(axis=1)
     ).any():
         raise ValueError("invalid OHLC envelope")
+    present_side_columns = set(SIDE_PRICE_COLUMNS) & set(frame.columns)
+    if present_side_columns and present_side_columns != set(SIDE_PRICE_COLUMNS):
+        raise ValueError("BID/ASK OHLC columns must be supplied together")
+    if present_side_columns:
+        for column in SIDE_PRICE_COLUMNS:
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+        if not np.isfinite(frame[SIDE_PRICE_COLUMNS].to_numpy()).all():
+            raise ValueError("BID/ASK OHLC contains non-finite values")
+        if (frame[SIDE_PRICE_COLUMNS] <= 0).any().any():
+            raise ValueError("BID/ASK OHLC prices must be positive")
+        for column in PRICE_COLUMNS:
+            if (frame[f"ask_{column}"] < frame[f"bid_{column}"]).any():
+                raise ValueError("crossed BID/ASK OHLC")
+    if "received_at" in frame.columns:
+        received = [pd.Timestamp(value) for value in frame.received_at]
+        if any(pd.isna(value) or value.tzinfo is None for value in received):
+            raise ValueError("received_at must have explicit timezone offsets")
+        frame["received_at"] = pd.to_datetime(received, utc=True)
     return frame.reset_index(drop=True)
 
 
