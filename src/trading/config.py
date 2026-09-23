@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Settings(BaseModel):
+    """Frozen research settings; the fingerprint binds a paper account to them."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     market: Literal["fx", "jp_equity"]
@@ -42,6 +44,7 @@ class Settings(BaseModel):
 
     @property
     def fingerprint(self) -> str:
+        """Hash of the full settings; a paper database is bound to this value."""
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
 
     @property

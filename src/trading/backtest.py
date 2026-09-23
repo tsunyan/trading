@@ -93,6 +93,8 @@ def performance_metrics(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
 
 
 class ResearchStrategy(bt.Strategy):
+    """Long-only research harness: decide on a closed bar, fill at the next open."""
+
     params = (("cfg", None),)
 
     def __init__(self):
@@ -105,9 +107,11 @@ class ResearchStrategy(bt.Strategy):
         self.halted = False
 
     def timestamp(self):
+        """Current bar time as UTC ISO; the feed index is tz-naive UTC."""
         return self.data.datetime.datetime(0).replace(tzinfo=UTC).isoformat()
 
     def notify_order(self, order):
+        """Record every status transition, not just fills, and release the pending slot."""
         self.order_rows.append(
             {
                 "timestamp": self.timestamp(),
@@ -123,6 +127,7 @@ class ResearchStrategy(bt.Strategy):
             self.pending = None
 
     def next(self):
+        """One decision per bar: at most one order in flight, and no re-entry once halted."""
         self.closes.append(float(self.data.close[0]))
         equity = self.broker.getvalue()
         self.peak = max(self.peak, equity)
@@ -150,6 +155,7 @@ class ResearchStrategy(bt.Strategy):
 
 
 def run_backtest(frame: pd.DataFrame, cfg: Settings) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    """Return (report, equity, orders). Re-validates the frame; needs slow + 2 bars."""
     frame = validate_bars(frame, cfg)
     if len(frame) < cfg.slow + 2:
         raise ValueError("not enough bars for warm-up and next-bar execution")
@@ -214,6 +220,7 @@ def run_backtest(frame: pd.DataFrame, cfg: Settings) -> tuple[dict, pd.DataFrame
 
 
 def save_run(frame: pd.DataFrame, cfg: Settings, directory: Path) -> dict:
+    """Archive bars, equity, orders, fills and trades. Refuses to overwrite a run."""
     report, equity, orders = run_backtest(frame, cfg)
     trades = completed_trades(orders[orders.status == "Completed"])
     directory.mkdir(parents=True, exist_ok=False)
