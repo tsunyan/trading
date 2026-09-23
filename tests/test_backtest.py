@@ -17,6 +17,18 @@ def test_next_open_costs_and_cash_accounting(bars, cfg):
     )
     assert report["open_units"] == 0
     assert equity.iloc[0].equity == cfg.initial_cash
+    assert report["performance"] == {
+        "closed_trades": 1,
+        "winning_trades": 0,
+        "losing_trades": 1,
+        "win_rate_pct": 0.0,
+        "gross_profit_jpy": 0.0,
+        "gross_loss_jpy": pytest.approx(5343.0),
+        "net_realized_pnl_jpy": pytest.approx(-5343.0),
+        "average_trade_pnl_jpy": pytest.approx(-5343.0),
+        "profit_factor": 0.0,
+        "exposure_pct": pytest.approx(37.5),
+    }
 
 
 def test_future_prices_do_not_change_past_orders(bars, cfg):
@@ -79,5 +91,6 @@ def test_report_does_not_overwrite_existing_run(bars, cfg, tmp_path):
     report = save_run(bars, cfg, path)
     assert len(report["data_sha256"]) == 64
     assert (path / "fills.csv").exists()
+    assert (path / "trades.csv").exists()
     with pytest.raises(FileExistsError):
         save_run(bars, cfg, path)

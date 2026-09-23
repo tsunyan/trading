@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Settings(BaseModel):
+    """Frozen research settings; the fingerprint binds a paper account to them."""
+
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     market: Literal["fx", "jp_equity"]
@@ -24,6 +26,7 @@ class Settings(BaseModel):
     slippage: float = Field(default=0.002, ge=0)
     max_drawdown: float = Field(default=0.05, gt=0, lt=1)
     max_quote_age_seconds: int = Field(default=30, gt=0)
+    max_future_quote_seconds: int = Field(default=10, ge=0)
     max_signal_age_seconds: int = Field(default=3900, gt=0)
     max_spread: float = Field(default=0.05, gt=0)
 
@@ -41,7 +44,18 @@ class Settings(BaseModel):
 
     @property
     def fingerprint(self) -> str:
+        """Hash of the full settings; a paper database is bound to this value."""
         return hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+    @property
+    def paper_tolerance_legacy_fingerprints(self) -> frozenset[str]:
+        """Fingerprints for paper accounts created before quote-tolerance changes."""
+        previous_tolerance = self.model_copy(update={"max_quote_age_seconds": 30})
+        pre_future_tolerance = hashlib.sha256(
+            previous_tolerance.model_dump_json(exclude={"max_future_quote_seconds"}).encode()
+        ).hexdigest()
+        previous_quote_age = previous_tolerance.fingerprint
+        return frozenset({pre_future_tolerance, previous_quote_age})
 
 
 def load_settings(path: Path) -> Settings:
