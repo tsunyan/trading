@@ -386,3 +386,62 @@ def test_evaluation_reports_exposure_matched_benchmark_per_scenario(cfg):
     checks = report["verdict"]["performance_checks"]
     assert "baseline_beats_exposure_matched_buy_hold" in checks
     assert "stressed_beats_exposure_matched_buy_hold" in checks
+
+
+def test_fold_consistency_uses_liquidation_value():
+    from trading.evaluation import _summary
+
+    def fold(marked, liquidated):
+        return {
+            "evaluation_bars": 10,
+            "result": {
+                "return_pct": marked,
+                "liquidation_return_pct": liquidated,
+                "max_drawdown_pct": 0.1,
+                "fills": 1,
+                "open_units": 100,
+                "halted": False,
+                "performance": {
+                    "gross_profit_jpy": 0.0,
+                    "gross_loss_jpy": 0.0,
+                    "closed_trades": 0,
+                    "net_realized_pnl_jpy": 0.0,
+                },
+            },
+        }
+
+    summary = _summary([fold(0.01, -0.02), fold(0.01, -0.02), fold(0.5, 0.4)])
+
+    assert summary["profitable_folds"] == 1
+    assert summary["fold_return_basis"] == "liquidation_value"
+
+
+def test_benchmark_margin_breach_is_not_rescued_by_a_later_credit(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 1.0, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    prices = [100.0] * 8
+    lows = list(prices)
+    lows[4] = 93.0
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "open": prices,
+            "high": prices,
+            "low": lows,
+            "close": prices,
+        }
+    )
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [frame.timestamp.iloc[4] + pd.Timedelta(minutes=30)],
+            "symbol": [cfg.symbol],
+            "long_jpy_per_10k": [1_000_000.0],
+            "short_jpy_per_10k": [-1_000_000.0],
+            "days": [1],
+        }
+    )
+
+    result = buy_and_hold_benchmark(frame, leveraged, frame.timestamp.iloc[1], schedule)
+
+    assert result["liquidation_reason"] == "maintenance_margin"

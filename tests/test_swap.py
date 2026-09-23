@@ -143,3 +143,28 @@ def test_paper_swap_accrues_to_the_observation_time_not_the_older_quote(bars, cf
     observed = paper_step(bars, older_quote, cfg, path, entry_time + timedelta(seconds=5), schedule)
 
     assert observed["swap_credit_jpy"] == pytest.approx(10)
+
+
+def test_paper_credits_swap_rows_published_after_their_event_time(bars, cfg, tmp_path):
+    entry_time = bars.timestamp.iloc[2] + pd.Timedelta(hours=1, seconds=1)
+    schedule = validate_swap_schedule(
+        swap_schedule(cfg, entry_time - pd.Timedelta(hours=1), long=100), cfg
+    )
+    quote = Quote(symbol=cfg.symbol, bid=152, ask=152.02, status="OPEN", timestamp=entry_time)
+    path = tmp_path / "swap-late.sqlite"
+    opened = paper_step(bars, quote, cfg, path, entry_time, schedule)
+    assert opened["action"] == "buy"
+    checked = quote.model_copy(update={"timestamp": entry_time + timedelta(seconds=10)})
+    assert paper_step(bars, checked, cfg, path, checked.timestamp, schedule)["swap_credit_jpy"] == 0
+
+    # An event at entry+5s is published only after the account already accrued past it.
+    late_row = swap_schedule(cfg, entry_time + pd.Timedelta(seconds=5), long=100)
+    extended = pd.concat([schedule, late_row], ignore_index=True)
+    later = quote.model_copy(update={"timestamp": entry_time + timedelta(seconds=20)})
+    result = paper_step(bars, later, cfg, path, later.timestamp, extended)
+
+    assert result["swap_credit_jpy"] == pytest.approx(opened["filled_units"] / 10_000 * 100)
+    repeated = later.model_copy(update={"timestamp": later.timestamp + timedelta(seconds=1)})
+    assert paper_step(bars, repeated, cfg, path, repeated.timestamp, extended)[
+        "swap_credit_jpy"
+    ] == pytest.approx(0)

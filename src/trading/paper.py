@@ -52,11 +52,14 @@ def _account_fingerprint(cfg: Settings, swap_schedule: pd.DataFrame | None) -> s
     return hashlib.sha256(f"{cfg.fingerprint}:swap-history".encode()).hexdigest()
 
 
-def _check_swap_history(state: dict, swap_schedule: pd.DataFrame) -> None:
-    """Accept newly appended swap rows; reject any change to rows already accepted."""
+def _check_swap_history(state: dict, swap_schedule: pd.DataFrame) -> int:
+    """Accept newly appended swap rows; reject any change to rows already accepted.
+
+    Returns how many leading rows were accepted before this step.
+    """
     accepted = state.get("swap_history")
     if accepted is None:
-        return
+        return 0
     rows = accepted["rows"]
     if (
         len(swap_schedule) < rows
@@ -66,6 +69,35 @@ def _check_swap_history(state: dict, swap_schedule: pd.DataFrame) -> None:
             "swap schedule changed rows this paper account already accepted; "
             "only appending new events is allowed"
         )
+    return rows
+
+
+def _late_swap_credit(state: dict, appended: pd.DataFrame) -> float:
+    """Credit newly published events that fall inside time this account already accrued.
+
+    Official rows can be published after their event time. Forward accrual only looks past
+    last_swap_check, so such rows are matched here against the holding periods instead.
+    """
+    cursor = state.get("last_swap_check")
+    if cursor is None or appended.empty:
+        return 0.0
+    cursor = pd.Timestamp(cursor)
+    periods = list(state.get("closed_positions", []))
+    if state["units"] and state["position_opened_at"]:
+        periods.append(
+            {"from": state["position_opened_at"], "to": cursor.isoformat(), "units": state["units"]}
+        )
+    return sum(
+        swap_credit_between(
+            appended,
+            pd.Timestamp(period["from"]),
+            min(pd.Timestamp(period["to"]), cursor),
+            period["units"],
+        )
+        for period in periods
+        # Accounts from before holding periods were recorded have no start to match against.
+        if period["from"] is not None
+    )
 
 
 def paper_step(
@@ -135,8 +167,10 @@ def paper_step(
             state.setdefault("swap_pnl", 0.0)
             state.setdefault("last_swap_check", None)
             state.setdefault("position_opened_at", None)
+            late_swap_credit = 0.0
             if swap_schedule is not None:
-                _check_swap_history(state, swap_schedule)
+                accepted_rows = _check_swap_history(state, swap_schedule)
+                late_swap_credit = _late_swap_credit(state, swap_schedule.iloc[accepted_rows:])
                 state["swap_history"] = {
                     "rows": len(swap_schedule),
                     "sha256": swap_fingerprint(swap_schedule),
@@ -155,7 +189,9 @@ def paper_step(
             # Completed bars use the earlier clock; carry runs to when the fill actually
             # happens, which is the later of the two observations.
             fill_time = latest_observation
-            swap_credit = 0.0
+            swap_credit = late_swap_credit
+            state["cash"] += late_swap_credit
+            state["swap_pnl"] += late_swap_credit
             if state["units"] and swap_schedule is not None:
                 start_values = [
                     pd.Timestamp(value)
@@ -163,14 +199,15 @@ def paper_step(
                     if value is not None
                 ]
                 swap_start = max(start_values) if start_values else fill_time
-                swap_credit = swap_credit_between(
+                forward_credit = swap_credit_between(
                     swap_schedule,
                     swap_start,
                     fill_time,
                     state["units"],
                 )
-                state["cash"] += swap_credit
-                state["swap_pnl"] += swap_credit
+                swap_credit += forward_credit
+                state["cash"] += forward_credit
+                state["swap_pnl"] += forward_credit
             mark_price = _mark_price(state["units"], quote)
             equity = state["cash"] + state["units"] * mark_price
             state["peak"] = max(state["peak"], equity)
@@ -205,6 +242,15 @@ def paper_step(
                     action = "sell_short"
                 else:
                     action = "quantity_below_minimum"
+            if units and state["units"] and swap_schedule is not None:
+                # Keep closed holding periods so late-published swap rows can still be matched.
+                state.setdefault("closed_positions", []).append(
+                    {
+                        "from": state["position_opened_at"],
+                        "to": fill_time.isoformat(),
+                        "units": state["units"],
+                    }
+                )
             if units:
                 fee = abs(units) * price * cfg.commission_rate
                 state["cash"] -= units * price + fee

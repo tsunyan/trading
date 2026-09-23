@@ -14,7 +14,12 @@ from trading.config import Settings
 from trading.data import validate_bars
 from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import entry_units, maintenance_margin_halt
-from trading.swap import swap_credit_between, swap_fingerprint, validate_swap_schedule
+from trading.swap import (
+    swap_charges_between,
+    swap_credit_between,
+    swap_fingerprint,
+    validate_swap_schedule,
+)
 
 MIN_EVALUATION_BARS = {"fx": 2_000, "jp_equity": 500}
 MIN_CALENDAR_DAYS = {"fx": 180.0, "jp_equity": 730.0}
@@ -74,7 +79,18 @@ def buy_and_hold_benchmark(
     forced_exit = None
     for position in range(len(path) - 1):
         low = float(lows.iloc[position])
-        low_equity = float(equities.iloc[position]) + units * (low - float(closes.iloc[position]))
+        candle_open = path.timestamp.iloc[position]
+        # Carry booked to the candle open, plus only this candle's charges: a credit that may
+        # have landed after the low must not rescue a breach.
+        carry_at_low = swap_credit_between(
+            swap_schedule, entry_time, candle_open, units
+        ) + swap_charges_between(swap_schedule, candle_open, candle_open + bar, units)
+        low_equity = (
+            float(equities.iloc[position])
+            - swap_path[position]
+            + carry_at_low
+            + units * (low - float(closes.iloc[position]))
+        )
         if maintenance_margin_halt(units, low_equity, low, cfg):
             forced_exit = position + 1
             break
@@ -199,17 +215,25 @@ def _cost_config(cfg: Settings, multiplier: float) -> Settings:
 
 
 def _summary(folds: list[dict]) -> dict:
+    """Aggregate independent folds on liquidation value.
+
+    Each fold restarts in cash, so a position still open at a fold's end is valued as if
+    closed at that close with exit costs; marking it at the mid would count unrealizable
+    gains toward the profitable-fold gate.
+    """
     reports = [fold["result"] for fold in folds]
     performances = [report["performance"] for report in reports]
+    returns = [report["liquidation_return_pct"] for report in reports]
     gross_profit = sum(item["gross_profit_jpy"] for item in performances)
     gross_loss = sum(item["gross_loss_jpy"] for item in performances)
-    compounded = math.prod(1 + report["return_pct"] / 100 for report in reports) - 1
+    compounded = math.prod(1 + value / 100 for value in returns) - 1
     return {
         "folds": len(folds),
+        "fold_return_basis": "liquidation_value",
         "evaluation_bars": sum(fold["evaluation_bars"] for fold in folds),
-        "profitable_folds": sum(report["return_pct"] > 0 for report in reports),
+        "profitable_folds": sum(value > 0 for value in returns),
         "compounded_return_pct": compounded * 100,
-        "mean_fold_return_pct": sum(report["return_pct"] for report in reports) / len(reports),
+        "mean_fold_return_pct": sum(returns) / len(returns),
         "worst_max_drawdown_pct": max(report["max_drawdown_pct"] for report in reports),
         "fills": sum(report["fills"] for report in reports),
         "closed_trades": sum(item["closed_trades"] for item in performances),

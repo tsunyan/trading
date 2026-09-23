@@ -48,6 +48,19 @@ def read_swap_schedule(path: Path, cfg: Settings) -> pd.DataFrame:
     return validate_swap_schedule(frame, cfg)
 
 
+def _event_credits(
+    schedule: pd.DataFrame | None,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    units: int,
+) -> pd.Series:
+    if schedule is None or schedule.empty or not units or end <= start:
+        return pd.Series(dtype=float)
+    events = schedule.loc[(schedule.timestamp > start) & (schedule.timestamp <= end)]
+    column = "long_jpy_per_10k" if units > 0 else "short_jpy_per_10k"
+    return abs(units) / 10_000 * events[column].astype(float)
+
+
 def swap_credit_between(
     schedule: pd.DataFrame | None,
     start: pd.Timestamp,
@@ -55,13 +68,21 @@ def swap_credit_between(
     units: int,
 ) -> float:
     """Return signed JPY carry for events in the half-open holding interval (start, end]."""
-    if schedule is None or schedule.empty or not units or end <= start:
-        return 0.0
-    events = schedule.loc[(schedule.timestamp > start) & (schedule.timestamp <= end)]
-    if events.empty:
-        return 0.0
-    column = "long_jpy_per_10k" if units > 0 else "short_jpy_per_10k"
-    return float(abs(units) / 10_000 * events[column].sum())
+    return float(_event_credits(schedule, start, end, units).sum())
+
+
+def swap_charges_between(
+    schedule: pd.DataFrame | None,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    units: int,
+) -> float:
+    """Only the charges (negative carry) in (start, end].
+
+    When bar data cannot say whether an event came before or after an intrabar extreme,
+    a conservative risk check assumes charges came first and credits came after.
+    """
+    return float(_event_credits(schedule, start, end, units).clip(upper=0).sum())
 
 
 def swap_fingerprint(schedule: pd.DataFrame | None) -> str | None:

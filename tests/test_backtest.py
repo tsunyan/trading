@@ -211,3 +211,41 @@ def test_strategy_swap_is_marked_through_each_candle_close_once(cfg):
     # The event inside the final candle counts, and neither event is counted twice.
     assert report["swap_pnl_jpy"] == pytest.approx(2 * per_event)
     assert equity.swap_pnl.iloc[5] == pytest.approx(per_event)
+
+
+def test_open_position_reports_liquidation_value(cfg):
+    report, _, _ = run_backtest(rising_bars(cfg), cfg)
+
+    units = report["open_units"]
+    assert units > 0
+    close = 109.0
+    exit_price = close - (cfg.spread / 2 + cfg.slippage)
+    expected = (
+        report["final_equity_jpy"]
+        - units * (close - exit_price)
+        - units * exit_price * cfg.commission_rate
+    )
+    assert report["liquidation_equity_jpy"] == pytest.approx(expected)
+    assert report["liquidation_return_pct"] < report["return_pct"]
+
+
+def test_intrabar_margin_breach_is_not_rescued_by_a_later_credit(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 0.9, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    bars = rising_bars(cfg)
+    bars.loc[7, "low"] = 95.0
+    # A large credit inside the same candle; the bars cannot say it came before the low.
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [bars.timestamp.iloc[7] + pd.Timedelta(minutes=30)],
+            "symbol": cfg.symbol,
+            "long_jpy_per_10k": 1_000_000.0,
+            "short_jpy_per_10k": -1_000_000.0,
+            "days": 1,
+        }
+    )
+
+    report, _, _ = run_backtest(bars, leveraged, swap_schedule=schedule)
+
+    assert report["liquidation_reason"] == "maintenance_margin"

@@ -18,7 +18,12 @@ from trading.strategy import (
     margin_metrics,
     signal_direction,
 )
-from trading.swap import swap_credit_between, swap_fingerprint, validate_swap_schedule
+from trading.swap import (
+    swap_charges_between,
+    swap_credit_between,
+    swap_fingerprint,
+    validate_swap_schedule,
+)
 
 TRADE_COLUMNS = [
     "entry_timestamp",
@@ -179,8 +184,8 @@ class ResearchStrategy(bt.Strategy):
             self.pending = None
             self.pending_reason = None
 
-    def _unbooked_swap(self) -> float:
-        """Carry from the broker's last booking to this candle's close.
+    def _unbooked_swap(self) -> tuple[float, float]:
+        """Carry from the broker's last booking to this candle's close, and its charges.
 
         Backtrader books carry at the start of each bar, before that bar's orders fill, so it
         only reaches the candle open. Equity is marked at the close, so the remainder of the
@@ -188,12 +193,15 @@ class ResearchStrategy(bt.Strategy):
         """
         size = int(self.position.size)
         if not size or self.p.swap_schedule is None or self.position.datetime is None:
-            return 0.0
+            return 0.0, 0.0
         start = pd.Timestamp(self.position.datetime).tz_localize("UTC")
         close = pd.Timestamp(self.data.datetime.datetime(0)).tz_localize("UTC") + pd.Timedelta(
             seconds=self.cfg.bar_seconds
         )
-        return swap_credit_between(self.p.swap_schedule, start, close, size)
+        return (
+            swap_credit_between(self.p.swap_schedule, start, close, size),
+            swap_charges_between(self.p.swap_schedule, start, close, size),
+        )
 
     def submit(self, order, reason: str):
         self.pending = order
@@ -205,17 +213,18 @@ class ResearchStrategy(bt.Strategy):
         current = self.data.datetime.datetime(0).replace(tzinfo=UTC)
         if self.active_start is not None and current < self.active_start:
             return
-        self.unbooked_swap = self._unbooked_swap()
+        self.unbooked_swap, unbooked_charges = self._unbooked_swap()
         equity = self.broker.getvalue() + self.unbooked_swap
         self.peak = max(self.peak, equity)
         # The position is held through the whole candle, so test the margin at its adverse
-        # extreme (low for longs, high for shorts), not only at the close.
+        # extreme (low for longs, high for shorts), not only at the close. Bars do not say
+        # when this candle's carry landed relative to that extreme, so count only its
+        # charges there: a later credit must not rescue a breach.
         size = self.position.size
         close = float(self.data.close[0])
         adverse = float(self.data.low[0]) if size > 0 else float(self.data.high[0])
-        margin_halt = maintenance_margin_halt(
-            size, equity + size * (adverse - close), adverse, self.cfg
-        )
+        adverse_equity = self.broker.getvalue() + unbooked_charges + size * (adverse - close)
+        margin_halt = maintenance_margin_halt(size, adverse_equity, adverse, self.cfg)
         drawdown = drawdown_halt(equity, self.peak, self.cfg)
         if margin_halt:
             self.halted = True
@@ -333,6 +342,16 @@ def run_backtest(
     trades = completed_trades(fills)
     # Include carry inside the final candle, which the broker would only book on a next bar.
     final_equity = float(engine.broker.getvalue()) + strategy.unbooked_swap
+    open_units = int(strategy.position.size)
+    # Value if the open position were closed at the final close with the same adverse costs.
+    exit_price = float(frame.close.iloc[-1]) - (cfg.spread / 2 + cfg.slippage) * (
+        1 if open_units > 0 else -1
+    )
+    liquidation_equity = (
+        final_equity
+        - open_units * (float(frame.close.iloc[-1]) - exit_price)
+        - abs(open_units) * exit_price * cfg.commission_rate
+    )
     report = {
         "mode": "backtest",
         "symbol": cfg.symbol,
@@ -347,7 +366,9 @@ def run_backtest(
         "swap_pnl_jpy": (
             -float(engine.broker.d_credit.get(strategy.data, 0.0)) + strategy.unbooked_swap
         ),
-        "open_units": int(strategy.position.size),
+        "liquidation_equity_jpy": liquidation_equity,
+        "liquidation_return_pct": (liquidation_equity / cfg.initial_cash - 1) * 100,
+        "open_units": open_units,
         "pending_orders": len(engine.broker.get_orders_open()),
         "halted": bool(strategy.halted),
         "liquidation_reason": strategy.liquidation_reason,
