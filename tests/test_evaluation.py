@@ -124,7 +124,7 @@ def test_evidence_gate_rejects_stressed_drawdown_and_halt(cfg):
 
 def test_evaluation_rejects_short_data_and_invalid_stress(cfg, bars):
     with pytest.raises(ValueError, match="not enough bars"):
-        evaluate_strategy(bars, cfg, fold_count=2)
+        evaluate_strategy(bars, cfg, fold_count=3)
     with pytest.raises(ValueError, match="greater than 1"):
         evaluate_strategy(evaluation_bars(cfg), cfg, stress_multiplier=1)
 
@@ -247,3 +247,10 @@ def test_comparison_evaluates_candidates_over_one_shared_period(cfg, tmp_path):
 
     with pytest.raises(ValueError, match="shorter"):
         evaluate_strategy(evaluation_bars(cfg), longer_sma, warmup_bars=3)
+
+
+def test_folds_do_not_require_a_second_warm_up_in_the_active_period(cfg):
+    folds = chronological_folds(evaluation_bars(cfg), cfg, 3, warmup_bars=40)
+
+    assert [fold["evaluation_bars"] for fold in folds] == [14, 13, 13]
+    assert all(len(fold["frame"]) == 40 + fold["evaluation_bars"] for fold in folds)

@@ -117,7 +117,9 @@ def chronological_folds(
     if fold_count < 2:
         raise ValueError("fold_count must be at least 2")
     warmup_bars = _resolve_warmup(cfg, warmup_bars)
-    minimum_active_bars = warmup_bars + 2
+    # Each fold frame already carries its own warm-up; the active part needs one decision bar
+    # and one bar to fill it.
+    minimum_active_bars = 2
     evaluation_bars = len(frame) - warmup_bars
     if evaluation_bars < fold_count * minimum_active_bars:
         required = warmup_bars + fold_count * minimum_active_bars

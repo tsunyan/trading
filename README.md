@@ -154,7 +154,8 @@ timestamp,symbol,long_jpy_per_10k,short_jpy_per_10k,days
 上のゼロ値は形式例で、実際の検証には対象期間の公式履歴を使います。現在値を過去へ一律適用しません。
 
 保存レポートには設定・データ・スワップに加え、`src/trading`のコードハッシュ、Gitコミット、
-dirty状態、実行条件（`backtest`/`evaluate`の別、区間数、コスト倍率、ウォームアップ本数）と、
+dirty状態、Pythonと主要ライブラリの版、実行条件（`backtest`/`evaluate`の別、区間数、コスト倍率、
+ウォームアップ本数）と、
 これらから生成した`experiment_id`を記録します。戦略名が同じでもコード・入力・実行条件が
 変われば別実験として扱います。
 

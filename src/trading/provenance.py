@@ -1,5 +1,7 @@
 import hashlib
+import importlib.metadata
 import json
+import platform
 import subprocess
 from pathlib import Path
 
@@ -31,15 +33,30 @@ def source_sha256() -> str:
     return digest.hexdigest()
 
 
+RUNTIME_PACKAGES = ("backtrader", "numpy", "pandas", "pyarrow", "pydantic")
+
+
+def runtime_versions() -> dict:
+    """Python and the installed versions of the packages that shape fills and numbers."""
+    versions = {"python": platform.python_version()}
+    for name in RUNTIME_PACKAGES:
+        try:
+            versions[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[name] = None
+    return versions
+
+
 def reproducibility_fields(
     cfg: Settings,
     data_sha256: str,
     swap_sha256: str | None,
     run_parameters: dict,
 ) -> dict:
-    """Identity covers inputs, code and how the run was made (mode, folds, stress, warm-up)."""
+    """Identity covers inputs, code, runtime and how the run was made (mode, folds, ...)."""
     root = Path(__file__).resolve().parents[2]
     code_sha256 = source_sha256()
+    runtime = runtime_versions()
     git_commit = _git_output(root, "rev-parse", "HEAD")
     git_status = _git_output(root, "status", "--porcelain", "--untracked-files=all")
     identity = ":".join(
@@ -49,11 +66,13 @@ def reproducibility_fields(
             swap_sha256 or "no-swap",
             code_sha256,
             json.dumps(run_parameters, sort_keys=True),
+            json.dumps(runtime, sort_keys=True),
         ]
     )
     return {
         "experiment_id": hashlib.sha256(identity.encode()).hexdigest(),
         "run_parameters": run_parameters,
+        "runtime": runtime,
         "code_sha256": code_sha256,
         "git_commit": git_commit,
         "git_dirty": bool(git_status) if git_status is not None else None,

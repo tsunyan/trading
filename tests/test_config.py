@@ -32,3 +32,18 @@ def test_strategy_specific_warmup_and_parameters(cfg):
     assert cfg.strategy_parameters == {"fast": cfg.fast, "slow": cfg.slow}
     assert momentum.warmup_bars == 25
     assert momentum.strategy_parameters == {"lookback": 24, "signal_threshold": 0.01}
+
+
+def test_experiment_id_changes_with_runtime_versions(cfg, monkeypatch):
+    from trading import provenance
+
+    before = provenance.reproducibility_fields(cfg, "data", None, {"mode": "backtest"})
+    monkeypatch.setattr(
+        provenance,
+        "runtime_versions",
+        lambda: {**before["runtime"], "backtrader": "0.0.0"},
+    )
+    after = provenance.reproducibility_fields(cfg, "data", None, {"mode": "backtest"})
+
+    assert before["runtime"]["python"]
+    assert before["experiment_id"] != after["experiment_id"]
