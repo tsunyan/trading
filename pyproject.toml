@@ -10,9 +10,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "backtrader==1.9.78.123",
   "httpx>=0.28,<0.29",
-  "numpy>=1.26,<2.4",
-  "pandas>=2.2,<3",
-  "pyarrow>=19,<24",
+  "numpy>=1.26,<2.6",
+  "pandas>=2.2,<4",
+  "pyarrow>=19,<26",
   "pydantic>=2.10,<3",
 ]
 
