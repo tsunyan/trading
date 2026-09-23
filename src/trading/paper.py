@@ -42,10 +42,30 @@ def _mark_price(units: int, quote: Quote) -> float:
 
 
 def _account_fingerprint(cfg: Settings, swap_schedule: pd.DataFrame | None) -> str:
-    schedule_hash = swap_fingerprint(swap_schedule)
-    if schedule_hash is None:
+    """Bind the account to the config and to whether it accrues swap, not to the rows.
+
+    Official swap events are published over time, so the schedule's contents are checked
+    separately as an append-only history (see _check_swap_history).
+    """
+    if swap_schedule is None:
         return cfg.fingerprint
-    return hashlib.sha256(f"{cfg.fingerprint}:{schedule_hash}".encode()).hexdigest()
+    return hashlib.sha256(f"{cfg.fingerprint}:swap-history".encode()).hexdigest()
+
+
+def _check_swap_history(state: dict, swap_schedule: pd.DataFrame) -> None:
+    """Accept newly appended swap rows; reject any change to rows already accepted."""
+    accepted = state.get("swap_history")
+    if accepted is None:
+        return
+    rows = accepted["rows"]
+    if (
+        len(swap_schedule) < rows
+        or swap_fingerprint(swap_schedule.iloc[:rows]) != accepted["sha256"]
+    ):
+        raise ValueError(
+            "swap schedule changed rows this paper account already accepted; "
+            "only appending new events is allowed"
+        )
 
 
 def paper_step(
@@ -115,6 +135,12 @@ def paper_step(
             state.setdefault("swap_pnl", 0.0)
             state.setdefault("last_swap_check", None)
             state.setdefault("position_opened_at", None)
+            if swap_schedule is not None:
+                _check_swap_history(state, swap_schedule)
+                state["swap_history"] = {
+                    "rows": len(swap_schedule),
+                    "sha256": swap_fingerprint(swap_schedule),
+                }
             if state["last_signal"] and pd.Timestamp(signal_id) < pd.Timestamp(
                 state["last_signal"]
             ):

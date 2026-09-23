@@ -96,8 +96,28 @@ def test_paper_swap_is_applied_once_and_bound_to_database(bars, cfg, tmp_path):
 
     changed = schedule.copy()
     changed["long_jpy_per_10k"] = 101
-    with pytest.raises(ValueError, match="different config"):
+    with pytest.raises(ValueError, match="already accepted"):
         paper_step(bars, final_quote, cfg, path, final_quote.timestamp, changed)
+    with pytest.raises(ValueError, match="different config"):
+        paper_step(bars, final_quote, cfg, path, final_quote.timestamp)
+
+
+def test_paper_swap_history_accepts_newly_published_events(bars, cfg, tmp_path):
+    entry_time = bars.timestamp.iloc[2] + pd.Timedelta(hours=1, seconds=1)
+    first_event = entry_time + pd.Timedelta(seconds=2)
+    schedule = validate_swap_schedule(swap_schedule(cfg, first_event, long=100), cfg)
+    quote = Quote(symbol=cfg.symbol, bid=152, ask=152.02, status="OPEN", timestamp=entry_time)
+    path = tmp_path / "swap-append.sqlite"
+    assert paper_step(bars, quote, cfg, path, entry_time, schedule)["action"] == "buy"
+
+    # The next official event is published after the account was created.
+    second_event = first_event + pd.Timedelta(seconds=2)
+    extended = pd.concat([schedule, swap_schedule(cfg, second_event, long=100)], ignore_index=True)
+    later = quote.model_copy(update={"timestamp": entry_time + timedelta(seconds=5)})
+    result = paper_step(bars, later, cfg, path, later.timestamp, extended)
+
+    assert result["swap_credit_jpy"] == pytest.approx(20)
+    assert result["state"]["swap_history"]["rows"] == 2
 
 
 def test_swap_schedule_rejects_non_fx_config():
