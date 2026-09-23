@@ -254,3 +254,54 @@ def test_folds_do_not_require_a_second_warm_up_in_the_active_period(cfg):
 
     assert [fold["evaluation_bars"] for fold in folds] == [14, 13, 13]
     assert all(len(fold["frame"]) == 40 + fold["evaluation_bars"] for fold in folds)
+
+
+def test_benchmark_swap_accrues_through_each_candle_close(cfg):
+    frame = evaluation_bars(cfg, count=6)
+    inside_last_candle = frame.timestamp.iloc[-1] + pd.Timedelta(minutes=30)
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [inside_last_candle],
+            "symbol": [cfg.symbol],
+            "long_jpy_per_10k": [100.0],
+            "short_jpy_per_10k": [-100.0],
+            "days": [1],
+        }
+    )
+
+    result = buy_and_hold_benchmark(frame, cfg, frame.timestamp.iloc[0], schedule)
+
+    assert result["swap_pnl_jpy"] == pytest.approx(result["units"] / 10_000 * 100)
+
+
+def test_failed_comparison_leaves_no_output_and_can_be_retried(cfg, tmp_path):
+    momentum = cfg.model_copy(update={"strategy": "momentum", "lookback": 2})
+    path = tmp_path / "comparison"
+
+    with pytest.raises(ValueError, match="greater than 1"):
+        save_comparison(evaluation_bars(cfg), [cfg, momentum], path, stress_multiplier=1)
+
+    assert list(tmp_path.iterdir()) == []
+    save_comparison(evaluation_bars(cfg), [cfg, momentum], path)
+    assert (path / "report.json").exists()
+
+
+def test_git_state_is_captured_once_before_comparison_artifacts(cfg, tmp_path, monkeypatch):
+    from trading import evaluation
+
+    calls = []
+
+    def fake_git_state():
+        calls.append(sorted(p.name for p in tmp_path.iterdir()))
+        return {"git_commit": "abc", "git_dirty": False}
+
+    monkeypatch.setattr(evaluation, "git_state", fake_git_state)
+    momentum = cfg.model_copy(update={"strategy": "momentum", "lookback": 2})
+    path = tmp_path / "comparison"
+
+    save_comparison(evaluation_bars(cfg), [cfg, momentum], path)
+
+    assert calls == [[]]
+    for child in ("01-sma_cross", "02-momentum"):
+        child_report = json.loads((path / child / "report.json").read_text(encoding="utf-8"))
+        assert child_report["git_dirty"] is False

@@ -126,6 +126,9 @@ def paper_step(
                 if quote.timestamp == previous:
                     connection.execute("ROLLBACK")
                     return {"mode": "paper", "action": "duplicate_quote", "state": state}
+            # Completed bars use the earlier clock; carry runs to when the fill actually
+            # happens, which is the later of the two observations.
+            fill_time = latest_observation
             swap_credit = 0.0
             if state["units"] and swap_schedule is not None:
                 start_values = [
@@ -133,11 +136,11 @@ def paper_step(
                     for value in (state["last_swap_check"], state["position_opened_at"])
                     if value is not None
                 ]
-                swap_start = max(start_values) if start_values else completion_boundary
+                swap_start = max(start_values) if start_values else fill_time
                 swap_credit = swap_credit_between(
                     swap_schedule,
                     swap_start,
-                    completion_boundary,
+                    fill_time,
                     state["units"],
                 )
                 state["cash"] += swap_credit
@@ -181,12 +184,13 @@ def paper_step(
                 state["cash"] -= units * price + fee
                 state["units"] += units
                 state["commission"] += fee
-                state["position_opened_at"] = (
-                    quote.timestamp.isoformat() if state["units"] else None
-                )
+                state["position_opened_at"] = fill_time.isoformat() if state["units"] else None
             state["last_signal"] = signal_id
             state["last_quote"] = quote.timestamp.isoformat()
-            state["last_swap_check"] = completion_boundary.isoformat()
+            # Never move the accrual cursor backwards, or an event would be credited twice.
+            previous_check = state["last_swap_check"]
+            if previous_check is None or fill_time > pd.Timestamp(previous_check):
+                state["last_swap_check"] = fill_time.isoformat()
             mark_price = _mark_price(state["units"], quote)
             state["equity"] = state["cash"] + state["units"] * mark_price
             state["peak"] = max(state["peak"], state["equity"])

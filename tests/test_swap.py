@@ -108,3 +108,18 @@ def test_swap_schedule_rejects_non_fx_config():
 
     with pytest.raises(ValueError, match="FX"):
         validate_swap_schedule(schedule, equity_cfg)
+
+
+def test_paper_swap_accrues_to_the_observation_time_not_the_older_quote(bars, cfg, tmp_path):
+    entry_time = bars.timestamp.iloc[2] + pd.Timedelta(hours=1, seconds=1)
+    event_time = entry_time + pd.Timedelta(seconds=2)
+    schedule = validate_swap_schedule(swap_schedule(cfg, event_time, long=100, days=2), cfg)
+    quote = Quote(symbol=cfg.symbol, bid=152, ask=152.02, status="OPEN", timestamp=entry_time)
+    path = tmp_path / "swap-clock.sqlite"
+    assert paper_step(bars, quote, cfg, path, entry_time, schedule)["action"] == "buy"
+
+    # The quote predates the swap event, but the position was still held when observed.
+    older_quote = quote.model_copy(update={"timestamp": entry_time + timedelta(seconds=1)})
+    observed = paper_step(bars, older_quote, cfg, path, entry_time + timedelta(seconds=5), schedule)
+
+    assert observed["swap_credit_jpy"] == pytest.approx(10)

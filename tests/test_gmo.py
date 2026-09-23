@@ -74,3 +74,16 @@ def test_side_columns_must_substantiate_mid_prices(cfg, bars):
     sided.loc[2, "close"] += 0.5
     with pytest.raises(ValueError, match="midpoint"):
         validate_bars(sided, cfg)
+
+
+def test_each_side_must_have_a_valid_ohlc_envelope(cfg, bars):
+    sided = bars.copy()
+    for column in ["open", "high", "low", "close"]:
+        sided[f"bid_{column}"] = sided[column] - 0.01
+        sided[f"ask_{column}"] = sided[column] + 0.01
+    # BID high below its open, offset on the ASK side so the mid candle stays valid.
+    sided.loc[2, "bid_high"] = sided.loc[2, "bid_open"] - 0.5
+    sided.loc[2, "ask_high"] += 0.49
+
+    with pytest.raises(ValueError, match="BID OHLC envelope"):
+        validate_bars(sided, cfg)

@@ -2,6 +2,8 @@ import hashlib
 import importlib.metadata
 import json
 import math
+import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,7 +12,7 @@ import pandas as pd
 from trading.backtest import completed_trades, run_backtest
 from trading.config import Settings
 from trading.data import validate_bars
-from trading.provenance import reproducibility_fields
+from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import entry_units, maintenance_margin_halt
 from trading.swap import swap_credit_between, swap_fingerprint, validate_swap_schedule
 
@@ -54,8 +56,10 @@ def buy_and_hold_benchmark(
     entry_fee = units * entry_price * cfg.commission_rate
     entry_time = frame.timestamp.iloc[entry_index]
     path = frame.iloc[entry_index:].copy()
+    # Timestamps label candle opens; close-marked equity carries swap through the close.
+    bar = pd.Timedelta(seconds=cfg.bar_seconds)
     swap_path = [
-        swap_credit_between(swap_schedule, entry_time, timestamp, units)
+        swap_credit_between(swap_schedule, entry_time, timestamp + bar, units)
         for timestamp in path.timestamp
     ]
     closes = path.close.astype(float)
@@ -78,7 +82,7 @@ def buy_and_hold_benchmark(
         exit_price = float(frame.close.iloc[-1]) - adverse_cost
     else:
         exit_time = path.timestamp.iloc[forced_exit]
-        total_swap = float(swap_path[forced_exit])
+        total_swap = swap_credit_between(swap_schedule, entry_time, exit_time, units)
         exit_price = float(path.open.iloc[forced_exit]) - adverse_cost
     exit_fee = units * exit_price * cfg.commission_rate
     liquidation_equity = (
@@ -437,8 +441,10 @@ def save_evaluation(
     stress_multiplier: float = 2.0,
     swap_schedule: pd.DataFrame | None = None,
     warmup_bars: int | None = None,
+    git: dict | None = None,
 ) -> dict:
     """Save an immutable chronological evaluation and its per-fold audit tables."""
+    git = git_state() if git is None else git
     frame = validate_bars(frame, cfg)
     report, equity, orders, trades = evaluate_strategy(
         frame,
@@ -474,6 +480,7 @@ def save_evaluation(
                 "stress_multiplier": stress_multiplier,
                 "warmup_bars": report["warmup_bars"],
             },
+            git,
         )
     )
     (directory / "config.json").write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
@@ -504,9 +511,45 @@ def save_comparison(
     ):
         raise ValueError("comparison candidates must share market, symbol, interval, and cash")
 
+    if directory.exists():
+        raise FileExistsError(f"comparison output already exists: {directory}")
     # Every candidate starts trading on the same bar so returns cover the same period.
     common_warmup = max(candidate.warmup_bars for candidate in candidates)
-    directory.mkdir(parents=True, exist_ok=False)
+    git = git_state()
+    # Build in a sibling staging directory and publish only after every candidate succeeds,
+    # so a failed run leaves nothing behind and the same output path can be retried.
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    staging = directory.with_name(f".{directory.name}.partial-{uuid.uuid4().hex}")
+    try:
+        report = _write_comparison(
+            frame,
+            candidates,
+            staging,
+            fold_count=fold_count,
+            stress_multiplier=stress_multiplier,
+            swap_schedule=swap_schedule,
+            common_warmup=common_warmup,
+            git=git,
+        )
+        staging.rename(directory)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return report
+
+
+def _write_comparison(
+    frame: pd.DataFrame,
+    candidates: list[Settings],
+    directory: Path,
+    *,
+    fold_count: int,
+    stress_multiplier: float,
+    swap_schedule: pd.DataFrame | None,
+    common_warmup: int,
+    git: dict,
+) -> dict:
+    directory.mkdir()
     rows = []
     for number, candidate in enumerate(candidates, start=1):
         name = f"{number:02d}-{candidate.strategy}"
@@ -518,6 +561,7 @@ def save_comparison(
             stress_multiplier=stress_multiplier,
             swap_schedule=swap_schedule,
             warmup_bars=common_warmup,
+            git=git,
         )
         baseline = report["scenarios"]["baseline"]
         stressed = report["scenarios"]["stressed"]

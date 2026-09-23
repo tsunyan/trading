@@ -46,6 +46,11 @@ def validate_bars(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
             raise ValueError("BID/ASK OHLC contains non-finite values")
         if (frame[SIDE_PRICE_COLUMNS] <= 0).any().any():
             raise ValueError("BID/ASK OHLC prices must be positive")
+        for side in ("bid", "ask"):
+            high, low = frame[f"{side}_high"], frame[f"{side}_low"]
+            others = frame[[f"{side}_open", f"{side}_close"]]
+            if (high < others.max(axis=1)).any() or (low > others.min(axis=1)).any():
+                raise ValueError(f"invalid {side.upper()} OHLC envelope")
         for column in PRICE_COLUMNS:
             if (frame[f"ask_{column}"] < frame[f"bid_{column}"]).any():
                 raise ValueError("crossed BID/ASK OHLC")

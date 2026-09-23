@@ -47,18 +47,28 @@ def runtime_versions() -> dict:
     return versions
 
 
+def git_state() -> dict:
+    """Commit and dirty flag of the checkout. Take it before writing run artifacts, or the
+    run's own output files would mark the worktree dirty."""
+    root = Path(__file__).resolve().parents[2]
+    git_status = _git_output(root, "status", "--porcelain", "--untracked-files=all")
+    return {
+        "git_commit": _git_output(root, "rev-parse", "HEAD"),
+        "git_dirty": bool(git_status) if git_status is not None else None,
+    }
+
+
 def reproducibility_fields(
     cfg: Settings,
     data_sha256: str,
     swap_sha256: str | None,
     run_parameters: dict,
+    git: dict | None = None,
 ) -> dict:
     """Identity covers inputs, code, runtime and how the run was made (mode, folds, ...)."""
-    root = Path(__file__).resolve().parents[2]
     code_sha256 = source_sha256()
     runtime = runtime_versions()
-    git_commit = _git_output(root, "rev-parse", "HEAD")
-    git_status = _git_output(root, "status", "--porcelain", "--untracked-files=all")
+    git = git_state() if git is None else git
     identity = ":".join(
         [
             data_sha256,
@@ -74,6 +84,5 @@ def reproducibility_fields(
         "run_parameters": run_parameters,
         "runtime": runtime,
         "code_sha256": code_sha256,
-        "git_commit": git_commit,
-        "git_dirty": bool(git_status) if git_status is not None else None,
+        **git,
     }

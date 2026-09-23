@@ -10,7 +10,7 @@ import pandas as pd
 
 from trading.config import Settings
 from trading.data import validate_bars
-from trading.provenance import reproducibility_fields
+from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import (
     drawdown_halt,
     entry_units,
@@ -345,6 +345,7 @@ def save_run(
     swap_schedule: pd.DataFrame | None = None,
 ) -> dict:
     """Archive bars, equity, orders, fills and trades. Refuses to overwrite a run."""
+    git = git_state()
     report, equity, orders = run_backtest(frame, cfg, swap_schedule=swap_schedule)
     trades = completed_trades(orders[orders.status == "Completed"])
     directory.mkdir(parents=True, exist_ok=False)
@@ -369,6 +370,7 @@ def save_run(
             report["data_sha256"],
             report.get("swap_sha256"),
             {"mode": "backtest"},
+            git,
         )
     )
     (directory / "config.json").write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
