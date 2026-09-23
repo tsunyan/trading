@@ -159,3 +159,55 @@ def test_report_does_not_overwrite_existing_run(bars, cfg, tmp_path):
     assert (path / "trades.csv").exists()
     with pytest.raises(FileExistsError):
         save_run(bars, cfg, path)
+
+
+def rising_bars(cfg, count=10):
+    prices = [100.0 + index for index in range(count)]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-06", periods=count, freq="h", tz="UTC"),
+            "symbol": cfg.symbol,
+            "open": prices,
+            "high": [price + 0.5 for price in prices],
+            "low": [price - 0.5 for price in prices],
+            "close": prices,
+            "volume": 0,
+        }
+    )
+
+
+def test_maintenance_margin_is_tested_at_the_adverse_intrabar_extreme(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 0.9, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    bars = rising_bars(cfg)
+    bars.loc[7, "low"] = 95.0  # deep intrabar dip; the close is unchanged
+
+    report, equity, _ = run_backtest(bars, leveraged)
+
+    assert report["liquidation_reason"] == "maintenance_margin"
+    assert equity.halted.iloc[7]
+    assert not equity.halted.iloc[6]
+
+
+def test_strategy_swap_is_marked_through_each_candle_close_once(cfg):
+    bars = rising_bars(cfg)
+    events = [bars.timestamp.iloc[5], bars.timestamp.iloc[-1]]
+    schedule = pd.DataFrame(
+        {
+            "timestamp": [time + pd.Timedelta(minutes=30) for time in events],
+            "symbol": cfg.symbol,
+            "long_jpy_per_10k": 100.0,
+            "short_jpy_per_10k": -100.0,
+            "days": 1,
+        }
+    )
+
+    report, equity, _ = run_backtest(bars, cfg, swap_schedule=schedule)
+
+    units = int(equity.units.iloc[-1])
+    assert units > 0
+    per_event = units / 10_000 * 100
+    # The event inside the final candle counts, and neither event is counted twice.
+    assert report["swap_pnl_jpy"] == pytest.approx(2 * per_event)
+    assert equity.swap_pnl.iloc[5] == pytest.approx(per_event)

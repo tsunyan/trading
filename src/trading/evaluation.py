@@ -63,6 +63,8 @@ def buy_and_hold_benchmark(
         for timestamp in path.timestamp
     ]
     closes = path.close.astype(float)
+    # A long is held through each candle, so its margin is tested at the candle low.
+    lows = path.low.astype(float)
     equities = (
         cfg.initial_cash
         - entry_fee
@@ -71,9 +73,9 @@ def buy_and_hold_benchmark(
     )
     forced_exit = None
     for position in range(len(path) - 1):
-        if maintenance_margin_halt(
-            units, float(equities.iloc[position]), float(closes.iloc[position]), cfg
-        ):
+        low = float(lows.iloc[position])
+        low_equity = float(equities.iloc[position]) + units * (low - float(closes.iloc[position]))
+        if maintenance_margin_halt(units, low_equity, low, cfg):
             forced_exit = position + 1
             break
     if forced_exit is None:

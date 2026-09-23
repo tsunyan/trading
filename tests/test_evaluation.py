@@ -207,6 +207,8 @@ def test_leveraged_buy_and_hold_is_liquidated_on_maintenance_margin(cfg):
         {
             "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
             "open": prices,
+            "high": prices,
+            "low": prices,
             "close": prices,
         }
     )
@@ -305,3 +307,26 @@ def test_git_state_is_captured_once_before_comparison_artifacts(cfg, tmp_path, m
     for child in ("01-sma_cross", "02-momentum"):
         child_report = json.loads((path / child / "report.json").read_text(encoding="utf-8"))
         assert child_report["git_dirty"] is False
+
+
+def test_buy_and_hold_margin_is_tested_at_the_candle_low(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 1.0, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    prices = [100.0] * 8
+    lows = list(prices)
+    lows[4] = 93.0  # breaches maintenance intrabar, then recovers by the close
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "open": prices,
+            "high": prices,
+            "low": lows,
+            "close": prices,
+        }
+    )
+
+    result = buy_and_hold_benchmark(frame, leveraged, frame.timestamp.iloc[1])
+
+    assert result["liquidation_reason"] == "maintenance_margin"
+    assert result["forced_exit_timestamp"] == frame.timestamp.iloc[5].isoformat()

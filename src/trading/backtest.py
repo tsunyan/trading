@@ -142,7 +142,7 @@ def performance_metrics(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
 class ResearchStrategy(bt.Strategy):
     """Directional research harness: decide on a closed bar, fill at the next open."""
 
-    params = (("cfg", None), ("active_start", None))
+    params = (("cfg", None), ("active_start", None), ("swap_schedule", None))
 
     def __init__(self):
         self.cfg = self.p.cfg
@@ -155,6 +155,7 @@ class ResearchStrategy(bt.Strategy):
         self.peak = self.cfg.initial_cash
         self.halted = False
         self.liquidation_reason = None
+        self.unbooked_swap = 0.0
 
     def timestamp(self):
         """Current bar time as UTC ISO; the feed index is tz-naive UTC."""
@@ -178,6 +179,22 @@ class ResearchStrategy(bt.Strategy):
             self.pending = None
             self.pending_reason = None
 
+    def _unbooked_swap(self) -> float:
+        """Carry from the broker's last booking to this candle's close.
+
+        Backtrader books carry at the start of each bar, before that bar's orders fill, so it
+        only reaches the candle open. Equity is marked at the close, so the remainder of the
+        candle is added here; the broker books the same interval on the next bar.
+        """
+        size = int(self.position.size)
+        if not size or self.p.swap_schedule is None or self.position.datetime is None:
+            return 0.0
+        start = pd.Timestamp(self.position.datetime).tz_localize("UTC")
+        close = pd.Timestamp(self.data.datetime.datetime(0)).tz_localize("UTC") + pd.Timedelta(
+            seconds=self.cfg.bar_seconds
+        )
+        return swap_credit_between(self.p.swap_schedule, start, close, size)
+
     def submit(self, order, reason: str):
         self.pending = order
         self.pending_reason = reason
@@ -188,10 +205,16 @@ class ResearchStrategy(bt.Strategy):
         current = self.data.datetime.datetime(0).replace(tzinfo=UTC)
         if self.active_start is not None and current < self.active_start:
             return
-        equity = self.broker.getvalue()
+        self.unbooked_swap = self._unbooked_swap()
+        equity = self.broker.getvalue() + self.unbooked_swap
         self.peak = max(self.peak, equity)
+        # The position is held through the whole candle, so test the margin at its adverse
+        # extreme (low for longs, high for shorts), not only at the close.
+        size = self.position.size
+        close = float(self.data.close[0])
+        adverse = float(self.data.low[0]) if size > 0 else float(self.data.high[0])
         margin_halt = maintenance_margin_halt(
-            self.position.size, equity, float(self.data.close[0]), self.cfg
+            size, equity + size * (adverse - close), adverse, self.cfg
         )
         drawdown = drawdown_halt(equity, self.peak, self.cfg)
         if margin_halt:
@@ -201,7 +224,7 @@ class ResearchStrategy(bt.Strategy):
             self.halted = True
             self.liquidation_reason = self.liquidation_reason or "drawdown"
         margin = margin_metrics(self.position.size, equity, float(self.data.close[0]), self.cfg)
-        swap_pnl = -float(self.broker.d_credit.get(self.data, 0.0))
+        swap_pnl = -float(self.broker.d_credit.get(self.data, 0.0)) + self.unbooked_swap
         self.equity_rows.append(
             {
                 "timestamp": self.timestamp(),
@@ -267,6 +290,7 @@ def run_backtest(
         ResearchStrategy,
         cfg=cfg,
         active_start=active_start_utc.to_pydatetime() if active_start_utc is not None else None,
+        swap_schedule=swap_schedule,
     )
     engine.broker.setcash(cfg.initial_cash)
     # Keep carry separate from execution commission in orders and completed trades.
@@ -307,7 +331,8 @@ def run_backtest(
     )
     fills = orders[orders.status == "Completed"]
     trades = completed_trades(fills)
-    final_equity = float(engine.broker.getvalue())
+    # Include carry inside the final candle, which the broker would only book on a next bar.
+    final_equity = float(engine.broker.getvalue()) + strategy.unbooked_swap
     report = {
         "mode": "backtest",
         "symbol": cfg.symbol,
@@ -319,7 +344,9 @@ def run_backtest(
         "max_drawdown_pct": float(equity.drawdown.max() * 100),
         "fills": len(fills),
         "commission_jpy": float(fills.commission.sum()),
-        "swap_pnl_jpy": -float(engine.broker.d_credit.get(strategy.data, 0.0)),
+        "swap_pnl_jpy": (
+            -float(engine.broker.d_credit.get(strategy.data, 0.0)) + strategy.unbooked_swap
+        ),
         "open_units": int(strategy.position.size),
         "pending_orders": len(engine.broker.get_orders_open()),
         "halted": bool(strategy.halted),
