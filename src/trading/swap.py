@@ -1,0 +1,68 @@
+import hashlib
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from trading.config import Settings
+
+SWAP_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "long_jpy_per_10k",
+    "short_jpy_per_10k",
+    "days",
+]
+
+
+def validate_swap_schedule(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
+    """Validate timestamped, direction-specific swap credits for 10,000 units."""
+    missing = set(SWAP_COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f"missing swap columns: {sorted(missing)}")
+    frame = frame[SWAP_COLUMNS].copy()
+    if frame.empty:
+        return frame
+    if set(frame.symbol.astype(str)) != {cfg.symbol}:
+        raise ValueError("swap symbol does not match configuration")
+    times = [pd.Timestamp(value) for value in frame.timestamp]
+    if any(pd.isna(value) or value.tzinfo is None for value in times):
+        raise ValueError("swap timestamps must have explicit timezone offsets")
+    frame["timestamp"] = pd.to_datetime(times, utc=True)
+    if frame.timestamp.duplicated().any() or not frame.timestamp.is_monotonic_increasing:
+        raise ValueError("swap timestamps must be unique and strictly increasing")
+    for column in ("long_jpy_per_10k", "short_jpy_per_10k", "days"):
+        frame[column] = pd.to_numeric(frame[column], errors="raise")
+    if not np.isfinite(frame[["long_jpy_per_10k", "short_jpy_per_10k", "days"]].to_numpy()).all():
+        raise ValueError("swap schedule contains non-finite values")
+    if (frame.days <= 0).any() or (frame.days % 1 != 0).any():
+        raise ValueError("swap days must be positive integers")
+    frame["days"] = frame.days.astype(int)
+    return frame.reset_index(drop=True)
+
+
+def read_swap_schedule(path: Path, cfg: Settings) -> pd.DataFrame:
+    frame = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
+    return validate_swap_schedule(frame, cfg)
+
+
+def swap_credit_between(
+    schedule: pd.DataFrame | None,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    units: int,
+) -> float:
+    """Return signed JPY carry for events in the half-open holding interval (start, end]."""
+    if schedule is None or schedule.empty or not units or end <= start:
+        return 0.0
+    events = schedule.loc[(schedule.timestamp > start) & (schedule.timestamp <= end)]
+    if events.empty:
+        return 0.0
+    column = "long_jpy_per_10k" if units > 0 else "short_jpy_per_10k"
+    return float(abs(units) / 10_000 * events[column].sum())
+
+
+def swap_fingerprint(schedule: pd.DataFrame | None) -> str | None:
+    if schedule is None:
+        return None
+    return hashlib.sha256(schedule.to_csv(index=False).encode()).hexdigest()
