@@ -17,6 +17,8 @@ SWAP_COLUMNS = [
 
 def validate_swap_schedule(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
     """Validate timestamped, direction-specific swap credits for 10,000 units."""
+    if cfg.market != "fx":
+        raise ValueError("swap schedules apply to FX configurations only")
     missing = set(SWAP_COLUMNS) - set(frame.columns)
     if missing:
         raise ValueError(f"missing swap columns: {sorted(missing)}")

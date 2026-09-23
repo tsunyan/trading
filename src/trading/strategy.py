@@ -47,7 +47,8 @@ def margin_metrics(units: int, equity: float, price: float, cfg: Settings) -> di
     required_margin = gross_notional / cfg.max_leverage
     return {
         "gross_notional": gross_notional,
-        "effective_leverage": gross_notional / equity if equity > 0 else float("inf"),
+        # None rather than infinity when equity is exhausted, so reports stay strict JSON.
+        "effective_leverage": gross_notional / equity if equity > 0 else None,
         "required_margin": required_margin,
         "available_margin": equity - required_margin,
         "margin_ratio": equity / required_margin if required_margin else None,

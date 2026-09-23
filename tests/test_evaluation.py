@@ -1,8 +1,11 @@
+import json
+
 import pandas as pd
 import pytest
 
 from trading.evaluation import (
     _evidence_gate,
+    buy_and_hold_benchmark,
     chronological_folds,
     evaluate_strategy,
     save_comparison,
@@ -166,3 +169,81 @@ def test_fixed_candidate_comparison_saves_full_results(cfg, tmp_path):
 
     with pytest.raises(ValueError, match="unique"):
         save_comparison(evaluation_bars(cfg), [cfg, cfg], tmp_path / "duplicate")
+
+
+def test_evidence_gate_requires_stressed_fold_consistency(cfg):
+    frame, folds, baseline, stressed = gate_inputs()
+    stressed_folds = {**folds, "profitable_folds": 1}
+
+    verdict = _evidence_gate(frame, cfg, folds, stressed_folds, baseline, stressed)
+
+    assert verdict["status"] == "rejected"
+    assert verdict["reason_codes"] == ["insufficient_stressed_profitable_folds"]
+
+
+def test_evidence_gate_measures_calendar_days_from_evaluation_start(cfg):
+    frame, folds, baseline, stressed = gate_inputs()
+
+    verdict = _evidence_gate(
+        frame,
+        cfg,
+        folds,
+        folds,
+        baseline,
+        stressed,
+        pd.Timestamp("2025-12-01", tz="UTC"),
+    )
+
+    assert verdict["evidence_checks"]["calendar_days"]["actual"] == pytest.approx(31)
+    assert verdict["reason_codes"] == ["calendar_days_below_minimum"]
+
+
+def test_leveraged_buy_and_hold_is_liquidated_on_maintenance_margin(cfg):
+    leveraged = cfg.model_copy(
+        update={"allocation": 1.0, "max_leverage": 10.0, "max_units": 100_000}
+    )
+    prices = [100.0] * 5 + [94.0, 94.0, 90.0, 90.0, 90.0]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "open": prices,
+            "close": prices,
+        }
+    )
+
+    result = buy_and_hold_benchmark(frame, leveraged, frame.timestamp.iloc[1])
+
+    assert result["liquidation_reason"] == "maintenance_margin"
+    assert result["forced_exit_timestamp"] == frame.timestamp.iloc[6].isoformat()
+    assert result["marked_final_equity_jpy"] == pytest.approx(
+        result["liquidation_final_equity_jpy"]
+    )
+
+
+def test_experiment_id_distinguishes_evaluation_settings(cfg, tmp_path):
+    bars = evaluation_bars(cfg)
+
+    two = save_evaluation(bars, cfg, tmp_path / "two", fold_count=2)
+    three = save_evaluation(bars, cfg, tmp_path / "three", fold_count=3)
+
+    assert two["run_parameters"]["fold_count"] == 2
+    assert two["experiment_id"] != three["experiment_id"]
+
+
+def test_comparison_evaluates_candidates_over_one_shared_period(cfg, tmp_path):
+    longer_sma = cfg.model_copy(update={"fast": 2, "slow": 6})
+    momentum = cfg.model_copy(update={"strategy": "momentum", "lookback": 2})
+    path = tmp_path / "comparison"
+
+    report = save_comparison(evaluation_bars(cfg), [longer_sma, momentum], path)
+
+    candidate_reports = [
+        json.loads((path / row["candidate"] / "report.json").read_text(encoding="utf-8"))
+        for row in report["candidates"]
+    ]
+    assert report["warmup_bars"] == 6
+    assert {item["warmup_bars"] for item in candidate_reports} == {6}
+    assert len({item["active_start"] for item in candidate_reports}) == 1
+
+    with pytest.raises(ValueError, match="shorter"):
+        evaluate_strategy(evaluation_bars(cfg), longer_sma, warmup_bars=3)

@@ -4,6 +4,7 @@ import httpx
 import pandas as pd
 import pytest
 
+from trading.data import validate_bars
 from trading.gmo import GmoPublic
 
 
@@ -61,3 +62,15 @@ def test_api_error_is_not_empty_success():
 def test_private_endpoint_not_available():
     with httpx.Client() as client, pytest.raises(ValueError, match="unsupported"):
         GmoPublic(client).get("order")
+
+
+def test_side_columns_must_substantiate_mid_prices(cfg, bars):
+    sided = bars.copy()
+    for column in ["open", "high", "low", "close"]:
+        sided[f"bid_{column}"] = sided[column] - 0.01
+        sided[f"ask_{column}"] = sided[column] + 0.01
+    validate_bars(sided, cfg)
+
+    sided.loc[2, "close"] += 0.5
+    with pytest.raises(ValueError, match="midpoint"):
+        validate_bars(sided, cfg)

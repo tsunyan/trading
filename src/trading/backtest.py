@@ -368,6 +368,7 @@ def save_run(
             cfg,
             report["data_sha256"],
             report.get("swap_sha256"),
+            {"mode": "backtest"},
         )
     )
     (directory / "config.json").write_text(cfg.model_dump_json(indent=2), encoding="utf-8")

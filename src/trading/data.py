@@ -49,6 +49,10 @@ def validate_bars(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
         for column in PRICE_COLUMNS:
             if (frame[f"ask_{column}"] < frame[f"bid_{column}"]).any():
                 raise ValueError("crossed BID/ASK OHLC")
+            # The archived sides must substantiate the mid prices the strategy trades on.
+            midpoint = (frame[f"bid_{column}"] + frame[f"ask_{column}"]) / 2
+            if not np.isclose(frame[column], midpoint, rtol=1e-9, atol=1e-9).all():
+                raise ValueError("mid OHLC does not match the BID/ASK midpoint")
     if "received_at" in frame.columns:
         received = [pd.Timestamp(value) for value in frame.received_at]
         if any(pd.isna(value) or value.tzinfo is None for value in received):

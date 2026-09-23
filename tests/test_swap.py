@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from trading.backtest import run_backtest
+from trading.config import Settings
 from trading.gmo import Quote
 from trading.paper import paper_step
 from trading.swap import swap_credit_between, validate_swap_schedule
@@ -97,3 +98,13 @@ def test_paper_swap_is_applied_once_and_bound_to_database(bars, cfg, tmp_path):
     changed["long_jpy_per_10k"] = 101
     with pytest.raises(ValueError, match="different config"):
         paper_step(bars, final_quote, cfg, path, final_quote.timestamp, changed)
+
+
+def test_swap_schedule_rejects_non_fx_config():
+    equity_cfg = Settings(
+        market="jp_equity", symbol="7203", bar_seconds=86400, fast=2, slow=3, lot_size=100
+    )
+    schedule = swap_schedule(equity_cfg, pd.Timestamp("2025-01-06T04:00Z"))
+
+    with pytest.raises(ValueError, match="FX"):
+        validate_swap_schedule(schedule, equity_cfg)

@@ -1,6 +1,8 @@
+import json
+
 import pytest
 
-from trading.strategy import signal_direction
+from trading.strategy import margin_metrics, signal_direction
 
 
 @pytest.mark.parametrize(
@@ -37,3 +39,10 @@ def test_fixed_return_hypotheses_respect_threshold_and_short_setting(cfg):
 
     assert signal_direction([100.0, 100.0, 101.0], cfg) == 0
     assert signal_direction([100.0, 100.0, 97.0], cfg) == 0
+
+
+def test_margin_metrics_stay_json_safe_when_equity_is_exhausted(cfg):
+    metrics = margin_metrics(100, 0.0, 150.0, cfg)
+
+    assert metrics["effective_leverage"] is None
+    json.dumps(metrics, allow_nan=False)

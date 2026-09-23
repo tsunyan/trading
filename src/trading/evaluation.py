@@ -11,7 +11,7 @@ from trading.backtest import completed_trades, run_backtest
 from trading.config import Settings
 from trading.data import validate_bars
 from trading.provenance import reproducibility_fields
-from trading.strategy import entry_units
+from trading.strategy import entry_units, maintenance_margin_halt
 from trading.swap import swap_credit_between, swap_fingerprint, validate_swap_schedule
 
 MIN_EVALUATION_BARS = {"fx": 2_000, "jp_equity": 500}
@@ -39,7 +39,11 @@ def buy_and_hold_benchmark(
     active_start: pd.Timestamp,
     swap_schedule: pd.DataFrame | None = None,
 ) -> dict:
-    """Buy once at the strategy's first executable open and report marked/liquidated value."""
+    """Buy once at the strategy's first executable open and report marked/liquidated value.
+
+    Like the strategy account, the position is force-closed at the next open once the
+    maintenance-margin rule trips, and the account stays flat afterwards.
+    """
     active_matches = frame.index[frame.timestamp == active_start].tolist()
     if len(active_matches) != 1 or active_matches[0] + 1 >= len(frame):
         raise ValueError("benchmark active_start must leave a next bar")
@@ -54,20 +58,36 @@ def buy_and_hold_benchmark(
         swap_credit_between(swap_schedule, entry_time, timestamp, units)
         for timestamp in path.timestamp
     ]
+    closes = path.close.astype(float)
     equities = (
         cfg.initial_cash
         - entry_fee
-        + units * (path.close.astype(float) - entry_price)
+        + units * (closes - entry_price)
         + pd.Series(swap_path, index=path.index)
     )
-    peaks = equities.cummax().clip(lower=cfg.initial_cash)
-    marked_equity = float(equities.iloc[-1])
-    total_swap = float(swap_path[-1]) if swap_path else 0.0
-    exit_price = float(frame.close.iloc[-1]) - adverse_cost
+    forced_exit = None
+    for position in range(len(path) - 1):
+        if maintenance_margin_halt(
+            units, float(equities.iloc[position]), float(closes.iloc[position]), cfg
+        ):
+            forced_exit = position + 1
+            break
+    if forced_exit is None:
+        exit_time = None
+        total_swap = float(swap_path[-1]) if swap_path else 0.0
+        exit_price = float(frame.close.iloc[-1]) - adverse_cost
+    else:
+        exit_time = path.timestamp.iloc[forced_exit]
+        total_swap = float(swap_path[forced_exit])
+        exit_price = float(path.open.iloc[forced_exit]) - adverse_cost
     exit_fee = units * exit_price * cfg.commission_rate
     liquidation_equity = (
         cfg.initial_cash + units * (exit_price - entry_price) - entry_fee - exit_fee + total_swap
     )
+    if forced_exit is not None:
+        equities.iloc[forced_exit:] = liquidation_equity
+    peaks = equities.cummax().clip(lower=cfg.initial_cash)
+    marked_equity = float(equities.iloc[-1])
     return {
         "entry_timestamp": entry_time.isoformat(),
         "entry_price": entry_price,
@@ -76,6 +96,8 @@ def buy_and_hold_benchmark(
         "initial_effective_leverage": units * entry_price / cfg.initial_cash,
         "entry_commission_jpy": entry_fee,
         "swap_pnl_jpy": total_swap,
+        "forced_exit_timestamp": exit_time.isoformat() if exit_time is not None else None,
+        "liquidation_reason": "maintenance_margin" if exit_time is not None else None,
         "marked_final_equity_jpy": marked_equity,
         "marked_return_pct": (marked_equity / cfg.initial_cash - 1) * 100,
         "liquidation_final_equity_jpy": liquidation_equity,
@@ -88,12 +110,13 @@ def chronological_folds(
     frame: pd.DataFrame,
     cfg: Settings,
     fold_count: int,
+    warmup_bars: int | None = None,
 ) -> list[dict]:
     """Split once in time; each independent fold receives only preceding warm-up bars."""
     frame = validate_bars(frame, cfg)
     if fold_count < 2:
         raise ValueError("fold_count must be at least 2")
-    warmup_bars = cfg.warmup_bars
+    warmup_bars = _resolve_warmup(cfg, warmup_bars)
     minimum_active_bars = warmup_bars + 2
     evaluation_bars = len(frame) - warmup_bars
     if evaluation_bars < fold_count * minimum_active_bars:
@@ -118,6 +141,15 @@ def chronological_folds(
         )
         cursor = stop
     return folds
+
+
+def _resolve_warmup(cfg: Settings, warmup_bars: int | None) -> int:
+    """A caller may extend warm-up to align candidates, never shorten the strategy's own."""
+    if warmup_bars is None:
+        return cfg.warmup_bars
+    if warmup_bars < cfg.warmup_bars:
+        raise ValueError("warmup_bars cannot be shorter than the strategy requires")
+    return warmup_bars
 
 
 def _cost_config(cfg: Settings, multiplier: float) -> Settings:
@@ -163,10 +195,11 @@ def _evidence_gate(
     stressed_folds: dict,
     baseline_continuous: dict,
     stressed_continuous: dict,
+    active_start: pd.Timestamp | None = None,
 ) -> dict:
-    coverage_days = float(
-        (frame.timestamp.iloc[-1] - frame.timestamp.iloc[0]).total_seconds() / 86_400
-    )
+    # Warm-up bars never trade, so they do not count toward the evaluated span.
+    evaluation_start = frame.timestamp.iloc[0] if active_start is None else active_start
+    coverage_days = float((frame.timestamp.iloc[-1] - evaluation_start).total_seconds() / 86_400)
     required_profitable_folds = math.ceil(baseline_folds["folds"] * 2 / 3)
     baseline_performance = baseline_continuous["performance"]
     evidence_checks = {
@@ -190,6 +223,9 @@ def _evidence_gate(
         "positive_baseline_continuous_return": baseline_continuous["return_pct"] > 0,
         "positive_stressed_continuous_return": stressed_continuous["return_pct"] > 0,
         "fold_consistency": baseline_folds["profitable_folds"] >= required_profitable_folds,
+        "stressed_fold_consistency": (
+            stressed_folds["profitable_folds"] >= required_profitable_folds
+        ),
         "baseline_drawdown_within_limit": (
             baseline_continuous["max_drawdown_pct"] <= cfg.max_drawdown * 100
             and baseline_folds["worst_max_drawdown_pct"] <= cfg.max_drawdown * 100
@@ -216,6 +252,7 @@ def _evidence_gate(
             "positive_baseline_continuous_return": "baseline_continuous_return_not_positive",
             "positive_stressed_continuous_return": "stressed_continuous_return_not_positive",
             "fold_consistency": "insufficient_profitable_folds",
+            "stressed_fold_consistency": "insufficient_stressed_profitable_folds",
             "baseline_drawdown_within_limit": "baseline_drawdown_limit_exceeded",
             "stressed_drawdown_within_limit": "stressed_drawdown_limit_exceeded",
             "no_baseline_halt": "baseline_halt_present",
@@ -242,20 +279,26 @@ def evaluate_strategy(
     fold_count: int = 3,
     stress_multiplier: float = 2.0,
     swap_schedule: pd.DataFrame | None = None,
+    warmup_bars: int | None = None,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Evaluate one fixed strategy across chronological folds and stressed costs."""
+    """Evaluate one fixed strategy across chronological folds and stressed costs.
+
+    warmup_bars may exceed the strategy's own need so that compared candidates share one
+    evaluated period; it may not be shorter.
+    """
     frame = validate_bars(frame, cfg)
     if swap_schedule is not None:
         swap_schedule = validate_swap_schedule(swap_schedule, cfg)
     if not math.isfinite(stress_multiplier) or stress_multiplier <= 1:
         raise ValueError("stress_multiplier must be finite and greater than 1")
-    fold_specs = chronological_folds(frame, cfg, fold_count)
+    warmup_bars = _resolve_warmup(cfg, warmup_bars)
+    fold_specs = chronological_folds(frame, cfg, fold_count, warmup_bars)
     scenarios = {"baseline": cfg, "stressed": _cost_config(cfg, stress_multiplier)}
     scenario_reports = {}
     equity_tables = []
     order_tables = []
     trade_tables = []
-    continuous_active_start = frame.timestamp.iloc[cfg.warmup_bars]
+    continuous_active_start = frame.timestamp.iloc[warmup_bars]
 
     for scenario, scenario_cfg in scenarios.items():
         cost_multiplier = 1.0 if scenario == "baseline" else stress_multiplier
@@ -350,6 +393,8 @@ def evaluate_strategy(
         "data_start": frame.timestamp.iloc[0].isoformat(),
         "data_end": frame.timestamp.iloc[-1].isoformat(),
         "bars": len(frame),
+        "warmup_bars": warmup_bars,
+        "active_start": continuous_active_start.isoformat(),
         "fold_count": fold_count,
         "stress_multiplier": stress_multiplier,
         "data_quality": interval_gap_report(frame, cfg),
@@ -361,6 +406,7 @@ def evaluate_strategy(
             scenario_reports["stressed"]["summary"],
             scenario_reports["baseline"]["continuous"],
             scenario_reports["stressed"]["continuous"],
+            continuous_active_start,
         ),
         "limitations": [
             "The strategy and parameters are fixed; this is not parameter optimization.",
@@ -388,6 +434,7 @@ def save_evaluation(
     fold_count: int = 3,
     stress_multiplier: float = 2.0,
     swap_schedule: pd.DataFrame | None = None,
+    warmup_bars: int | None = None,
 ) -> dict:
     """Save an immutable chronological evaluation and its per-fold audit tables."""
     frame = validate_bars(frame, cfg)
@@ -397,6 +444,7 @@ def save_evaluation(
         fold_count=fold_count,
         stress_multiplier=stress_multiplier,
         swap_schedule=swap_schedule,
+        warmup_bars=warmup_bars,
     )
     directory.mkdir(parents=True, exist_ok=False)
     frame.to_parquet(directory / "bars.parquet", index=False)
@@ -418,6 +466,12 @@ def save_evaluation(
             cfg,
             report["data_sha256"],
             report.get("swap_sha256"),
+            {
+                "mode": "chronological_evaluation",
+                "fold_count": fold_count,
+                "stress_multiplier": stress_multiplier,
+                "warmup_bars": report["warmup_bars"],
+            },
         )
     )
     (directory / "config.json").write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
@@ -448,6 +502,8 @@ def save_comparison(
     ):
         raise ValueError("comparison candidates must share market, symbol, interval, and cash")
 
+    # Every candidate starts trading on the same bar so returns cover the same period.
+    common_warmup = max(candidate.warmup_bars for candidate in candidates)
     directory.mkdir(parents=True, exist_ok=False)
     rows = []
     for number, candidate in enumerate(candidates, start=1):
@@ -459,6 +515,7 @@ def save_comparison(
             fold_count=fold_count,
             stress_multiplier=stress_multiplier,
             swap_schedule=swap_schedule,
+            warmup_bars=common_warmup,
         )
         baseline = report["scenarios"]["baseline"]
         stressed = report["scenarios"]["stressed"]
@@ -490,6 +547,7 @@ def save_comparison(
         "mode": "fixed_strategy_comparison",
         "symbol": candidates[0].symbol,
         "candidate_count": len(rows),
+        "warmup_bars": common_warmup,
         "fold_count": fold_count,
         "stress_multiplier": stress_multiplier,
         "candidates": rows,
