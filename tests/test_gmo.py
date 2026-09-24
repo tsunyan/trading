@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from trading.data import validate_bars
-from trading.gmo import GmoPublic
+from trading.gmo import GmoPublic, trading_date
 
 
 def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
@@ -75,6 +75,17 @@ def test_candles_start_at_the_first_published_trading_date(cfg):
         with pytest.raises(ValueError, match="trading-date range"):
             api.candles(cfg, date(2023, 10, 26), date(2023, 10, 27), now)
     assert set(requested) == {"20231027"}
+
+
+def test_candles_reject_a_trading_date_that_has_not_started(cfg):
+    requests = []
+    # 02:49 JST on 2026-09-25 still belongs to the 2026-09-24 trading date.
+    now = pd.Timestamp("2026-09-24T17:49Z").to_pydatetime()
+    with httpx.Client(transport=httpx.MockTransport(requests.append)) as client:
+        with pytest.raises(ValueError, match="current GMO trading date 2026-09-24"):
+            GmoPublic(client).candles(cfg, date(2026, 9, 1), date(2026, 9, 25), now)
+    assert trading_date(pd.Timestamp("2026-09-24T21:00Z").to_pydatetime()) == date(2026, 9, 25)
+    assert requests == []
 
 
 def test_api_error_is_not_empty_success():

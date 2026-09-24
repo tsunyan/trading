@@ -4,7 +4,6 @@ import sqlite3
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -12,7 +11,7 @@ from trading.backtest import save_run
 from trading.config import load_settings
 from trading.data import merge_bars, read_bars, sample_bars, write_bars
 from trading.evaluation import interval_gap_report, save_comparison, save_evaluation
-from trading.gmo import GmoPublic
+from trading.gmo import GmoPublic, trading_date
 from trading.paper import paper_status, paper_step
 from trading.swap import read_swap_schedule
 
@@ -112,6 +111,8 @@ def execute(args) -> dict:
     with httpx.Client(follow_redirects=False) as client:
         api = GmoPublic(client)
         if args.command == "fetch-fx":
+            if args.output.exists():
+                raise FileExistsError(f"{args.output} already exists; choose a new output path")
             frame = api.candles(cfg, args.start, args.end)
             write_bars(frame, args.output)
             return {"output": str(args.output), "bars": len(frame), "source": "GMO public API"}
@@ -119,9 +120,8 @@ def execute(args) -> dict:
             raise ValueError("paper-step currently supports FX only")
         api.validate_rules(cfg)
         now = datetime.now(UTC)
-        # GMO trading dates roll over at 06:00 JST, not at UTC or local midnight.
-        trading_date = (now.astimezone(ZoneInfo("Asia/Tokyo")) - timedelta(hours=6)).date()
-        frame = api.candles(cfg, trading_date - timedelta(days=7), trading_date, now)
+        today = trading_date(now)
+        frame = api.candles(cfg, today - timedelta(days=7), today, now)
         write_bars(frame, args.cache, overwrite=True)
         quote = api.quote(cfg.symbol)
         return paper_step(frame, quote, cfg, args.database, swap_schedule=swap_schedule)
