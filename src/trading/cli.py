@@ -73,7 +73,9 @@ def parser() -> argparse.ArgumentParser:
     hypothesis = ledger.add_parser("add-hypothesis")
     hypothesis.add_argument("--id", required=True)
     hypothesis.add_argument("--description", required=True)
-    ledger.add_parser("freeze").add_argument("--id", required=True)
+    freeze = ledger.add_parser("freeze")
+    freeze.add_argument("--id", required=True)
+    freeze.add_argument("--entry", type=int, required=True)
     imported = ledger.add_parser("import")
     imported.add_argument("--run", type=Path, required=True)
     imported.add_argument("--hypothesis", required=True)
@@ -92,7 +94,7 @@ def run_ledger(args) -> dict:
     if args.ledger_command == "add-hypothesis":
         return add_hypothesis(args.database, args.id, args.description)
     if args.ledger_command == "freeze":
-        return freeze_hypothesis(args.database, args.id)
+        return freeze_hypothesis(args.database, args.id, args.entry)
     if args.ledger_command == "import":
         entries = record_run(args.database, args.run, args.hypothesis, args.purpose, imported=True)
         return {"run": str(args.run), "ledger_entries": entries}

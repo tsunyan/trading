@@ -89,18 +89,27 @@ uv run trading merge-bars --config configs/fx.toml --input data/usdjpy_part1.par
 uv run trading ledger add-hypothesis --id H002-example --description "検証する仮説と失敗条件"
 uv run trading ledger import --run runs/old-run --hypothesis H002-example --purpose "台帳より前の実行"
 uv run trading ledger decide --entry 12 --decision reject --reason "スワップ込みで赤字"
-uv run trading ledger freeze --id H002-example
+uv run trading ledger freeze --id H002-example --entry 12
 uv run trading ledger list --hypothesis H002-example
 ```
 
-- `compare`は候補ごとに1件記録します。記録内容は実験ID、データ期間とハッシュ、設定、コードの版、
-  Gitコミット、判定、目的です。CLIが結果を表示するため、すべて閲覧済みとして扱います。
+- `compare`は候補ごとに1件記録します。記録内容は実験ID、データ期間とハッシュ、設定、評価条件、
+  コードの版、Gitコミット、判定、目的です。CLIが結果を表示するため、すべて閲覧済みとして扱います。
+- 実行時刻（`run_created_at`、保存レポートの`created_at`）と台帳への登録時刻（`recorded_at`）は別に記録します。
+  作成時刻のない古いレポートでは`run_created_at`が空になります。
+- 同じ実行を二重に登録できません。パスが同じ場合に加え、保存レポートが同一の場合（実行フォルダの
+  コピーや名前変更）も拒否します。同じ設定を実際に再実行した場合は、別の試行として記録します。
 - `list`は仮説ごとの試行回数（`trials`）と、試した設定の種類の数（`distinct_configs`）を出します。
   バグ修正後の再実行は試行回数には入りますが、設定の種類は増えません。
-- `freeze`は仮説の凍結日時を記録します。凍結後に最初の判断足があるデータの試行を`forward_oos`、
-  凍結前に終わるものを`research`、またがるものを`mixed`と記録します。ウォームアップの足は判定に数えません。
+- `freeze`は、候補として選んだ記録（`--entry`）の戦略・パラメータ・設定ハッシュ・コードハッシュ・評価条件と、
+  凍結日時を固定します。凍結後に最初の判断足がある試行は、これらが一致すれば`forward_oos`、
+  一つでも違えば`modified_after_freeze`と記録します。凍結前に終わる試行は`research`、凍結日時を
+  またぐ試行は`mixed`です。ウォームアップの足は判定に数えません。コードハッシュは`src/trading`全体が対象で、
+  凍結後にコードを変えると、その後の試行は`forward_oos`になりません。凍結の取り消しはできないため、
+  変更した候補は新しい仮説として登録します。
 - 判断（`advance`、`reject`、`revise`）は追記で、以前の判断も残ります。`list`は最新の判断を表示します。
 - 記録は結果の保存後に行います。記録に失敗した場合は、`ledger import`で後から登録します。
+- 台帳の形式を変えた版では、古い台帳を開かずに失敗します。退避して新しい台帳へ取り込み直してください。
 
 ## FXの模擬売買
 
