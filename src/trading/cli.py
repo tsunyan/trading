@@ -4,15 +4,14 @@ import sqlite3
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import httpx
 
 from trading.backtest import save_run
 from trading.config import load_settings
-from trading.data import read_bars, sample_bars, write_bars
-from trading.evaluation import save_comparison, save_evaluation
-from trading.gmo import GmoPublic
+from trading.data import merge_bars, read_bars, sample_bars, write_bars
+from trading.evaluation import interval_gap_report, save_comparison, save_evaluation
+from trading.gmo import GmoPublic, trading_date
 from trading.paper import paper_status, paper_step
 from trading.swap import read_swap_schedule
 
@@ -48,6 +47,10 @@ def parser() -> argparse.ArgumentParser:
     compare.add_argument("--swap-data", type=Path)
     compare.add_argument("--folds", type=int, default=3)
     compare.add_argument("--stress-multiplier", type=float, default=2.0)
+    merge = sub.add_parser("merge-bars")
+    merge.add_argument("--config", type=Path, required=True)
+    merge.add_argument("--input", action="append", type=Path, required=True)
+    merge.add_argument("--output", type=Path, required=True)
     return root
 
 
@@ -68,6 +71,20 @@ def execute(args) -> dict:
             stress_multiplier=args.stress_multiplier,
             swap_schedule=swap_schedule,
         )
+    if args.command == "merge-bars":
+        cfg = load_settings(args.config)
+        inputs = [read_bars(path, cfg) for path in args.input]
+        frame = merge_bars(inputs, cfg)
+        write_bars(frame, args.output)
+        return {
+            "output": str(args.output),
+            "inputs": [str(path) for path in args.input],
+            "bars": len(frame),
+            "overlapping_bars": sum(len(item) for item in inputs) - len(frame),
+            "data_start": frame.timestamp.iloc[0].isoformat(),
+            "data_end": frame.timestamp.iloc[-1].isoformat(),
+            "data_quality": interval_gap_report(frame, cfg),
+        }
     cfg = load_settings(args.config)
     swap_schedule = (
         read_swap_schedule(args.swap_data, cfg) if getattr(args, "swap_data", None) else None
@@ -94,6 +111,8 @@ def execute(args) -> dict:
     with httpx.Client(follow_redirects=False) as client:
         api = GmoPublic(client)
         if args.command == "fetch-fx":
+            if args.output.exists():
+                raise FileExistsError(f"{args.output} already exists; choose a new output path")
             frame = api.candles(cfg, args.start, args.end)
             write_bars(frame, args.output)
             return {"output": str(args.output), "bars": len(frame), "source": "GMO public API"}
@@ -101,10 +120,9 @@ def execute(args) -> dict:
             raise ValueError("paper-step currently supports FX only")
         api.validate_rules(cfg)
         now = datetime.now(UTC)
-        # GMO trading dates roll over at 06:00 JST, not at UTC or local midnight.
-        trading_date = (now.astimezone(ZoneInfo("Asia/Tokyo")) - timedelta(hours=6)).date()
-        frame = api.candles(cfg, trading_date - timedelta(days=7), trading_date, now)
-        write_bars(frame, args.cache)
+        today = trading_date(now)
+        frame = api.candles(cfg, today - timedelta(days=7), today, now)
+        write_bars(frame, args.cache, overwrite=True)
         quote = api.quote(cfg.symbol)
         return paper_step(frame, quote, cfg, args.database, swap_schedule=swap_schedule)
 

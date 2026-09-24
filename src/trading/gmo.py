@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -9,6 +10,13 @@ from trading.config import Settings
 from trading.data import validate_bars
 
 PUBLIC_URL = "https://forex-api.coin.z.com/public/v1"
+# Earliest trading date the public klines endpoint serves; the day before returns 404.
+FIRST_TRADING_DATE = date(2023, 10, 27)
+
+
+def trading_date(now: datetime) -> date:
+    """GMO trading dates roll over at 06:00 JST, not at UTC or local midnight."""
+    return (now.astimezone(ZoneInfo("Asia/Tokyo")) - timedelta(hours=6)).date()
 
 
 class Quote(BaseModel):
@@ -69,11 +77,14 @@ class GmoPublic:
     ) -> pd.DataFrame:
         if cfg.market != "fx":
             raise ValueError("GMO collector requires an FX configuration")
-        if start > end or start < date(2023, 10, 28):
+        if start > end or start < FIRST_TRADING_DATE:
             raise ValueError("invalid GMO trading-date range")
         now = now or datetime.now(UTC)
         if now.tzinfo is None:
             raise ValueError("now must have a timezone")
+        # A trading date that has not started returns 404; fail before hundreds of requests.
+        if end > trading_date(now):
+            raise ValueError(f"end is after the current GMO trading date {trading_date(now)}")
         if (end - start).days > 366:
             raise ValueError("fetch at most 367 trading dates per call")
         sides = {}

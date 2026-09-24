@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from trading.data import validate_bars
-from trading.gmo import GmoPublic
+from trading.gmo import GmoPublic, trading_date
 
 
 def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
@@ -45,6 +45,47 @@ def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
     assert result.received_at.dt.tz is not None
     assert all(r.method == "GET" and r.url.path == "/public/v1/klines" for r in requests)
     assert all("authorization" not in r.headers for r in requests)
+
+
+def test_candles_start_at_the_first_published_trading_date(cfg):
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.params["date"])
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "openTime": str(int(pd.Timestamp("2023-10-26T21:00Z").timestamp() * 1000)),
+                        "open": "150",
+                        "high": "151",
+                        "low": "149",
+                        "close": "150.5",
+                    }
+                ],
+            },
+        )
+
+    now = pd.Timestamp("2023-10-28T00:00Z").to_pydatetime()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = GmoPublic(client)
+        assert len(api.candles(cfg, date(2023, 10, 27), date(2023, 10, 27), now)) == 1
+        with pytest.raises(ValueError, match="trading-date range"):
+            api.candles(cfg, date(2023, 10, 26), date(2023, 10, 27), now)
+    assert set(requested) == {"20231027"}
+
+
+def test_candles_reject_a_trading_date_that_has_not_started(cfg):
+    requests = []
+    # 02:49 JST on 2026-09-25 still belongs to the 2026-09-24 trading date.
+    now = pd.Timestamp("2026-09-24T17:49Z").to_pydatetime()
+    with httpx.Client(transport=httpx.MockTransport(requests.append)) as client:
+        with pytest.raises(ValueError, match="current GMO trading date 2026-09-24"):
+            GmoPublic(client).candles(cfg, date(2026, 9, 1), date(2026, 9, 25), now)
+    assert trading_date(pd.Timestamp("2026-09-24T21:00Z").to_pydatetime()) == date(2026, 9, 25)
+    assert requests == []
 
 
 def test_api_error_is_not_empty_success():
