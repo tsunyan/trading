@@ -12,8 +12,21 @@ from trading.config import load_settings
 from trading.data import merge_bars, read_bars, sample_bars, write_bars
 from trading.evaluation import interval_gap_report, save_comparison, save_evaluation
 from trading.gmo import GmoPublic, trading_date
+from trading.ledger import (
+    DECISIONS,
+    add_hypothesis,
+    decide,
+    freeze_hypothesis,
+    record_run,
+    require_hypothesis,
+    summary,
+)
 from trading.paper import paper_status, paper_step
 from trading.swap import read_swap_schedule
+
+LEDGER = Path("runs/ledger.sqlite")
+# Commands whose results are research trials; each must be counted against a hypothesis.
+TRIAL_COMMANDS = ("backtest", "evaluate", "compare")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -51,10 +64,62 @@ def parser() -> argparse.ArgumentParser:
     merge.add_argument("--config", type=Path, required=True)
     merge.add_argument("--input", action="append", type=Path, required=True)
     merge.add_argument("--output", type=Path, required=True)
+    for command in TRIAL_COMMANDS:
+        item = sub.choices[command]
+        item.add_argument("--hypothesis", required=True)
+        item.add_argument("--purpose", required=True)
+        item.add_argument("--ledger", type=Path, default=LEDGER)
+    ledger = sub.add_parser("ledger").add_subparsers(dest="ledger_command", required=True)
+    hypothesis = ledger.add_parser("add-hypothesis")
+    hypothesis.add_argument("--id", required=True)
+    hypothesis.add_argument("--description", required=True)
+    ledger.add_parser("freeze").add_argument("--id", required=True)
+    imported = ledger.add_parser("import")
+    imported.add_argument("--run", type=Path, required=True)
+    imported.add_argument("--hypothesis", required=True)
+    imported.add_argument("--purpose", required=True)
+    decision = ledger.add_parser("decide")
+    decision.add_argument("--entry", type=int, required=True)
+    decision.add_argument("--decision", choices=DECISIONS, required=True)
+    decision.add_argument("--reason", required=True)
+    ledger.add_parser("list").add_argument("--hypothesis")
+    for item in ledger.choices.values():
+        item.add_argument("--database", type=Path, default=LEDGER)
     return root
 
 
+def run_ledger(args) -> dict:
+    if args.ledger_command == "add-hypothesis":
+        return add_hypothesis(args.database, args.id, args.description)
+    if args.ledger_command == "freeze":
+        return freeze_hypothesis(args.database, args.id)
+    if args.ledger_command == "import":
+        entries = record_run(args.database, args.run, args.hypothesis, args.purpose, imported=True)
+        return {"run": str(args.run), "ledger_entries": entries}
+    if args.ledger_command == "decide":
+        return decide(args.database, args.entry, args.decision, args.reason)
+    return summary(args.database, args.hypothesis)
+
+
 def execute(args) -> dict:
+    if args.command == "ledger":
+        return run_ledger(args)
+    if args.command not in TRIAL_COMMANDS:
+        return run_command(args)
+    # Refuse before running, so no trial can happen without a place to record it.
+    require_hypothesis(args.ledger, args.hypothesis)
+    report = run_command(args)
+    try:
+        entries = record_run(args.ledger, args.output, args.hypothesis, args.purpose)
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        raise ValueError(
+            f"run saved to {args.output} but not recorded ({exc}); "
+            "record it with `trading ledger import`"
+        ) from exc
+    return {**report, "ledger_entries": entries}
+
+
+def run_command(args) -> dict:
     if args.command == "paper-status":
         return paper_status(args.database)
     if args.command == "compare":
@@ -128,6 +193,9 @@ def execute(args) -> dict:
 
 
 def main() -> int:
+    # Ledger text is Japanese; keep piped output UTF-8 instead of the Windows code page.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     args = parser().parse_args()
     try:
         result = execute(args)

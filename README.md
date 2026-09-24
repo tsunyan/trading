@@ -18,6 +18,7 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 - 完結した取引の実現損益、勝率、期待値、プロフィットファクター、投資比率を保存。
 - 固定戦略を連続口座、時系列の独立区間、取引コスト悪化条件で評価し、証拠不足を明示。
 - SMAクロス、固定期間モメンタム、固定期間平均回帰を同じ会計で比較可能。
+- 研究上の試行を仮説ごとに記録するローカル実験台帳（試行回数、判断、凍結日）。
 
 現在は単一銘柄・円建てで、設定により買い、売り、レバレッジを検証できます。
 実口座への発注コードはありません。日本株のブローカー接続とJ-Quants自動取得は次段階です。
@@ -36,11 +37,12 @@ uv run trading --help
 合成データで動作確認:
 
 ```powershell
+uv run trading ledger add-hypothesis --id H000-plumbing --description "配線・会計の疎通確認"
 uv run trading sample --config configs/fx.toml --output data/fx_sample.csv
-uv run trading backtest --config configs/fx.toml --data data/fx_sample.csv --output runs/fx-demo
+uv run trading backtest --config configs/fx.toml --data data/fx_sample.csv --output runs/fx-demo --hypothesis H000-plumbing --purpose "合成データの疎通確認"
 
 uv run trading sample --config configs/jp_equity.toml --output data/jp_sample.csv
-uv run trading backtest --config configs/jp_equity.toml --data data/jp_sample.csv --output runs/jp-demo
+uv run trading backtest --config configs/jp_equity.toml --data data/jp_sample.csv --output runs/jp-demo --hypothesis H000-plumbing --purpose "日本株の疎通確認"
 ```
 
 合成データには取引カレンダーを再現しない単純な周期変動を使っています。
@@ -50,11 +52,10 @@ uv run trading backtest --config configs/jp_equity.toml --data data/jp_sample.cs
 
 ```powershell
 uv run trading fetch-fx --config configs/fx.toml --start 2026-09-07 --end 2026-09-18 --output data/usdjpy.parquet
-uv run trading backtest --config configs/fx.toml --data data/usdjpy.parquet --output runs/fx-history
-uv run trading evaluate --config configs/fx.toml --data data/usdjpy.parquet --output runs/fx-evaluation
-uv run trading evaluate --config configs/fx-short-2x.toml --data data/usdjpy.parquet --output runs/fx-short-2x-evaluation
-uv run trading evaluate --config configs/fx-short-2x.toml --data data/usdjpy.parquet --swap-data data/usdjpy_swap.csv --output runs/fx-swap-evaluation
-uv run trading compare --config configs/fx-short-2x.toml --config configs/fx-momentum-2x.toml --config configs/fx-mean-reversion-2x.toml --data data/usdjpy.parquet --output runs/fx-strategy-comparison
+uv run trading ledger add-hypothesis --id H002-example --description "検証する仮説と失敗条件"
+uv run trading backtest --config configs/fx.toml --data data/usdjpy.parquet --output runs/fx-history --hypothesis H002-example --purpose "単発の確認"
+uv run trading evaluate --config configs/fx-short-2x.toml --data data/usdjpy.parquet --swap-data data/usdjpy_swap.csv --output runs/fx-swap-evaluation --hypothesis H002-example --purpose "スワップ込みの評価"
+uv run trading compare --config configs/fx-short-2x.toml --config configs/fx-momentum-2x.toml --config configs/fx-mean-reversion-2x.toml --data data/usdjpy.parquet --output runs/fx-strategy-comparison --hypothesis H002-example --purpose "固定戦略の比較"
 ```
 
 日付はGMOの取引日で、午前6時JSTが切り替わりです。日付範囲は両端を含みます。
@@ -77,6 +78,29 @@ uv run trading merge-bars --config configs/fx.toml --input data/usdjpy_part1.par
 
 取得した価格データはGMOコインが提供するものです。再配布の可否が明示されていないため、
 `data/`はGitの対象外とし、公開しません。
+
+## 実験台帳
+
+`backtest`、`evaluate`、`compare`は研究上の試行として、実行ごとに実験台帳へ記録します。
+`--hypothesis`（登録済みの仮説ID）と`--purpose`が必須で、未登録の仮説では実行前に失敗します。
+台帳は既定で`runs/ledger.sqlite`（Git対象外、公開しない）で、`--ledger`で変えられます。
+
+```powershell
+uv run trading ledger add-hypothesis --id H002-example --description "検証する仮説と失敗条件"
+uv run trading ledger import --run runs/old-run --hypothesis H002-example --purpose "台帳より前の実行"
+uv run trading ledger decide --entry 12 --decision reject --reason "スワップ込みで赤字"
+uv run trading ledger freeze --id H002-example
+uv run trading ledger list --hypothesis H002-example
+```
+
+- `compare`は候補ごとに1件記録します。記録内容は実験ID、データ期間とハッシュ、設定、コードの版、
+  Gitコミット、判定、目的です。CLIが結果を表示するため、すべて閲覧済みとして扱います。
+- `list`は仮説ごとの試行回数（`trials`）と、試した設定の種類の数（`distinct_configs`）を出します。
+  バグ修正後の再実行は試行回数には入りますが、設定の種類は増えません。
+- `freeze`は仮説の凍結日時を記録します。凍結後に最初の判断足があるデータの試行を`forward_oos`、
+  凍結前に終わるものを`research`、またがるものを`mixed`と記録します。ウォームアップの足は判定に数えません。
+- 判断（`advance`、`reject`、`revise`）は追記で、以前の判断も残ります。`list`は最新の判断を表示します。
+- 記録は結果の保存後に行います。記録に失敗した場合は、`ledger import`で後から登録します。
 
 ## FXの模擬売買
 
