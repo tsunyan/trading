@@ -11,7 +11,7 @@ from trading.backtest import save_run
 from trading.config import load_settings
 from trading.data import merge_bars, read_bars, sample_bars, write_bars
 from trading.evaluation import interval_gap_report, save_comparison, save_evaluation
-from trading.gmo import GmoPublic, trading_date
+from trading.gmo import GmoPublic, GmoSwapCalendar, trading_date
 from trading.ledger import (
     DECISIONS,
     add_hypothesis,
@@ -22,7 +22,7 @@ from trading.ledger import (
     summary,
 )
 from trading.paper import paper_status, paper_step
-from trading.swap import read_swap_schedule
+from trading.swap import read_swap_schedule, validate_swap_schedule
 
 LEDGER = Path("runs/ledger.sqlite")
 # Commands whose results are research trials; each must be counted against a hypothesis.
@@ -32,14 +32,14 @@ TRIAL_COMMANDS = ("backtest", "evaluate", "compare")
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="JPY backtests and local FX paper trading")
     sub = root.add_subparsers(dest="command", required=True)
-    for command in ("sample", "backtest", "evaluate", "fetch-fx", "paper-step"):
+    for command in ("sample", "backtest", "evaluate", "fetch-fx", "fetch-swap", "paper-step"):
         item = sub.add_parser(command)
         item.add_argument("--config", type=Path, required=True)
         if command in {"backtest", "evaluate", "paper-step"}:
             item.add_argument("--swap-data", type=Path)
-        if command in {"sample", "fetch-fx"}:
+        if command in {"sample", "fetch-fx", "fetch-swap"}:
             item.add_argument("--output", type=Path, required=True)
-        if command == "fetch-fx":
+        if command in {"fetch-fx", "fetch-swap"}:
             item.add_argument("--start", type=date.fromisoformat, required=True)
             item.add_argument("--end", type=date.fromisoformat, required=True)
         elif command in {"backtest", "evaluate"}:
@@ -183,6 +183,21 @@ def run_command(args) -> dict:
             frame = api.candles(cfg, args.start, args.end)
             write_bars(frame, args.output)
             return {"output": str(args.output), "bars": len(frame), "source": "GMO public API"}
+        if args.command == "fetch-swap":
+            if args.output.exists():
+                raise FileExistsError(f"{args.output} already exists; choose a new output path")
+            frame = GmoSwapCalendar(client).history(cfg, args.start, args.end)
+            validate_swap_schedule(frame, cfg)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            # Exclusive create: an earlier download is evidence, not a cache.
+            with args.output.open("x", encoding="utf-8", newline="") as handle:
+                frame.to_csv(handle, index=False)
+            return {
+                "output": str(args.output),
+                "events": len(frame),
+                "days": int(frame.days.sum()),
+                "source": "GMO swap calendar",
+            }
         if cfg.market != "fx":
             raise ValueError("paper-step currently supports FX only")
         api.validate_rules(cfg)

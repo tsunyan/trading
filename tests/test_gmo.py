@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 
 from trading.data import validate_bars
-from trading.gmo import GmoPublic, trading_date
+from trading.gmo import GmoPublic, GmoSwapCalendar, trading_date
+from trading.swap import validate_swap_schedule
 
 
 def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
@@ -128,3 +129,114 @@ def test_each_side_must_have_a_valid_ohlc_envelope(cfg, bars):
 
     with pytest.raises(ValueError, match="BID OHLC envelope"):
         validate_bars(sided, cfg)
+
+
+def swap_calendar(rows_by_date, requests=None):
+    def handler(request):
+        if requests is not None:
+            requests.append(request)
+        stamp = request.url.params["date"]
+        buy, sell, days = rows_by_date[stamp]
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "productId": 100002,
+                        "swapDate": int(stamp),
+                        "swapSell": "-1",
+                        "swapBuy": "1",
+                        "swapDays": 1,
+                    },
+                    {
+                        "productId": 100001,
+                        "swapDate": int(stamp),
+                        "swapSell": sell,
+                        "swapBuy": buy,
+                        "swapDays": days,
+                    },
+                ],
+            },
+        )
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_swap_history_uses_the_rollover_that_ends_each_trading_date(cfg):
+    requests = []
+    rows = {
+        "20260902": ("400", "-576", 4),
+        "20260903": ("0", "0", 0),
+        "20260904": ("100", "-144", 1),
+    }
+    with swap_calendar(rows, requests) as client:
+        frame = GmoSwapCalendar(client, pause_seconds=0).history(
+            cfg,
+            date(2026, 9, 2),
+            date(2026, 9, 4),
+            pd.Timestamp("2026-09-05T06:00+09:00").to_pydatetime(),
+        )
+    schedule = validate_swap_schedule(frame, cfg)
+    assert list(schedule.timestamp) == [
+        pd.Timestamp("2026-09-03T06:00+09:00"),
+        pd.Timestamp("2026-09-05T06:00+09:00"),
+    ]
+    assert list(schedule.long_jpy_per_10k) == [400, 100]
+    assert list(schedule.short_jpy_per_10k) == [-576, -144]
+    assert list(schedule.days) == [4, 1]
+    assert all(r.method == "GET" and r.url.host == "coin.z.com" for r in requests)
+    assert all("authorization" not in r.headers for r in requests)
+
+
+def test_swap_history_refuses_dates_whose_swap_is_not_granted_yet(cfg):
+    requests = []
+    with (
+        swap_calendar({}, requests) as client,
+        pytest.raises(ValueError, match="not granted until"),
+    ):
+        GmoSwapCalendar(client, pause_seconds=0).history(
+            cfg,
+            date(2026, 9, 1),
+            date(2026, 9, 4),
+            pd.Timestamp("2026-09-05T05:59+09:00").to_pydatetime(),
+        )
+    assert requests == []
+
+
+def test_swap_history_rejects_amounts_on_a_zero_day_row(cfg):
+    with (
+        swap_calendar({"20260903": ("10", "-10", 0)}) as client,
+        pytest.raises(ValueError, match="zero-day"),
+    ):
+        GmoSwapCalendar(client, pause_seconds=0).history(
+            cfg,
+            date(2026, 9, 3),
+            date(2026, 9, 3),
+            pd.Timestamp("2026-09-10T00:00Z").to_pydatetime(),
+        )
+
+
+def test_swap_row_must_match_the_requested_date(cfg):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "productId": 100001,
+                        "swapDate": 20260101,
+                        "swapSell": "-1",
+                        "swapBuy": "1",
+                        "swapDays": 1,
+                    }
+                ],
+            },
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ValueError, match="no single"),
+    ):
+        GmoSwapCalendar(client).day(cfg, date(2026, 9, 3))
