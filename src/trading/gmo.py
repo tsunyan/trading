@@ -9,6 +9,8 @@ from trading.config import Settings
 from trading.data import validate_bars
 
 PUBLIC_URL = "https://forex-api.coin.z.com/public/v1"
+# Earliest trading date the public klines endpoint serves; the day before returns 404.
+FIRST_TRADING_DATE = date(2023, 10, 27)
 
 
 class Quote(BaseModel):
@@ -69,7 +71,7 @@ class GmoPublic:
     ) -> pd.DataFrame:
         if cfg.market != "fx":
             raise ValueError("GMO collector requires an FX configuration")
-        if start > end or start < date(2023, 10, 28):
+        if start > end or start < FIRST_TRADING_DATE:
             raise ValueError("invalid GMO trading-date range")
         now = now or datetime.now(UTC)
         if now.tzinfo is None:

@@ -58,6 +58,23 @@ uv run trading compare --config configs/fx-short-2x.toml --config configs/fx-mom
 
 日付はGMOの取引日で、午前6時JSTが切り替わりです。日付範囲は両端を含みます。
 未確定の足は取り込みません。通信・APIエラーは失敗として終了し、空データで継続しません。
+公開APIの足は2023-10-27の取引日からです。1回の`fetch-fx`は最大367取引日なので、長い期間は
+分けて取得し、`merge-bars`で一本にまとめます。
+
+```powershell
+uv run trading fetch-fx --config configs/fx.toml --start 2023-10-27 --end 2024-10-27 --output data/usdjpy_part1.parquet
+uv run trading fetch-fx --config configs/fx.toml --start 2024-10-28 --end 2025-10-28 --output data/usdjpy_part2.parquet
+uv run trading merge-bars --config configs/fx.toml --input data/usdjpy_part1.parquet --input data/usdjpy_part2.parquet --output data/usdjpy_merged.parquet
+```
+
+`merge-bars`は重なった足の価格が入力間で一致することを確かめ、一致しなければ失敗します。
+重なった足は先に指定した入力のもの（受信時刻を含む）を残します。BID/ASK列の有無が違うファイルは
+混ぜられないため、旧形式のファイルは取り直してください。結果には足間隔の空白を`data_quality`として出します。
+`sample`、`fetch-fx`、`merge-bars`は既存ファイルを上書きしません。毎回新しい出力先を指定してください。
+`paper-step`の`--cache`だけは毎回上書きします。
+
+取得した価格データはGMOコインが提供するものです。再配布の可否が明示されていないため、
+`data/`はGitの対象外とし、公開しません。
 
 ## FXの模擬売買
 

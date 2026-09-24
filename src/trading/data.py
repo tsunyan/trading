@@ -7,6 +7,8 @@ from trading.config import Settings
 
 PRICE_COLUMNS = ["open", "high", "low", "close"]
 SIDE_PRICE_COLUMNS = [f"{side}_{column}" for side in ("bid", "ask") for column in PRICE_COLUMNS]
+# Describe when and where a bar was collected, not what it says; they differ between fetches.
+METADATA_COLUMNS = {"received_at", "source"}
 
 
 def validate_bars(frame: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
@@ -75,12 +77,43 @@ def read_bars(path: Path, cfg: Settings) -> pd.DataFrame:
     return validate_bars(frame, cfg)
 
 
-def write_bars(frame: pd.DataFrame, path: Path) -> None:
+def write_bars(frame: pd.DataFrame, path: Path, *, overwrite: bool = False) -> None:
+    """Refuses to replace an existing file unless told to; only caches may be rewritten."""
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} already exists; choose a new output path")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix == ".parquet":
         frame.to_parquet(path, index=False)
     else:
         frame.to_csv(path, index=False)
+
+
+def merge_bars(frames: list[pd.DataFrame], cfg: Settings) -> pd.DataFrame:
+    """Join separately fetched bar files into one series.
+
+    Overlapping bars must agree on every price column; the first input's copy (and its
+    receipt time) is kept. Inputs must share one schema, so files saved without BID/ASK
+    columns cannot be mixed with files that have them.
+    """
+    if not frames:
+        raise ValueError("no bar files to merge")
+    validated = [validate_bars(frame, cfg) for frame in frames]
+    columns = set(validated[0].columns)
+    if any(set(frame.columns) != columns for frame in validated[1:]):
+        raise ValueError("bar files have different columns; re-fetch them in one format")
+    combined = pd.concat(validated, ignore_index=True)
+    kept = combined.drop_duplicates("timestamp", keep="first").set_index("timestamp")
+    repeats = combined[combined.timestamp.duplicated(keep="first")].set_index("timestamp")
+    content = sorted(columns - METADATA_COLUMNS - {"timestamp"})
+    differs = (repeats[content].to_numpy() != kept.loc[repeats.index, content].to_numpy()).any(
+        axis=1
+    )
+    if differs.any():
+        first = repeats.index[differs][0].isoformat()
+        raise ValueError(
+            f"{int(differs.sum())} overlapping bars differ between inputs (first at {first})"
+        )
+    return validate_bars(kept.sort_index().reset_index(), cfg)
 
 
 def sample_bars(cfg: Settings, count: int = 240) -> pd.DataFrame:

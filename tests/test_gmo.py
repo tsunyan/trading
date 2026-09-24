@@ -47,6 +47,36 @@ def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
     assert all("authorization" not in r.headers for r in requests)
 
 
+def test_candles_start_at_the_first_published_trading_date(cfg):
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.params["date"])
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "openTime": str(int(pd.Timestamp("2023-10-26T21:00Z").timestamp() * 1000)),
+                        "open": "150",
+                        "high": "151",
+                        "low": "149",
+                        "close": "150.5",
+                    }
+                ],
+            },
+        )
+
+    now = pd.Timestamp("2023-10-28T00:00Z").to_pydatetime()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = GmoPublic(client)
+        assert len(api.candles(cfg, date(2023, 10, 27), date(2023, 10, 27), now)) == 1
+        with pytest.raises(ValueError, match="trading-date range"):
+            api.candles(cfg, date(2023, 10, 26), date(2023, 10, 27), now)
+    assert set(requested) == {"20231027"}
+
+
 def test_api_error_is_not_empty_success():
     with (
         httpx.Client(
