@@ -3,7 +3,8 @@
 FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを使用します。
 最初はUSD/JPYの1時間足を優先し、日本株は日足CSVによるバックテストから始めます。
 
-採用方針と根拠は [docs/architecture.md](docs/architecture.md) を参照してください。
+採用方針と根拠は [docs/architecture.md](docs/architecture.md)、現在の不足機能と実装順は
+[docs/roadmap.md](docs/roadmap.md) を参照してください。
 
 ## 実装済みの範囲
 
