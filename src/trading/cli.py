@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pandas as pd
 
 from trading.backtest import save_run
 from trading.config import load_settings
@@ -22,7 +23,7 @@ from trading.ledger import (
     summary,
 )
 from trading.paper import paper_status, paper_step
-from trading.swap import read_swap_schedule, validate_swap_schedule
+from trading.swap import read_swap_schedule, require_swap_coverage, validate_swap_schedule
 
 LEDGER = Path("runs/ledger.sqlite")
 # Commands whose results are research trials; each must be counted against a hypothesis.
@@ -121,6 +122,14 @@ def execute(args) -> dict:
     return {**report, "ledger_entries": entries}
 
 
+def swap_covers_bars(schedule, frame, cfg) -> None:
+    """Research runs may not treat an unfetched rollover as zero carry."""
+    start = frame.timestamp.iloc[0]
+    require_swap_coverage(
+        schedule, start, frame.timestamp.iloc[-1] + pd.Timedelta(seconds=cfg.bar_seconds)
+    )
+
+
 def run_command(args) -> dict:
     if args.command == "paper-status":
         return paper_status(args.database)
@@ -130,6 +139,7 @@ def run_command(args) -> dict:
         swap_schedule = (
             read_swap_schedule(args.swap_data, candidates[0]) if args.swap_data else None
         )
+        swap_covers_bars(swap_schedule, frame, candidates[0])
         return save_comparison(
             frame,
             candidates,
@@ -159,16 +169,19 @@ def run_command(args) -> dict:
     if args.command == "sample":
         write_bars(sample_bars(cfg), args.output)
         return {"output": str(args.output), "synthetic": True}
+    if args.command in {"backtest", "evaluate"}:
+        frame = read_bars(args.data, cfg)
+        swap_covers_bars(swap_schedule, frame, cfg)
     if args.command == "backtest":
         return save_run(
-            read_bars(args.data, cfg),
+            frame,
             cfg,
             args.output,
             swap_schedule=swap_schedule,
         )
     if args.command == "evaluate":
         return save_evaluation(
-            read_bars(args.data, cfg),
+            frame,
             cfg,
             args.output,
             fold_count=args.folds,

@@ -177,10 +177,11 @@ class GmoSwapCalendar:
         end: date,
         now: datetime | None = None,
     ) -> pd.DataFrame:
-        """Swap events in the repository schema, one row per trading date that grants swap.
+        """Swap events in the repository schema, one row for every requested date.
 
-        A date is fetched only after its rollover has passed: the calendar lists planned
-        amounts before then, and GMO may still revise them.
+        Dates that grant nothing stay as zero-day rows, so the file itself shows which
+        rollovers were checked. A date is fetched only after its rollover has passed: the
+        calendar lists planned amounts before then, and GMO may still revise them.
         """
         if cfg.market != "fx":
             raise ValueError("swap history requires an FX configuration")
@@ -201,10 +202,8 @@ class GmoSwapCalendar:
             buy, sell = float(row["swapBuy"]), float(row["swapSell"])
             if days < 0 or not (math.isfinite(buy) and math.isfinite(sell)):
                 raise ValueError(f"invalid swap calendar row for {day}")
-            if days == 0:
-                if buy or sell:
-                    raise ValueError(f"swap amounts on a zero-day row for {day}")
-                continue
+            if days == 0 and (buy or sell):
+                raise ValueError(f"swap amounts on a zero-day row for {day}")
             records.append(
                 {
                     "timestamp": rollover_time(day).isoformat(),
@@ -214,6 +213,4 @@ class GmoSwapCalendar:
                     "days": days,
                 }
             )
-        if not records:
-            raise ValueError("no swap was granted in the requested trading dates")
         return pd.DataFrame(records)

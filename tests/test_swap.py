@@ -7,7 +7,7 @@ from trading.backtest import run_backtest
 from trading.config import Settings
 from trading.gmo import Quote
 from trading.paper import paper_step
-from trading.swap import swap_credit_between, validate_swap_schedule
+from trading.swap import require_swap_coverage, swap_credit_between, validate_swap_schedule
 
 
 def swap_schedule(cfg, timestamp, long=100.0, short=-50.0, days=1):
@@ -168,3 +168,73 @@ def test_paper_credits_swap_rows_published_after_their_event_time(bars, cfg, tmp
     assert paper_step(bars, repeated, cfg, path, repeated.timestamp, extended)[
         "swap_credit_jpy"
     ] == pytest.approx(0)
+
+
+def daily_rollovers(cfg, first, last):
+    days = pd.date_range(first, last, freq="D")
+    return pd.DataFrame(
+        {
+            "timestamp": [f"{day.date() + timedelta(days=1)}T06:00:00+09:00" for day in days],
+            "symbol": cfg.symbol,
+            "long_jpy_per_10k": 100.0,
+            "short_jpy_per_10k": -150.0,
+            "days": 1,
+        }
+    )
+
+
+def test_zero_day_rows_are_coverage_markers_without_amounts(cfg):
+    schedule = swap_schedule(cfg, pd.Timestamp("2025-01-06T21:00Z"), long=0, short=0, days=0)
+    assert validate_swap_schedule(schedule, cfg).days.iloc[0] == 0
+    with pytest.raises(ValueError, match="zero-day"):
+        validate_swap_schedule(swap_schedule(cfg, schedule.timestamp.iloc[0], days=0), cfg)
+
+
+def test_swap_coverage_refuses_a_history_silent_about_a_rollover(cfg):
+    start, end = pd.Timestamp("2025-01-06T00:00Z"), pd.Timestamp("2025-01-10T00:00Z")
+    complete = validate_swap_schedule(daily_rollovers(cfg, "2025-01-05", "2025-01-10"), cfg)
+    require_swap_coverage(complete, start, end)
+    require_swap_coverage(None, start, end)
+
+    # Rollovers inside (start, end] are 01-06..01-09 06:00 JST; drop 01-07's.
+    partial = complete.drop(index=2).reset_index(drop=True)
+    with pytest.raises(ValueError, match="misses 1 rollovers.*2025-01-07"):
+        require_swap_coverage(partial, start, end)
+
+
+def test_research_commands_refuse_partial_swap_history(bars, cfg, tmp_path):
+    from trading.cli import execute, parser
+    from trading.ledger import add_hypothesis
+
+    config = tmp_path / "fx.toml"
+    config.write_text(
+        'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 3\n',
+        encoding="utf-8",
+    )
+    frame = bars.copy()
+    frame["timestamp"] = pd.date_range("2025-01-06T18:00Z", periods=len(frame), freq="h")
+    data, swap, database = tmp_path / "bars.parquet", tmp_path / "swap.csv", tmp_path / "l.sqlite"
+    frame.to_parquet(data, index=False)
+    # The bars span the 2025-01-07 06:00 JST rollover; the history stops the day before.
+    daily_rollovers(cfg, "2025-01-05", "2025-01-05").to_csv(swap, index=False)
+    add_hypothesis(database, "H001", "smoke")
+    args = [
+        "evaluate",
+        "--config",
+        str(config),
+        "--data",
+        str(data),
+        "--swap-data",
+        str(swap),
+        "--output",
+        str(tmp_path / "run"),
+        "--hypothesis",
+        "H001",
+        "--purpose",
+        "smoke",
+        "--ledger",
+        str(database),
+    ]
+    with pytest.raises(ValueError, match="misses 1 rollovers"):
+        execute(parser().parse_args(args))
+    assert not (tmp_path / "run").exists()

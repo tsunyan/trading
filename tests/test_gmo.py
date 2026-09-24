@@ -178,13 +178,15 @@ def test_swap_history_uses_the_rollover_that_ends_each_trading_date(cfg):
             pd.Timestamp("2026-09-05T06:00+09:00").to_pydatetime(),
         )
     schedule = validate_swap_schedule(frame, cfg)
+    # Every requested date stays, so a zero-day date is distinguishable from an unfetched one.
     assert list(schedule.timestamp) == [
         pd.Timestamp("2026-09-03T06:00+09:00"),
+        pd.Timestamp("2026-09-04T06:00+09:00"),
         pd.Timestamp("2026-09-05T06:00+09:00"),
     ]
-    assert list(schedule.long_jpy_per_10k) == [400, 100]
-    assert list(schedule.short_jpy_per_10k) == [-576, -144]
-    assert list(schedule.days) == [4, 1]
+    assert list(schedule.long_jpy_per_10k) == [400, 0, 100]
+    assert list(schedule.short_jpy_per_10k) == [-576, 0, -144]
+    assert list(schedule.days) == [4, 0, 1]
     assert all(r.method == "GET" and r.url.host == "coin.z.com" for r in requests)
     assert all("authorization" not in r.headers for r in requests)
 
