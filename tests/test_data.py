@@ -324,6 +324,36 @@ def test_merge_rolls_back_output_when_lineage_publication_fails(bars, tmp_path, 
     assert not lineage_path(output).exists()
 
 
+def test_merge_removes_staged_data_when_lineage_preparation_fails(bars, tmp_path, monkeypatch):
+    config = tmp_path / "fx.toml"
+    config.write_text(
+        'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 3\n',
+        encoding="utf-8",
+    )
+    source = tmp_path / "source.parquet"
+    write_bars(sided(bars), source)
+    output = tmp_path / "merged.parquet"
+
+    def fail_preparation(path, artifact_source, record):
+        raise OSError("simulated preparation failure")
+
+    monkeypatch.setattr("trading.cli.prepare_data_lineage", fail_preparation)
+    args = [
+        "merge-bars",
+        "--config",
+        str(config),
+        "--input",
+        str(source),
+        "--output",
+        str(output),
+    ]
+
+    with pytest.raises(OSError, match="simulated preparation failure"):
+        execute(parser().parse_args(args))
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["fx.toml", "source.parquet"]
+
+
 def test_publish_new_file_explains_the_hardlink_requirement(tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.write_bytes(b"complete")

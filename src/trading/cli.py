@@ -45,8 +45,8 @@ FETCH_CHECKPOINT_VERSION = 1
 def _commit_new_file(frame: pd.DataFrame, target: Path, temporary: Path) -> None:
     """Write completely before publishing `target`, and never replace evidence."""
     temporary = temporary.with_name(f"{temporary.stem}.{uuid.uuid4().hex}{temporary.suffix}")
-    write_bars(frame, temporary, overwrite=True)
     try:
+        write_bars(frame, temporary, overwrite=True)
         publish_new_file(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -65,15 +65,16 @@ def _publish_data_artifact(
         raise FileExistsError(f"{existing} already exists; choose a new output path")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = temporary.with_name(f"{temporary.stem}.{uuid.uuid4().hex}{temporary.suffix}")
-    write_bars(frame, temporary, overwrite=True)
-    metadata, lineage_temporary, payload = prepare_data_lineage(
-        output,
-        temporary,
-        lineage_record,
-    )
+    lineage_temporary: Path | None = None
     output_published = False
     lineage_published = False
     try:
+        write_bars(frame, temporary, overwrite=True)
+        metadata, lineage_temporary, payload = prepare_data_lineage(
+            output,
+            temporary,
+            lineage_record,
+        )
         publish_new_file(temporary, output)
         output_published = True
         publish_new_file(lineage_temporary, metadata)
@@ -86,7 +87,8 @@ def _publish_data_artifact(
         raise
     finally:
         temporary.unlink(missing_ok=True)
-        lineage_temporary.unlink(missing_ok=True)
+        if lineage_temporary is not None:
+            lineage_temporary.unlink(missing_ok=True)
     return metadata, payload
 
 
