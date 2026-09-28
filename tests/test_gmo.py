@@ -48,6 +48,82 @@ def test_public_only_midpoint_and_incomplete_bar_removal(cfg):
     assert all("authorization" not in r.headers for r in requests)
 
 
+def test_candle_days_preserve_a_checked_empty_trading_date(cfg):
+    requested = []
+
+    def handler(request):
+        requested.append((request.url.params["date"], request.url.params["priceType"]))
+        if request.url.params["date"] == "20250106":
+            return httpx.Response(200, json={"status": 0, "data": []})
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "openTime": str(int(pd.Timestamp("2025-01-07T00:00Z").timestamp() * 1000)),
+                        "open": "150",
+                        "high": "151",
+                        "low": "149",
+                        "close": "150.5",
+                    }
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        days = list(
+            GmoPublic(client).candle_days(
+                cfg,
+                date(2025, 1, 6),
+                date(2025, 1, 7),
+                pd.Timestamp("2025-01-08T00:00Z").to_pydatetime(),
+            )
+        )
+
+    assert days[0][0] == date(2025, 1, 6)
+    assert days[0][1].empty
+    assert days[0][1].attrs["empty_reason"] == "provider_empty"
+    assert len(days[1][1]) == 1
+    assert requested == [
+        ("20250106", "BID"),
+        ("20250106", "ASK"),
+        ("20250107", "BID"),
+        ("20250107", "ASK"),
+    ]
+
+
+def test_candle_days_distinguish_an_incomplete_only_day(cfg):
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "status": 0,
+                "data": [
+                    {
+                        "openTime": str(int(pd.Timestamp("2025-01-06T00:00Z").timestamp() * 1000)),
+                        "open": "150",
+                        "high": "151",
+                        "low": "149",
+                        "close": "150.5",
+                    }
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        [(day, frame)] = GmoPublic(client).candle_days(
+            cfg,
+            date(2025, 1, 6),
+            date(2025, 1, 6),
+            pd.Timestamp("2025-01-06T00:30Z").to_pydatetime(),
+        )
+
+    assert day == date(2025, 1, 6)
+    assert frame.empty
+    assert frame.attrs["empty_reason"] == "incomplete_only"
+
+
 def test_candles_start_at_the_first_published_trading_date(cfg):
     requested = []
 

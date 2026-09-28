@@ -12,6 +12,7 @@ import pandas as pd
 from trading.backtest import completed_trades, run_backtest
 from trading.config import Settings
 from trading.data import validate_bars
+from trading.gmo import JST, trading_date
 from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import entry_units, maintenance_margin_halt
 from trading.swap import (
@@ -24,19 +25,100 @@ from trading.swap import (
 MIN_EVALUATION_BARS = {"fx": 2_000, "jp_equity": 500}
 MIN_CALENDAR_DAYS = {"fx": 180.0, "jp_equity": 730.0}
 MIN_CLOSED_TRADES = 30
+FX_TRADING_HOURS_URL = "https://coin.z.com/jp/corp/product/info/fx/"
+
+
+def _regular_fx_closure(timestamp: pd.Timestamp) -> bool:
+    local = timestamp.tz_convert(JST)
+    weekday = local.weekday()
+    return (weekday == 5 and local.hour >= 6) or weekday == 6 or (weekday == 0 and local.hour < 7)
 
 
 def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
-    """Describe discontinuities without guessing whether they are closures or outages."""
-    intervals = frame.timestamp.diff().dropna().dt.total_seconds() / cfg.bar_seconds
-    gaps = intervals[intervals > 1]
+    """Separate regular FX closures and fetched empty dates from unexplained gaps."""
+    lineage = frame.attrs.get("lineage") or {}
+    reported_empty_dates = set(lineage.get("collection", {}).get("empty_trading_dates", []))
+    times = frame.timestamp.reset_index(drop=True)
+    if cfg.market == "fx":
+        present_dates = set(
+            (times.dt.tz_convert(JST) - pd.Timedelta(hours=6)).dt.strftime("%Y-%m-%d")
+        )
+    else:
+        present_dates = set()
+    lineage_conflicts = sorted(reported_empty_dates & present_dates)
+    empty_dates = reported_empty_dates - present_dates
+    bar = pd.Timedelta(seconds=cfg.bar_seconds)
+    totals = {"scheduled_closure": 0, "provider_empty": 0, "unexplained": 0}
+    category_gaps = {name: 0 for name in totals}
+    details = []
+    intervals = times.diff().dt.total_seconds() / cfg.bar_seconds
+    for position, interval in intervals[intervals > 1].items():
+        previous = times.iloc[position - 1]
+        current = times.iloc[position]
+        missing_count = max(math.floor(interval) - 1, 0)
+        counts = {name: 0 for name in totals}
+        for step in range(1, missing_count + 1):
+            timestamp = previous + step * bar
+            if cfg.market == "fx" and _regular_fx_closure(timestamp):
+                category = "scheduled_closure"
+            elif (
+                cfg.market == "fx"
+                and trading_date(timestamp.to_pydatetime()).isoformat() in empty_dates
+            ):
+                category = "provider_empty"
+            else:
+                category = "unexplained"
+            counts[category] += 1
+            totals[category] += 1
+        aligned = math.isclose(interval, round(interval), rel_tol=0, abs_tol=1e-9)
+        if not aligned or missing_count == 0:
+            category_gaps["unexplained"] += 1
+            gap_classification = "irregular_interval"
+        else:
+            present = [name for name, count in counts.items() if count]
+            for name in present:
+                category_gaps[name] += 1
+            gap_classification = present[0] if len(present) == 1 else "mixed"
+        details.append(
+            {
+                "after": previous.isoformat(),
+                "before": current.isoformat(),
+                "gap_seconds": float((current - previous).total_seconds()),
+                "missing_bar_intervals": missing_count,
+                "classification": gap_classification,
+                **{f"{name}_bar_intervals": count for name, count in counts.items()},
+            }
+        )
+    review_reasons = []
+    if category_gaps["provider_empty"]:
+        review_reasons.append("provider_empty_during_regular_hours")
+    if category_gaps["unexplained"]:
+        review_reasons.append("unexplained_gaps")
+    if lineage_conflicts:
+        review_reasons.append("lineage_empty_date_conflicts_with_bars")
     return {
-        "gap_count": int(len(gaps)),
-        "unobserved_bar_intervals": int(sum(max(math.floor(value) - 1, 0) for value in gaps)),
-        "largest_gap_seconds": float(gaps.max() * cfg.bar_seconds) if len(gaps) else 0.0,
+        "gap_count": len(details),
+        "unobserved_bar_intervals": sum(totals.values()),
+        "largest_gap_seconds": max((item["gap_seconds"] for item in details), default=0.0),
+        **{f"{name}_bar_intervals": count for name, count in totals.items()},
+        **{f"{name}_gap_count": count for name, count in category_gaps.items()},
+        "status": "needs_review" if review_reasons else "ok",
+        "review_reasons": review_reasons,
+        "lineage_empty_date_conflicts": lineage_conflicts,
         "classification": (
-            "unclassified; scheduled closures and collection outages are not separated"
+            "gmo_fx_regular_hours_and_collection_lineage"
+            if cfg.market == "fx"
+            else f"unclassified_for_{cfg.market}"
         ),
+        "schedule": {
+            "timezone": "Asia/Tokyo",
+            "regular_hours": "Monday 07:00 through Saturday 05:59",
+            "source": FX_TRADING_HOURS_URL,
+            "special_holidays": "not assumed; provider-empty lineage or review required",
+        }
+        if cfg.market == "fx"
+        else None,
+        "gaps": details,
     }
 
 

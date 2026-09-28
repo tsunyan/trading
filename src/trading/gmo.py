@@ -1,5 +1,6 @@
 import math
 import time as clock
+from collections.abc import Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -81,13 +82,13 @@ class GmoPublic:
         ):
             raise ValueError("configured quantity limits conflict with current GMO API rules")
 
-    def candles(
+    def validate_candle_range(
         self,
         cfg: Settings,
         start: date,
         end: date,
         now: datetime | None = None,
-    ) -> pd.DataFrame:
+    ) -> datetime:
         if cfg.market != "fx":
             raise ValueError("GMO collector requires an FX configuration")
         if start > end or start < FIRST_TRADING_DATE:
@@ -100,48 +101,91 @@ class GmoPublic:
             raise ValueError(f"end is after the current GMO trading date {trading_date(now)}")
         if (end - start).days > 366:
             raise ValueError("fetch at most 367 trading dates per call")
-        sides = {}
-        for side in ("BID", "ASK"):
-            items = []
-            for offset in range((end - start).days + 1):
-                day = start + timedelta(days=offset)
-                items.extend(
-                    self.get(
-                        "klines",
-                        symbol=cfg.symbol,
-                        priceType=side,
-                        interval="1hour",
-                        date=day.strftime("%Y%m%d"),
-                    )
+        return now
+
+    def candle_days(
+        self,
+        cfg: Settings,
+        start: date,
+        end: date,
+        now: datetime | None = None,
+    ) -> Iterator[tuple[date, pd.DataFrame]]:
+        """Yield each requested trading date after its BID and ASK sides align.
+
+        Empty dates are yielded as empty frames.  Callers that persist progress can
+        therefore distinguish a checked market closure from a request that never ran.
+        """
+        now = self.validate_candle_range(cfg, start, end, now)
+        current_trading_date = trading_date(now)
+        for offset in range((end - start).days + 1):
+            day = start + timedelta(days=offset)
+            day_complete = day < current_trading_date
+            sides = {}
+            for side in ("BID", "ASK"):
+                items = self.get(
+                    "klines",
+                    symbol=cfg.symbol,
+                    priceType=side,
+                    interval="1hour",
+                    date=day.strftime("%Y%m%d"),
                 )
-            if not items:
-                raise ValueError("no candles returned for requested trading dates")
-            frame = pd.DataFrame(items)
-            frame["timestamp"] = pd.to_datetime(
-                pd.to_numeric(frame.openTime, errors="raise"),
-                unit="ms",
-                utc=True,
-            )
-            frame = frame.set_index("timestamp")[["open", "high", "low", "close"]].astype(float)
-            if frame.index.duplicated().any():
-                raise ValueError("duplicate timestamps in GMO candles")
-            sides[side] = frame.sort_index()
-        bid, ask = sides["BID"], sides["ASK"]
-        if not bid.index.equals(ask.index):
-            raise ValueError("BID/ASK candles do not align")
-        if (ask < bid).any().any():
-            raise ValueError("crossed BID/ASK candles")
-        # Midpoint OHLC remains the strategy input; preserve both source sides for later audits.
-        frame = (bid + ask) / 2
-        for side_name, side_frame in (("bid", bid), ("ask", ask)):
-            for column in ("open", "high", "low", "close"):
-                frame[f"{side_name}_{column}"] = side_frame[column]
-        frame = frame[frame.index + pd.Timedelta(seconds=cfg.bar_seconds) <= pd.Timestamp(now)]
-        frame["symbol"] = cfg.symbol
-        frame["volume"] = 0
-        frame["received_at"] = datetime.now(UTC)
-        frame["source"] = "GMO public API"
-        return validate_bars(frame.reset_index(), cfg)
+                if not items:
+                    sides[side] = pd.DataFrame(columns=["open", "high", "low", "close"])
+                    continue
+                frame = pd.DataFrame(items)
+                frame["timestamp"] = pd.to_datetime(
+                    pd.to_numeric(frame.openTime, errors="raise"),
+                    unit="ms",
+                    utc=True,
+                )
+                frame = frame.set_index("timestamp")[["open", "high", "low", "close"]].astype(float)
+                if frame.index.duplicated().any():
+                    raise ValueError("duplicate timestamps in GMO candles")
+                dates = {trading_date(value.to_pydatetime()) for value in frame.index}
+                if dates != {day}:
+                    raise ValueError(f"GMO candles for {day} contain trading dates {sorted(dates)}")
+                sides[side] = frame.sort_index()
+            bid, ask = sides["BID"], sides["ASK"]
+            if not bid.index.equals(ask.index):
+                raise ValueError("BID/ASK candles do not align")
+            if bid.empty:
+                frame = pd.DataFrame()
+                frame.attrs["empty_reason"] = (
+                    "provider_empty" if day_complete else "current_trading_date"
+                )
+                yield day, frame
+                continue
+            if (ask < bid).any().any():
+                raise ValueError("crossed BID/ASK candles")
+            # Midpoint OHLC remains the strategy input; preserve both source sides for audits.
+            frame = (bid + ask) / 2
+            for side_name, side_frame in (("bid", bid), ("ask", ask)):
+                for column in ("open", "high", "low", "close"):
+                    frame[f"{side_name}_{column}"] = side_frame[column]
+            frame = frame[frame.index + pd.Timedelta(seconds=cfg.bar_seconds) <= pd.Timestamp(now)]
+            if frame.empty:
+                frame.attrs["empty_reason"] = "incomplete_only"
+                yield day, frame
+                continue
+            frame["symbol"] = cfg.symbol
+            frame["volume"] = 0
+            frame["received_at"] = datetime.now(UTC)
+            frame["source"] = "GMO public API"
+            frame = validate_bars(frame.reset_index(), cfg)
+            frame.attrs["trading_date_complete"] = day_complete
+            yield day, frame
+
+    def candles(
+        self,
+        cfg: Settings,
+        start: date,
+        end: date,
+        now: datetime | None = None,
+    ) -> pd.DataFrame:
+        frames = [frame for _, frame in self.candle_days(cfg, start, end, now) if not frame.empty]
+        if not frames:
+            raise ValueError("no candles returned for requested trading dates")
+        return validate_bars(pd.concat(frames, ignore_index=True), cfg)
 
 
 class GmoSwapCalendar:
