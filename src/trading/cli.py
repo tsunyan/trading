@@ -2,6 +2,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -10,9 +11,18 @@ import pandas as pd
 
 from trading.backtest import save_run
 from trading.config import load_settings
-from trading.data import merge_bars, read_bars, sample_bars, write_bars
+from trading.data import (
+    describe_data_artifact,
+    lineage_path,
+    merge_bars,
+    prepare_data_lineage,
+    publish_new_file,
+    read_bars,
+    sample_bars,
+    write_bars,
+)
 from trading.evaluation import interval_gap_report, save_comparison, save_evaluation
-from trading.gmo import GmoPublic, GmoSwapCalendar, trading_date
+from trading.gmo import PUBLIC_URL, GmoPublic, GmoSwapCalendar, trading_date
 from trading.ledger import (
     DECISIONS,
     add_hypothesis,
@@ -23,11 +33,225 @@ from trading.ledger import (
     summary,
 )
 from trading.paper import paper_status, paper_step
+from trading.provenance import runtime_versions, source_sha256
 from trading.swap import read_swap_schedule, require_swap_coverage, validate_swap_schedule
 
 LEDGER = Path("runs/ledger.sqlite")
 # Commands whose results are research trials; each must be counted against a hypothesis.
 TRIAL_COMMANDS = ("backtest", "evaluate", "compare")
+FETCH_CHECKPOINT_VERSION = 1
+
+
+def _commit_new_file(frame: pd.DataFrame, target: Path, temporary: Path) -> None:
+    """Write completely before publishing `target`, and never replace evidence."""
+    temporary = temporary.with_name(f"{temporary.stem}.{uuid.uuid4().hex}{temporary.suffix}")
+    try:
+        write_bars(frame, temporary, overwrite=True)
+        publish_new_file(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_data_artifact(
+    frame: pd.DataFrame,
+    output: Path,
+    temporary: Path,
+    lineage_record: dict,
+) -> tuple[Path, dict]:
+    """Stage data and lineage completely, then publish both or roll back both."""
+    metadata = lineage_path(output)
+    if output.exists() or metadata.exists():
+        existing = output if output.exists() else metadata
+        raise FileExistsError(f"{existing} already exists; choose a new output path")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = temporary.with_name(f"{temporary.stem}.{uuid.uuid4().hex}{temporary.suffix}")
+    lineage_temporary: Path | None = None
+    output_published = False
+    lineage_published = False
+    try:
+        write_bars(frame, temporary, overwrite=True)
+        metadata, lineage_temporary, payload = prepare_data_lineage(
+            output,
+            temporary,
+            lineage_record,
+        )
+        publish_new_file(temporary, output)
+        output_published = True
+        publish_new_file(lineage_temporary, metadata)
+        lineage_published = True
+    except BaseException:
+        if lineage_published:
+            metadata.unlink(missing_ok=True)
+        if output_published:
+            output.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+        if lineage_temporary is not None:
+            lineage_temporary.unlink(missing_ok=True)
+    return metadata, payload
+
+
+def _require_trading_date(frame: pd.DataFrame, expected: date) -> None:
+    actual = {trading_date(value.to_pydatetime()) for value in frame.timestamp}
+    if actual != {expected}:
+        raise ValueError(
+            f"fetch checkpoint for {expected} contains bars from "
+            f"{sorted(day.isoformat() for day in actual)}"
+        )
+
+
+def _fetch_fx(api: GmoPublic, cfg, start: date, end: date, output: Path) -> dict:
+    """Fetch date-sized parts so a later invocation can resume after interruption."""
+    if output.exists():
+        raise FileExistsError(f"{output} already exists; choose a new output path")
+    if lineage_path(output).exists():
+        raise FileExistsError(f"{lineage_path(output)} already exists; choose a new output path")
+    checkpoint = output.with_name(f"{output.name}.fetch-fx")
+    manifest = checkpoint / "request.json"
+    request = {
+        "version": FETCH_CHECKPOINT_VERSION,
+        "market": cfg.market,
+        "symbol": cfg.symbol,
+        "bar_seconds": cfg.bar_seconds,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+    if manifest.exists():
+        try:
+            saved_request = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid fetch checkpoint {manifest}: {exc}") from exc
+        if saved_request != request:
+            raise ValueError(
+                f"fetch checkpoint {checkpoint} belongs to a different request; "
+                "use the original arguments or a new output path"
+            )
+    else:
+        if checkpoint.exists() and any(checkpoint.iterdir()):
+            raise ValueError(f"fetch checkpoint {checkpoint} has no request metadata")
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        with manifest.open("x", encoding="utf-8") as handle:
+            json.dump(request, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+
+    frames = []
+    empty_dates = []
+    resumed_dates = 0
+    fetched_dates = 0
+    for offset in range((end - start).days + 1):
+        day = start + timedelta(days=offset)
+        part = checkpoint / f"{day.isoformat()}.parquet"
+        empty = checkpoint / f"{day.isoformat()}.empty"
+        if part.exists() and empty.exists():
+            raise ValueError(f"fetch checkpoint has conflicting records for {day}")
+        if part.exists():
+            frame = read_bars(part, cfg)
+            _require_trading_date(frame, day)
+            frames.append(frame)
+            resumed_dates += 1
+            continue
+        if empty.exists():
+            empty_dates.append(day.isoformat())
+            resumed_dates += 1
+            continue
+        [(returned_day, frame)] = api.candle_days(cfg, day, day)
+        if returned_day != day:
+            raise ValueError(f"GMO collector returned {returned_day} while fetching {day}")
+        if frame.empty:
+            reason = frame.attrs.get("empty_reason")
+            if reason == "provider_empty":
+                empty.touch(exist_ok=False)
+                empty_dates.append(day.isoformat())
+            elif reason in {"incomplete_only", "current_trading_date"}:
+                raise ValueError(
+                    f"no completed candles are available for {day}; "
+                    "retry after the trading date has closed"
+                )
+            else:
+                raise ValueError(f"GMO collector returned an unexplained empty frame for {day}")
+        else:
+            if frame.attrs.get("trading_date_complete") is False:
+                raise ValueError(
+                    f"trading date {day} is still in progress; retry after its 06:00 JST rollover"
+                )
+            _require_trading_date(frame, day)
+            temporary = checkpoint / f".{day.isoformat()}.tmp.parquet"
+            _commit_new_file(frame, part, temporary)
+            frames.append(frame)
+        fetched_dates += 1
+
+    if not frames:
+        raise ValueError("no candles returned for requested trading dates")
+    frame = merge_bars(frames, cfg)
+    suffix = output.suffix
+    temporary = output.with_name(f".{output.stem}.fetch-fx.tmp{suffix}")
+
+    collection = {
+        "provider": "GMO Coin",
+        "endpoint": f"{PUBLIC_URL}/klines",
+        "market": cfg.market,
+        "symbol": cfg.symbol,
+        "bar_seconds": cfg.bar_seconds,
+        "requested_trading_dates": {"start": start.isoformat(), "end": end.isoformat()},
+        "empty_trading_dates": sorted(empty_dates),
+    }
+    frame.attrs["lineage"] = {"collection": collection}
+    data_quality = interval_gap_report(frame, cfg)
+    lineage_record = {
+        "operation": "fetch-fx",
+        "config_sha256": cfg.fingerprint,
+        "code_sha256": source_sha256(),
+        "runtime": runtime_versions(),
+        "inputs": [],
+        "collection": collection,
+        "transformation": {
+            "raw_columns": [
+                f"{side}_{column}"
+                for side in ("bid", "ask")
+                for column in ("open", "high", "low", "close")
+            ],
+            "derived_columns": {
+                column: f"(bid_{column} + ask_{column}) / 2"
+                for column in ("open", "high", "low", "close")
+            },
+            "filters": ["discard bars whose end time is after collection time"],
+        },
+        "summary": {
+            "rows": len(frame),
+            "data_start": frame.timestamp.iloc[0].isoformat(),
+            "data_end": frame.timestamp.iloc[-1].isoformat(),
+            "fetched_dates": fetched_dates,
+            "resumed_dates": resumed_dates,
+            "data_quality": data_quality,
+        },
+    }
+    lineage, _ = _publish_data_artifact(
+        frame,
+        output,
+        temporary,
+        lineage_record,
+    )
+
+    # Remove only the files owned by this exact, validated checkpoint.
+    for day in (start + timedelta(days=offset) for offset in range((end - start).days + 1)):
+        (checkpoint / f"{day.isoformat()}.parquet").unlink(missing_ok=True)
+        (checkpoint / f"{day.isoformat()}.empty").unlink(missing_ok=True)
+        (checkpoint / f".{day.isoformat()}.tmp.parquet").unlink(missing_ok=True)
+    manifest.unlink(missing_ok=True)
+    try:
+        checkpoint.rmdir()
+    except OSError:
+        pass
+    return {
+        "output": str(output),
+        "bars": len(frame),
+        "source": "GMO public API",
+        "fetched_dates": fetched_dates,
+        "resumed_dates": resumed_dates,
+        "lineage": str(lineage),
+        "data_quality": data_quality,
+    }
 
 
 def parser() -> argparse.ArgumentParser:
@@ -151,16 +375,70 @@ def run_command(args) -> dict:
     if args.command == "merge-bars":
         cfg = load_settings(args.config)
         inputs = [read_bars(path, cfg) for path in args.input]
+        input_artifacts = [
+            item.attrs.get("artifact") or describe_data_artifact(path)
+            for path, item in zip(args.input, inputs, strict=True)
+        ]
+        reported_empty_dates = {
+            day
+            for item in inputs
+            for day in (item.attrs.get("lineage") or {})
+            .get("collection", {})
+            .get("empty_trading_dates", [])
+        }
         frame = merge_bars(inputs, cfg)
-        write_bars(frame, args.output)
+        present_dates = {
+            trading_date(timestamp.to_pydatetime()).isoformat() for timestamp in frame.timestamp
+        }
+        superseded_empty_dates = sorted(reported_empty_dates & present_dates)
+        empty_dates = sorted(reported_empty_dates - present_dates)
+        collection = {
+            "provider": "derived from input artifacts",
+            "market": cfg.market,
+            "symbol": cfg.symbol,
+            "bar_seconds": cfg.bar_seconds,
+            "empty_trading_dates": empty_dates,
+            "superseded_empty_trading_dates": superseded_empty_dates,
+        }
+        frame.attrs["lineage"] = {"collection": collection}
+        data_quality = interval_gap_report(frame, cfg)
+        overlapping = sum(len(item) for item in inputs) - len(frame)
+        lineage_record = {
+            "operation": "merge-bars",
+            "config_sha256": cfg.fingerprint,
+            "code_sha256": source_sha256(),
+            "runtime": runtime_versions(),
+            "inputs": input_artifacts,
+            "collection": collection,
+            "transformation": {
+                "ordering": "timestamp ascending",
+                "overlap_policy": "content must match; keep the first input copy",
+                "overlapping_bars": overlapping,
+            },
+            "summary": {
+                "rows": len(frame),
+                "data_start": frame.timestamp.iloc[0].isoformat(),
+                "data_end": frame.timestamp.iloc[-1].isoformat(),
+                "data_quality": data_quality,
+            },
+        }
+        suffix = args.output.suffix
+        temporary = args.output.with_name(f".{args.output.stem}.merge-bars.tmp{suffix}")
+        lineage, _ = _publish_data_artifact(
+            frame,
+            args.output,
+            temporary,
+            lineage_record,
+        )
         return {
             "output": str(args.output),
             "inputs": [str(path) for path in args.input],
             "bars": len(frame),
-            "overlapping_bars": sum(len(item) for item in inputs) - len(frame),
+            "overlapping_bars": overlapping,
             "data_start": frame.timestamp.iloc[0].isoformat(),
             "data_end": frame.timestamp.iloc[-1].isoformat(),
-            "data_quality": interval_gap_report(frame, cfg),
+            "data_quality": data_quality,
+            "lineage": str(lineage),
         }
     cfg = load_settings(args.config)
     swap_schedule = (
@@ -191,11 +469,8 @@ def run_command(args) -> dict:
     with httpx.Client(follow_redirects=False) as client:
         api = GmoPublic(client)
         if args.command == "fetch-fx":
-            if args.output.exists():
-                raise FileExistsError(f"{args.output} already exists; choose a new output path")
-            frame = api.candles(cfg, args.start, args.end)
-            write_bars(frame, args.output)
-            return {"output": str(args.output), "bars": len(frame), "source": "GMO public API"}
+            api.validate_candle_range(cfg, args.start, args.end)
+            return _fetch_fx(api, cfg, args.start, args.end, args.output)
         if args.command == "fetch-swap":
             if args.output.exists():
                 raise FileExistsError(f"{args.output} already exists; choose a new output path")

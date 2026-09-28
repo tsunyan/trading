@@ -9,6 +9,7 @@ from trading.evaluation import (
     chronological_folds,
     evaluate_strategy,
     exposure_matched_buy_hold,
+    interval_gap_report,
     save_comparison,
     save_evaluation,
 )
@@ -65,14 +66,54 @@ def test_cost_stress_cannot_improve_equity(cfg):
     assert report["verdict"]["status"] == "insufficient_evidence"
 
 
-def test_evaluation_reports_unclassified_interval_gaps(cfg):
+def test_evaluation_reports_unexplained_interval_gaps(cfg):
     bars = evaluation_bars(cfg).drop(index=40).reset_index(drop=True)
 
     report, _, _, _ = evaluate_strategy(bars, cfg, fold_count=3)
 
     assert report["data_quality"]["gap_count"] == 1
     assert report["data_quality"]["unobserved_bar_intervals"] == 1
-    assert "unclassified" in report["data_quality"]["classification"]
+    assert report["data_quality"]["unexplained_bar_intervals"] == 1
+    assert report["data_quality"]["status"] == "needs_review"
+
+
+def test_gap_report_classifies_regular_fx_weekend_closure(cfg, bars):
+    frame = bars.iloc[:2].copy()
+    frame["timestamp"] = pd.to_datetime(["2025-01-10T20:00:00Z", "2025-01-12T22:00:00Z"], utc=True)
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["gap_count"] == 1
+    assert report["scheduled_closure_bar_intervals"] == 49
+    assert report["provider_empty_bar_intervals"] == 0
+    assert report["unexplained_bar_intervals"] == 0
+    assert report["status"] == "ok"
+    assert report["gaps"][0]["classification"] == "scheduled_closure"
+
+
+def test_gap_report_uses_provider_empty_dates_from_lineage(cfg, bars):
+    frame = bars.iloc[:2].copy()
+    frame["timestamp"] = pd.to_datetime(["2025-12-24T20:00:00Z", "2025-12-25T21:00:00Z"], utc=True)
+    frame.attrs["lineage"] = {"collection": {"empty_trading_dates": ["2025-12-25"]}}
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["provider_empty_bar_intervals"] == 24
+    assert report["unexplained_bar_intervals"] == 0
+    assert report["status"] == "needs_review"
+    assert report["review_reasons"] == ["provider_empty_during_regular_hours"]
+    assert report["gaps"][0]["classification"] == "provider_empty"
+
+
+def test_gap_report_rejects_empty_date_lineage_that_conflicts_with_bars(cfg, bars):
+    frame = bars.iloc[:3].copy()
+    frame.attrs["lineage"] = {"collection": {"empty_trading_dates": ["2025-01-06"]}}
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["status"] == "needs_review"
+    assert report["lineage_empty_date_conflicts"] == ["2025-01-06"]
+    assert report["review_reasons"] == ["lineage_empty_date_conflicts_with_bars"]
 
 
 MATCHED_EXCESS = {"baseline_matched_excess_pct": 1.0, "stressed_matched_excess_pct": 0.5}
