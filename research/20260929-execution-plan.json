@@ -1,0 +1,45 @@
+{
+  "batch_id": "20260929-execution-recheck",
+  "data": "data/usdjpy_20231027_20260924.parquet",
+  "swap_data": "data/usdjpy_swap_20231027_20260923_full.csv",
+  "period": "research",
+  "folds": 3,
+  "stress_multiplier": 2.0,
+  "warmup_bars": 481,
+  "bootstrap": {"samples": 10000, "block_calendar_days": [5, 20], "seed": 20260929, "alpha": 0.05},
+  "base_config": {
+    "market": "fx", "symbol": "USD_JPY", "bar_seconds": 3600,
+    "initial_cash": 1000000.0, "allocation": 0.20,
+    "lot_size": 1, "min_units": 100, "max_units": 10000,
+    "max_leverage": 2.0, "maintenance_margin_ratio": 0.5,
+    "commission_rate": 0.00002, "spread": 0.01, "slippage": 0.002,
+    "max_drawdown": 0.05, "max_quote_age_seconds": 60,
+    "max_future_quote_seconds": 10, "max_signal_age_seconds": 3900, "max_spread": 0.05,
+    "strategy": "sma_cross", "fast": 24, "slow": 120, "allow_short": false
+  },
+  "hypotheses": [
+    {
+      "id": "H005-sma24120-execution",
+      "description": "H002 entry17の探索的手掛かりの約定モデル再検証。戦略・費用下限・期間・配分は変更しない。fixed対照で旧結果の再現を確認し、bid_askで売買価格・時価・数量・証拠金停止・DD停止・比較買い持ちを再計算する。H002の主設定不合格を取り消すものではなく、独立検証でもない。",
+      "primary": "sma-24-120-bid-ask",
+      "variants": [
+        {"name": "sma-24-120-fixed-control", "execution": {"mode": "fixed"}},
+        {"name": "sma-24-120-bid-ask", "execution": {"mode": "bid_ask"}}
+      ]
+    }
+  ],
+  "execution_contract": [
+    "売買シグナルは従来どおりmid終値。数量は判断足終値の方向別執行見積価格と口座資産で決め、次足始値は見ない。次足の実価格で資金不足ならbrokerが拒否する。",
+    "有効スプレッド=max(設定下限, 観測ASK-BID×観測倍率)。買い=mid+有効半スプレッド+滑り、売り=mid-有効半スプレッド-滑り。費用悪化では下限・観測倍率・滑り・手数料を2倍、スワップは変更しない。",
+    "bid_ask時価は買い建玉を有効BID終値、売り建玉を有効ASK終値で評価。最終仮想決済にのみ追加の滑りと決済手数料を課し、スプレッドを二重控除しない。",
+    "証拠金は買い建玉で有効BID安値、売り建玉で有効ASK高値。足内スワップは不利な支払いだけを極値評価に含める。DDは方向別終値の資産で判定し停止決済は次足。",
+    "従来のmax_spread紙口座フィルタや注文遅延・部分約定を新しい戦略条件として追加しない。BID/ASK足の同時刻性や流動性は保証しない。"
+  ],
+  "acceptance": [
+    "fixed対照の数値と旧entry17の数値・売買経路が許容誤差内で一致する。差があればモデル実装を調べ、戦略の選び直しはしない。",
+    "bid_askで既存candidate基準を全て通過し、通常/2倍とも最終決済費用後の累積損益がプラスであることを最低条件とする。",
+    "既存21試行と今回2試行の合計23以上で統計診断を補正する。5日/20日ブロック、各10000回、両方補正p<0.05が必要。現金比のインサンプル診断にすぎずalpha検定ではない。",
+    "H002の近隣設定の不安定さ、既視データでの事後選択は残る。今回の黒字だけで仮説成立とはしない。データ品質needs_reviewや統計診断不合格なら昇格・凍結・模擬口座設定変更・実取引を行わない。",
+    "この2設定のみで打ち切る。パラメータ追加、期間変更、費用下限緩和は行わない。"
+  ]
+}
