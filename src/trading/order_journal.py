@@ -131,9 +131,18 @@ class OrderJournal:
             raise OrderBlocked("guarded journal has missing risk policy")
         return row
 
+    @staticmethod
+    def _clock(now):
+        """Caller clock errors are programming errors, not account inconsistencies."""
+        if now is None:
+            return datetime.now(UTC)
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise OrderBlocked("now must be a timezone-aware datetime")
+        return now
+
     def update_account(self, snapshot: AccountSnapshot, quote: AccountQuote, *, now=None):
         """Reconcile a normalized complete account snapshot; never accepts raw API data."""
-        now = now or datetime.now(UTC)
+        now = self._clock(now)
         try:
             snapshot = AccountSnapshot.model_validate(snapshot.model_dump())
             quote = AccountQuote.model_validate(quote.model_dump())
@@ -231,7 +240,7 @@ class OrderJournal:
         Crash after this commit, even before a caller sends anything, requires
         reconciliation. At-most-once local claiming is not broker exactly-once.
         """
-        now = now or datetime.now(UTC)
+        now = self._clock(now)
         blocked = None
         with self._transaction() as conn:
             row = self._row(conn, client_id)

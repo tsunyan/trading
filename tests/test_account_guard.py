@@ -176,6 +176,21 @@ def test_account_clock_rejection_can_recover(tmp_path, target, seconds):
     journal.begin_submission("Buy001", quote=quote(), now=NOW)
 
 
+@pytest.mark.parametrize("bad_now", [NOW.replace(tzinfo=None), "2026-09-29T10:00:00+00:00"])
+def test_invalid_caller_clock_is_rejected_without_halting(tmp_path, bad_now):
+    journal = make_journal(tmp_path)
+    with pytest.raises(OrderBlocked, match="timezone-aware datetime"):
+        journal.update_account(account(), quote(), now=bad_now)
+    assert not journal.snapshot()["halted"]
+    journal.update_account(account(), quote(), now=NOW)
+    journal.prepare(intent())
+    with pytest.raises(OrderBlocked, match="timezone-aware datetime"):
+        journal.begin_submission("Buy001", quote=quote(), now=bad_now)
+    state = journal.snapshot()
+    assert not state["halted"] and state["orders"][0]["state"] == "PREPARED"
+    journal.begin_submission("Buy001", quote=quote(), now=NOW)
+
+
 @pytest.mark.parametrize("state", ["SUBMITTING", "UNKNOWN", "CANCEL_PENDING", "RECONCILING"])
 def test_account_update_during_order_processing_can_recover(tmp_path, state):
     journal = make_journal(tmp_path)
