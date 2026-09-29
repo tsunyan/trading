@@ -188,8 +188,8 @@ def test_empty_orders_never_prove_rejection(intent):
     with pytest.raises(BrokerResponseError):
         parse_evidence(
             intent,
-            {"status": 0, "data": []},
-            {"status": 0, "data": []},
+            {"status": 0, "data": {"list": []}},
+            {"status": 0, "data": {"list": []}},
             datetime.now(UTC),
             executions_complete=True,
         )
@@ -226,12 +226,12 @@ def raw_responses(intent):
         "positionId": 4,
         "size": "1000",
         "price": "150",
-        "fee": "3",
+        "fee": "-3",
         "lossGain": "0",
         "settledSwap": "0",
         "timestamp": "2026-09-29T00:00:00Z",
     }
-    return {"status": 0, "data": [order]}, {"status": 0, "data": [execution]}
+    return {"status": 0, "data": {"list": [order]}}, {"status": 0, "data": {"list": [execution]}}
 
 
 @pytest.mark.parametrize(
@@ -254,7 +254,7 @@ def raw_responses(intent):
     ],
 )
 def test_response_mismatch_overfill_and_invalid_values(intent, raw_responses, target, key, value):
-    raw_responses[target]["data"][0][key] = value
+    raw_responses[target]["data"]["list"][0][key] = value
     with pytest.raises(ValueError):
         parse_evidence(intent, *raw_responses, datetime(2026, 9, 29, tzinfo=UTC))
 
@@ -262,6 +262,83 @@ def test_response_mismatch_overfill_and_invalid_values(intent, raw_responses, ta
 def test_conflicting_fill_id_and_default_completeness(intent, raw_responses):
     result = parse_evidence(intent, *raw_responses, datetime(2026, 9, 29, tzinfo=UTC))
     assert not result.executions_complete
-    raw_responses[1]["data"].append({**raw_responses[1]["data"][0], "fee": "4"})
+    fills = raw_responses[1]["data"]["list"]
+    fills.append({**fills[0], "fee": "-4"})
     with pytest.raises(ValueError, match="conflicting duplicate"):
         parse_evidence(intent, *raw_responses, datetime(2026, 9, 29, tzinfo=UTC))
+
+
+def test_official_gmo_response_shape_and_fee_sign():
+    """Shapes and signs follow the GMO FX /orders and /executions response examples."""
+    close = OrderIntent(
+        client_id="aaaaa",
+        side="SELL",
+        effect="CLOSE",
+        units=10000,
+        kind="MARKET",
+        bound="141.2",
+        positions=(Settlement(position_id=2234567, units=10000),),
+    )
+    identity = {
+        "clientOrderId": "aaaaa",
+        "symbol": "USD_JPY",
+        "side": "SELL",
+        "settleType": "CLOSE",
+    }
+    orders = {
+        "status": 0,
+        "data": {
+            "list": [
+                {
+                    **identity,
+                    "rootOrderId": 223456789,
+                    "orderId": 223456789,
+                    "orderType": "NORMAL",
+                    "executionType": "MARKET",
+                    "size": "10000",
+                    "status": "EXECUTED",
+                    "expiry": "20201113",
+                    "timestamp": "2020-11-24T21:27:04.000Z",
+                }
+            ]
+        },
+        "responsetime": "2020-11-24T21:28:00.000Z",
+    }
+    executions = {
+        "status": 0,
+        "data": {
+            "list": [
+                {
+                    **identity,
+                    "amount": "16215.999",
+                    "executionId": 92123912,
+                    "orderId": 223456789,
+                    "positionId": 2234567,
+                    "size": "10000",
+                    "price": "141.251",
+                    "lossGain": "15730",
+                    "fee": "-30",
+                    "settledSwap": "515.999",
+                    "timestamp": "2020-11-24T21:27:04.764Z",
+                }
+            ]
+        },
+        "responsetime": "2020-11-24T21:28:00.000Z",
+    }
+    observed = datetime(2020, 11, 24, 21, 28, tzinfo=UTC)
+    result = parse_evidence(close, orders, executions, observed, executions_complete=True)
+    assert result.executions[0].fee == Decimal("30")
+    assert result.executions[0].loss_gain == Decimal("15730")
+
+    fill = executions["data"]["list"][0]
+    for changes, message in [
+        ({"amount": "16275.999"}, "amount does not reconcile"),
+        ({"fee": "30", "amount": "16275.999"}, "fee credit"),
+        ({"fee": "abc"}, "invalid fee"),
+    ]:
+        bad = {**executions, "data": {"list": [{**fill, **changes}]}}
+        with pytest.raises(BrokerResponseError, match=message):
+            parse_evidence(close, orders, bad, observed)
+    for flat in ({**orders, "data": orders["data"]["list"]}, {**orders, "data": {}}):
+        with pytest.raises(BrokerResponseError, match="data.list"):
+            parse_evidence(close, flat, executions, observed)

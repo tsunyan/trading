@@ -41,7 +41,7 @@ def fill(identifier=301, units="500"):
         "positionId": 401,
         "size": units,
         "price": "150",
-        "fee": "1.5",
+        "fee": "-1.5",
         "lossGain": "0",
         "settledSwap": "0",
         "timestamp": NOW.isoformat(),
@@ -189,7 +189,10 @@ def test_missing_raw_order_halts_not_rejected(journal, intent):
     submitted(journal, intent)
     with pytest.raises(ValueError):
         journal.reconcile_responses(
-            intent.client_id, {"status": 0, "data": []}, {"status": 0, "data": []}, NOW
+            intent.client_id,
+            {"status": 0, "data": {"list": []}},
+            {"status": 0, "data": {"list": []}},
+            NOW,
         )
     assert journal.snapshot()["halted"]
     assert journal.snapshot()["orders"][0]["state"] == "SUBMITTING"

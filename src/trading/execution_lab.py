@@ -32,8 +32,8 @@ def fixture_evidence(intent, root_id, order_id, status, fills, observed_at):
     executions = [{**identity, "orderId": order_id, **fill} for fill in fills]
     return parse_evidence(
         intent,
-        {"status": 0, "data": [order]},
-        {"status": 0, "data": executions},
+        {"status": 0, "data": {"list": [order]}},
+        {"status": 0, "data": {"list": executions}},
         observed_at,
         executions_complete=True,
     )
@@ -72,7 +72,7 @@ def demo(directory: Path) -> dict:
         "positionId": 401,
         "size": "500",
         "price": "150.000",
-        "fee": "1.5",
+        "fee": "-1.5",
         "lossGain": "0",
         "settledSwap": "0",
         "timestamp": now.isoformat(),
@@ -120,7 +120,7 @@ def demo(directory: Path) -> dict:
         "executionId": 303,
         "size": "1000",
         "price": "150.100",
-        "fee": "3",
+        "fee": "-3",
         "lossGain": "100",
     }
     journal.reconcile(
@@ -191,7 +191,7 @@ def guard_demo(directory: Path) -> dict:
         "positionId": 401,
         "size": "1000",
         "price": "150",
-        "fee": "3",
+        "fee": "-3",
         "lossGain": "0",
         "settledSwap": "0",
         "timestamp": now.isoformat(),

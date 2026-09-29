@@ -103,7 +103,7 @@ def fill(execution_id=301, **changes):
         "positionId": 401,
         "size": "1000",
         "price": "150.01",
-        "fee": "3",
+        "fee": "-3",
         "lossGain": "0",
         "settledSwap": "0",
         "timestamp": (NOW + timedelta(seconds=1)).isoformat(),

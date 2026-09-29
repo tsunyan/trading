@@ -9,7 +9,7 @@ import hmac
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -187,13 +187,51 @@ def response_data(response: dict):
     return response["data"]
 
 
-def _units(value) -> int:
+def _response_list(response: dict) -> list:
+    """GMO /orders and /executions wrap their rows as {"data": {"list": [...]}}."""
+    data = response_data(response)
+    if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+        raise BrokerResponseError("expected data.list")
+    return data["list"]
+
+
+def _decimal(value, name: str) -> Decimal:
     if not isinstance(value, str):
-        raise BrokerResponseError("expected quantity string")
-    decimal = Decimal(value)
-    if not decimal.is_finite() or decimal <= 0 or decimal != decimal.to_integral_value():
+        raise BrokerResponseError(f"expected {name} string")
+    try:
+        decimal = Decimal(value)
+    except InvalidOperation:
+        raise BrokerResponseError(f"invalid {name}") from None
+    if not decimal.is_finite():
+        raise BrokerResponseError(f"invalid {name}")
+    return decimal
+
+
+def _units(value) -> int:
+    decimal = _decimal(value, "quantity")
+    if decimal <= 0 or decimal != decimal.to_integral_value():
         raise BrokerResponseError("invalid quantity")
     return int(decimal)
+
+
+def _paid_fee(fill: dict) -> Decimal:
+    """Convert GMO's signed account amount (a paid fee is negative) to a nonnegative debit.
+
+    When GMO also returns `amount`, it must equal lossGain + fee + settledSwap, which pins
+    down the sign convention instead of assuming it.
+    """
+    fee = _decimal(fill.get("fee"), "fee")
+    if fee > 0:
+        raise BrokerResponseError("unexpected fee credit")
+    if "amount" in fill:
+        total = (
+            _decimal(fill.get("lossGain"), "lossGain")
+            + fee
+            + _decimal(fill.get("settledSwap"), "settledSwap")
+        )
+        if _decimal(fill["amount"], "amount") != total:
+            raise BrokerResponseError("execution amount does not reconcile")
+    return -fee
 
 
 class Execution(Contract):
@@ -201,6 +239,7 @@ class Execution(Contract):
     position_id: Units
     units: Units
     price: Money
+    # Normalized nonnegative debit; GMO's raw `fee` is negative when paid.
     fee: Decimal
     loss_gain: Decimal
     settled_swap: Decimal
@@ -230,9 +269,9 @@ def parse_evidence(
     Completeness is a caller assertion, not inferred from an empty response.
     A future collector must establish a coherent complete snapshot before setting it.
     """
-    rows, fills = response_data(orders), response_data(executions)
-    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(fills, list):
-        raise BrokerResponseError("expected one order and an execution list")
+    rows, fills = _response_list(orders), _response_list(executions)
+    if len(rows) != 1:
+        raise BrokerResponseError("expected exactly one order")
     row = rows[0]
     expected = {
         "clientOrderId": intent.client_id,
@@ -259,7 +298,7 @@ def parse_evidence(
             position_id=fill["positionId"],
             units=_units(fill["size"]),
             price=fill["price"],
-            fee=fill["fee"],
+            fee=_paid_fee(fill),
             loss_gain=fill["lossGain"],
             settled_swap=fill["settledSwap"],
             timestamp=fill["timestamp"],
