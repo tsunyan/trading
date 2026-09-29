@@ -1,0 +1,12 @@
+{
+  "reviewed_on_jst": "2026-09-29",
+  "method": "GMOコイン公式の年末年始営業案内をObscuraで確認。下記は休場に完全に含まれる1時間足の開始時刻を半開区間に正規化したもの。05:59/06:59という分単位の案内をティック精度の停止時刻とは解釈しない。",
+  "windows": [
+    {"first_missing_bar_jst": "2023-12-25T07:00:00+09:00", "resume_jst": "2023-12-26T07:00:00+09:00", "hours": 24, "source": "https://coin.z.com/jp/news/2023/12/12212/", "published": "2023-12-19"},
+    {"first_missing_bar_jst": "2024-01-01T07:00:00+09:00", "resume_jst": "2024-01-02T07:00:00+09:00", "hours": 24, "source": "https://coin.z.com/jp/news/2023/12/12212/", "published": "2023-12-19"},
+    {"first_missing_bar_jst": "2024-12-25T06:00:00+09:00", "resume_jst": "2024-12-26T07:00:00+09:00", "hours": 25, "source": "https://coin.z.com/jp/news/2024/12/13869/", "published": "2024-12-23"},
+    {"first_missing_bar_jst": "2025-01-01T06:00:00+09:00", "resume_jst": "2025-01-02T07:00:00+09:00", "hours": 25, "source": "https://coin.z.com/jp/news/2024/12/13869/", "published": "2024-12-23"},
+    {"first_missing_bar_jst": "2025-12-25T06:00:00+09:00", "resume_jst": "2025-12-26T07:00:00+09:00", "hours": 25, "source": "https://coin.z.com/jp/news/2025/12/15340/", "published": "2025-12-19"},
+    {"first_missing_bar_jst": "2026-01-01T06:00:00+09:00", "resume_jst": "2026-01-02T07:00:00+09:00", "hours": 25, "source": "https://coin.z.com/jp/news/2025/12/15340/", "published": "2025-12-19"}
+  ]
+}
