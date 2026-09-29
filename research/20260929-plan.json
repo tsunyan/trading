@@ -1,0 +1,63 @@
+{
+  "batch_id": "20260929-hypothesis-screen",
+  "data": "data/usdjpy_20231027_20260924.parquet",
+  "swap_data": "data/usdjpy_swap_20231027_20260923_full.csv",
+  "period": "research",
+  "folds": 3,
+  "stress_multiplier": 2.0,
+  "warmup_bars": 481,
+  "bootstrap": {"samples": 10000, "block_calendar_days": [5, 20], "seed": 20260929, "alpha": 0.05},
+  "base_config": {
+    "market": "fx", "symbol": "USD_JPY", "bar_seconds": 3600,
+    "initial_cash": 1000000.0, "allocation": 0.20,
+    "lot_size": 1, "min_units": 100, "max_units": 10000,
+    "max_leverage": 2.0, "maintenance_margin_ratio": 0.5,
+    "commission_rate": 0.00002, "spread": 0.01, "slippage": 0.002,
+    "max_drawdown": 0.05, "max_quote_age_seconds": 60,
+    "max_future_quote_seconds": 10, "max_signal_age_seconds": 3900, "max_spread": 0.05
+  },
+  "hypotheses": [
+    {
+      "id": "H002-slow-long-trend",
+      "description": "買いのみの遅いトレンド追随。上昇トレンドの間だけUSDを保有すれば、短期往復売買と売りのスワップ支払いを減らし、下落局面の保有を減らせるという仮説。金利差や将来のスワップはシグナルに使わない。基準60/240本、近隣24/120と120/480。保有はMA関係が反転するまで。",
+      "primary": "sma-60-240-long",
+      "variants": [
+        {"name": "sma-24-120-long", "strategy": "sma_cross", "fast": 24, "slow": 120, "allow_short": false},
+        {"name": "sma-60-240-long", "strategy": "sma_cross", "fast": 60, "slow": 240, "allow_short": false},
+        {"name": "sma-120-480-long", "strategy": "sma_cross", "fast": 120, "slow": 480, "allow_short": false}
+      ]
+    },
+    {
+      "id": "H003-dip-rebound-long",
+      "description": "24時間足の急落後に買う短期反発。短期の売り過剰が戻るなら、下落後だけ保有するルールで費用後の反発を捉えられるという未確認の仮説。基準1%下落、近隣0.5%と1.5%。24本騰落率が閾値を回復したら次足決済。売りなし、ナンピンなし。",
+      "primary": "rebound-24-010-long",
+      "variants": [
+        {"name": "rebound-24-005-long", "strategy": "mean_reversion", "lookback": 24, "signal_threshold": 0.005, "allow_short": false},
+        {"name": "rebound-24-010-long", "strategy": "mean_reversion", "lookback": 24, "signal_threshold": 0.01, "allow_short": false},
+        {"name": "rebound-24-015-long", "strategy": "mean_reversion", "lookback": 24, "signal_threshold": 0.015, "allow_short": false}
+      ]
+    },
+    {
+      "id": "H004-medium-momentum",
+      "description": "週〜月単位の順張り。24本の短期ノイズより長い価格変化の持続を売買する。基準240本/0.75%、近隣120本/0.5%と480本/1%。閾値は時間幅におおむね平方根比例で拡大。両方向を許し、売りのスワップ支払いも全て計上。信号消滅・反転で次足決済。",
+      "primary": "momentum-240-0075-both",
+      "variants": [
+        {"name": "momentum-120-005-both", "strategy": "momentum", "lookback": 120, "signal_threshold": 0.005, "allow_short": true},
+        {"name": "momentum-240-0075-both", "strategy": "momentum", "lookback": 240, "signal_threshold": 0.0075, "allow_short": true},
+        {"name": "momentum-480-010-both", "strategy": "momentum", "lookback": 480, "signal_threshold": 0.01, "allow_short": true}
+      ]
+    }
+  ],
+  "acceptance": [
+    "既存evaluateのcandidate基準を全て満たす。最低30完了取引、通常/費用2倍でプラスかつ平均符号付き建玉を合わせた買い持ちを上回り、各2/3区間以上プラス、DD5%以内、停止なし。",
+    "最終建玉の決済費用控除後も、連続損益が通常/悪化の双方でプラス。",
+    "仮説単位の頑健性は事前指定primaryのcandidate通過と、同仮説3設定中2設定以上のcandidate通過を必要とする。近隣設定からの事後的なprimary選び直しはしない。",
+    "統計診断: 費用2倍の連続資産曲線を暦日損益に集約し、5日/20日の円環ブロックで10000回の中心化帰無分布を作る。片側平均損益>0のp値を、既存H000以外の研究試行数+今回9試行でBonferroni補正し、両方0.05未満を要求。これは現金比の診断であり買い持ち比alphaの検定ではない。",
+    "価格欠損needs_review、固定スプレッド、選択バイアス、単一通貨・既視データの制約が残る場合は実運用候補としない。",
+    "このバッチは9設定で打ち切る。落ちた後のパラメータ追加・合否緩和・期間切り出しによる救済をしない。"
+  ],
+  "sources": [
+    {"url": "https://www.bis.org/publications/drivers-carry-and-currency-momentum", "use": "キャリーとモメンタムの仮説の背景。下方リスク、取引費用、価格への情報反映を議論。USDJPYの特定ルールの収益性を立証する資料ではない。"},
+    {"url": "https://fairmodel.econ.yale.edu/ec439/mosk.pdf", "use": "Time Series Momentum (2012)。複数先物での時系列モメンタム研究の背景。今回の期間/閾値を同論文の検証済み条件とは扱わない。"}
+  ]
+}
