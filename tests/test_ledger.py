@@ -82,7 +82,10 @@ def test_backtest_run_records_provenance(ledger, bars, cfg, tmp_path):
     assert entry["mode"] == "backtest"
     assert entry["experiment_id"] == report["experiment_id"]
     assert entry["run_created_at"] == report["created_at"]
-    assert entry["run_parameters"] == {"mode": "backtest"}
+    assert entry["run_parameters"] == {
+        "mode": "backtest",
+        "execution": {"mode": "fixed", "observed_spread_multiplier": 1.0},
+    }
     assert entry["data_sha256"] == report["data_sha256"]
     assert entry["code_sha256"] == report["code_sha256"]
     # A backtest decides once it holds a full warm-up window (slow = 3 bars).

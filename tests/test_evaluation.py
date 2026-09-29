@@ -254,6 +254,8 @@ def test_leveraged_buy_and_hold_is_liquidated_on_maintenance_margin(cfg):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "symbol": cfg.symbol,
+            "volume": 0,
             "open": prices,
             "high": prices,
             "low": prices,
@@ -367,6 +369,8 @@ def test_buy_and_hold_margin_is_tested_at_the_candle_low(cfg):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "symbol": cfg.symbol,
+            "volume": 0,
             "open": prices,
             "high": prices,
             "low": lows,
@@ -467,6 +471,8 @@ def test_benchmark_margin_breach_is_not_rescued_by_a_later_credit(cfg):
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2025-01-01", periods=len(prices), freq="h", tz="UTC"),
+            "symbol": cfg.symbol,
+            "volume": 0,
             "open": prices,
             "high": prices,
             "low": lows,
