@@ -12,6 +12,7 @@ import pandas as pd
 from trading.backtest import completed_trades, run_backtest
 from trading.config import Settings
 from trading.data import validate_bars
+from trading.execution import ExecutionModel, execution_prices
 from trading.gmo import JST, trading_date
 from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import entry_units, maintenance_margin_halt
@@ -127,18 +128,22 @@ def buy_and_hold_benchmark(
     cfg: Settings,
     active_start: pd.Timestamp,
     swap_schedule: pd.DataFrame | None = None,
+    *,
+    execution: ExecutionModel | None = None,
 ) -> dict:
     """Buy once at the strategy's first executable open and report marked/liquidated value.
 
     Like the strategy account, the position is force-closed at the next open once the
     maintenance-margin rule trips, and the account stays flat afterwards.
     """
+    execution = execution or ExecutionModel()
+    frame = validate_bars(frame, cfg)
+    prices = execution_prices(frame, cfg, execution)
     active_matches = frame.index[frame.timestamp == active_start].tolist()
     if len(active_matches) != 1 or active_matches[0] + 1 >= len(frame):
         raise ValueError("benchmark active_start must leave a next bar")
     entry_index = active_matches[0] + 1
-    adverse_cost = cfg.spread / 2 + cfg.slippage
-    entry_price = float(frame.open.iloc[entry_index]) + adverse_cost
+    entry_price = float(prices.buy_open.iloc[entry_index])
     units = entry_units(cfg.initial_cash, cfg.initial_cash, entry_price, cfg)
     entry_fee = units * entry_price * cfg.commission_rate
     entry_time = frame.timestamp.iloc[entry_index]
@@ -149,9 +154,9 @@ def buy_and_hold_benchmark(
         swap_credit_between(swap_schedule, entry_time, timestamp + bar, units)
         for timestamp in path.timestamp
     ]
-    closes = path.close.astype(float)
+    closes = prices.mark_bid.iloc[entry_index:]
     # A long is held through each candle, so its margin is tested at the candle low.
-    lows = path.low.astype(float)
+    lows = prices.risk_bid_low.iloc[entry_index:]
     equities = (
         cfg.initial_cash
         - entry_fee
@@ -179,11 +184,11 @@ def buy_and_hold_benchmark(
     if forced_exit is None:
         exit_time = None
         total_swap = float(swap_path[-1]) if swap_path else 0.0
-        exit_price = float(frame.close.iloc[-1]) - adverse_cost
+        exit_price = float(prices.sell_close.iloc[-1])
     else:
         exit_time = path.timestamp.iloc[forced_exit]
         total_swap = swap_credit_between(swap_schedule, entry_time, exit_time, units)
-        exit_price = float(path.open.iloc[forced_exit]) - adverse_cost
+        exit_price = float(prices.sell_open.iloc[entry_index + forced_exit])
     exit_fee = units * exit_price * cfg.commission_rate
     liquidation_equity = (
         cfg.initial_cash + units * (exit_price - entry_price) - entry_fee - exit_fee + total_swap
@@ -194,10 +199,11 @@ def buy_and_hold_benchmark(
         held_units.iloc[forced_exit:] = 0.0
     # Averaged over every evaluated bar, including the decision bar before the entry fill,
     # so it lines up with the strategy's equity rows.
-    average_notional = float((held_units * closes).sum() / (len(path) + 1))
+    average_notional = float((held_units * path.close).sum() / (len(path) + 1))
     peaks = equities.cummax().clip(lower=cfg.initial_cash)
     marked_equity = float(equities.iloc[-1])
     return {
+        "execution": execution.model_dump(),
         "entry_timestamp": entry_time.isoformat(),
         "entry_price": entry_price,
         "units": units,
@@ -436,6 +442,7 @@ def evaluate_strategy(
     stress_multiplier: float = 2.0,
     swap_schedule: pd.DataFrame | None = None,
     warmup_bars: int | None = None,
+    execution: ExecutionModel | None = None,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Evaluate one fixed strategy across chronological folds and stressed costs.
 
@@ -443,6 +450,7 @@ def evaluate_strategy(
     evaluated period; it may not be shorter.
     """
     frame = validate_bars(frame, cfg)
+    execution = execution or ExecutionModel()
     if swap_schedule is not None:
         swap_schedule = validate_swap_schedule(swap_schedule, cfg)
     if not math.isfinite(stress_multiplier) or stress_multiplier <= 1:
@@ -458,17 +466,20 @@ def evaluate_strategy(
 
     for scenario, scenario_cfg in scenarios.items():
         cost_multiplier = 1.0 if scenario == "baseline" else stress_multiplier
+        scenario_execution = execution.stressed(cost_multiplier)
         continuous_report, continuous_equity, continuous_orders = run_backtest(
             frame,
             scenario_cfg,
             active_start=continuous_active_start,
             swap_schedule=swap_schedule,
+            execution=scenario_execution,
         )
         buy_hold = buy_and_hold_benchmark(
             frame,
             scenario_cfg,
             continuous_active_start,
             swap_schedule,
+            execution=scenario_execution,
         )
         continuous_trades = completed_trades(
             continuous_orders[continuous_orders.status == "Completed"]
@@ -496,6 +507,7 @@ def evaluate_strategy(
                 scenario_cfg,
                 active_start=spec["active_start"],
                 swap_schedule=swap_schedule,
+                execution=scenario_execution,
             )
             trades = completed_trades(orders[orders.status == "Completed"])
             metadata = {
@@ -557,6 +569,7 @@ def evaluate_strategy(
         "active_start": continuous_active_start.isoformat(),
         "fold_count": fold_count,
         "stress_multiplier": stress_multiplier,
+        "execution": execution.model_dump(),
         "data_quality": interval_gap_report(frame, cfg),
         "scenarios": scenario_reports,
         "verdict": _evidence_gate(
@@ -580,7 +593,7 @@ def evaluate_strategy(
                 "Independent folds reset cash, positions, and risk state; continuous results "
                 "represent one uninterrupted account path."
             ),
-            "Open positions are marked to the final close and are not force-liquidated.",
+            "Open positions use the execution model's closing mark; liquidation is hypothetical.",
             "Minimum evidence gates reduce weak claims but do not prove future profitability.",
         ],
     }
@@ -602,6 +615,7 @@ def save_evaluation(
     swap_schedule: pd.DataFrame | None = None,
     warmup_bars: int | None = None,
     git: dict | None = None,
+    execution: ExecutionModel | None = None,
 ) -> dict:
     """Save an immutable chronological evaluation and its per-fold audit tables."""
     git = git_state() if git is None else git
@@ -613,6 +627,7 @@ def save_evaluation(
         stress_multiplier=stress_multiplier,
         swap_schedule=swap_schedule,
         warmup_bars=warmup_bars,
+        execution=execution,
     )
     directory.mkdir(parents=True, exist_ok=False)
     frame.to_parquet(directory / "bars.parquet", index=False)
@@ -639,6 +654,7 @@ def save_evaluation(
                 "fold_count": fold_count,
                 "stress_multiplier": stress_multiplier,
                 "warmup_bars": report["warmup_bars"],
+                "execution": report["execution"],
             },
             git,
         )

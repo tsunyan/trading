@@ -10,6 +10,7 @@ import pandas as pd
 
 from trading.config import Settings
 from trading.data import validate_bars
+from trading.execution import ExecutionModel, execution_prices
 from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import (
     drawdown_halt,
@@ -144,10 +145,45 @@ def performance_metrics(trades: pd.DataFrame, equity: pd.DataFrame) -> dict:
     }
 
 
+class ExecutionData(bt.feeds.PandasData):
+    lines = (
+        "buy_open",
+        "sell_open",
+        "buy_close",
+        "sell_close",
+        "mark_bid",
+        "mark_ask",
+        "risk_bid_low",
+        "risk_ask_high",
+    )
+    params = tuple((name, -1) for name in lines)
+
+
+class BidAskBroker(bt.brokers.BackBroker):
+    """Next-open market fills at the precomputed side price; normal broker accounting.
+
+    _execute retains actual-price commission, cash/margin rejection and position state.
+    No candle-envelope clipping, cheat-on-close, or cheat-on-open is allowed here.
+    """
+
+    def _try_exec_market(self, order, popen, phigh, plow):
+        if self.p.coc or self.p.coo:
+            raise ValueError("BID/ASK research execution forbids cheat-on-open/close")
+        if order.data.datetime[0] <= order.created.dt:
+            return
+        price = order.data.buy_open[0] if order.isbuy() else order.data.sell_open[0]
+        self._execute(order, ago=0, price=price)
+
+
 class ResearchStrategy(bt.Strategy):
     """Directional research harness: decide on a closed bar, fill at the next open."""
 
-    params = (("cfg", None), ("active_start", None), ("swap_schedule", None))
+    params = (
+        ("cfg", None),
+        ("active_start", None),
+        ("swap_schedule", None),
+        ("execution", None),
+    )
 
     def __init__(self):
         self.cfg = self.p.cfg
@@ -214,15 +250,16 @@ class ResearchStrategy(bt.Strategy):
         if self.active_start is not None and current < self.active_start:
             return
         self.unbooked_swap, unbooked_charges = self._unbooked_swap()
-        equity = self.broker.getvalue() + self.unbooked_swap
+        size = self.position.size
+        close = float(self.data.close[0])
+        mark = float(self.data.mark_bid[0] if size > 0 else self.data.mark_ask[0])
+        equity = self.broker.getvalue() + self.unbooked_swap + size * (mark - close)
         self.peak = max(self.peak, equity)
         # The position is held through the whole candle, so test the margin at its adverse
         # extreme (low for longs, high for shorts), not only at the close. Bars do not say
         # when this candle's carry landed relative to that extreme, so count only its
         # charges there: a later credit must not rescue a breach.
-        size = self.position.size
-        close = float(self.data.close[0])
-        adverse = float(self.data.low[0]) if size > 0 else float(self.data.high[0])
+        adverse = float(self.data.risk_bid_low[0] if size > 0 else self.data.risk_ask_high[0])
         adverse_equity = self.broker.getvalue() + unbooked_charges + size * (adverse - close)
         margin_halt = maintenance_margin_halt(size, adverse_equity, adverse, self.cfg)
         drawdown = drawdown_halt(equity, self.peak, self.cfg)
@@ -255,11 +292,16 @@ class ResearchStrategy(bt.Strategy):
             reason = self.liquidation_reason if self.halted else "signal_exit"
             self.submit(self.close(), reason)
         elif not self.position and target:
-            adverse_cost = self.cfg.spread / 2 + self.cfg.slippage
-            estimate = self.data.close[0] + adverse_cost * target
+            estimate = self.data.buy_close[0] if target > 0 else self.data.sell_close[0]
             size = entry_units(self.broker.getcash(), equity, estimate, self.cfg)
             if size:
-                order = self.buy(size=size) if target > 0 else self.sell(size=size)
+                # Only the closed decision bar informs sizing/submission affordability.
+                # A next-open gap may still cause a broker margin rejection.
+                order = (
+                    self.buy(size=size, price=estimate)
+                    if target > 0
+                    else self.sell(size=size, price=estimate)
+                )
                 self.submit(order, "signal_entry")
 
 
@@ -269,9 +311,12 @@ def run_backtest(
     *,
     active_start: datetime | pd.Timestamp | None = None,
     swap_schedule: pd.DataFrame | None = None,
+    execution: ExecutionModel | None = None,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     """Return (report, equity, orders). Re-validates the frame and strategy warm-up."""
     frame = validate_bars(frame, cfg)
+    execution = execution or ExecutionModel()
+    prices = execution_prices(frame, cfg, execution)
     if swap_schedule is not None:
         swap_schedule = validate_swap_schedule(swap_schedule, cfg)
     if len(frame) < cfg.warmup_bars + 2:
@@ -285,11 +330,12 @@ def run_backtest(
         matches = frame.index[frame.timestamp == active_start_utc].tolist()
         if len(matches) != 1 or matches[0] < cfg.warmup_bars:
             raise ValueError("active_start must match a bar after sufficient warm-up")
-    feed = frame.set_index("timestamp")[["open", "high", "low", "close", "volume"]].copy()
+    feed = pd.concat([frame, prices], axis=1).set_index("timestamp")
     feed.index = feed.index.tz_convert("UTC").tz_localize(None)
     engine = bt.Cerebro(stdstats=False)
+    engine.setbroker(BidAskBroker())
     engine.adddata(
-        bt.feeds.PandasData(
+        ExecutionData(
             dataname=feed,
             timeframe=bt.TimeFrame.Minutes if cfg.market == "fx" else bt.TimeFrame.Days,
             compression=60 if cfg.market == "fx" else 1,
@@ -300,6 +346,7 @@ def run_backtest(
         cfg=cfg,
         active_start=active_start_utc.to_pydatetime() if active_start_utc is not None else None,
         swap_schedule=swap_schedule,
+        execution=execution,
     )
     engine.broker.setcash(cfg.initial_cash)
     # Keep carry separate from execution commission in orders and completed trades.
@@ -315,13 +362,6 @@ def run_backtest(
             interest=0.0,
             interest_long=True,
         )
-    )
-    # Allow adverse costs beyond the candle envelope rather than silently clipping them.
-    engine.broker.set_slippage_fixed(
-        cfg.spread / 2 + cfg.slippage,
-        slip_open=True,
-        slip_match=True,
-        slip_out=True,
     )
     strategy = engine.run()[0]
     equity = pd.DataFrame(strategy.equity_rows)
@@ -341,19 +381,20 @@ def run_backtest(
     fills = orders[orders.status == "Completed"]
     trades = completed_trades(fills)
     # Include carry inside the final candle, which the broker would only book on a next bar.
-    final_equity = float(engine.broker.getvalue()) + strategy.unbooked_swap
+    mid_equity = float(engine.broker.getvalue()) + strategy.unbooked_swap
     open_units = int(strategy.position.size)
+    final_mark = float(prices.mark_bid.iloc[-1] if open_units > 0 else prices.mark_ask.iloc[-1])
+    final_equity = mid_equity + open_units * (final_mark - float(frame.close.iloc[-1]))
     # Value if the open position were closed at the final close with the same adverse costs.
-    exit_price = float(frame.close.iloc[-1]) - (cfg.spread / 2 + cfg.slippage) * (
-        1 if open_units > 0 else -1
-    )
+    exit_price = float(prices.sell_close.iloc[-1] if open_units > 0 else prices.buy_close.iloc[-1])
     liquidation_equity = (
-        final_equity
+        mid_equity
         - open_units * (float(frame.close.iloc[-1]) - exit_price)
         - abs(open_units) * exit_price * cfg.commission_rate
     )
     report = {
         "mode": "backtest",
+        "execution": execution.model_dump(),
         "symbol": cfg.symbol,
         "strategy": cfg.strategy,
         "strategy_parameters": cfg.strategy_parameters,
@@ -375,8 +416,10 @@ def run_backtest(
         "performance": performance_metrics(trades, equity),
         "limitations": [
             "JPY accounting supports supplied FX swap history; stock borrow fees are absent.",
-            "Fixed spread/slippage assumptions; no order book, liquidity or price-limit model.",
-            "Open positions marked to last close; final orders may be pending.",
+            "Fixed or observed BID/ASK with a spread floor; no order book or partial fills.",
+            "BID/ASK candles may be asynchronous; intrabar extreme times are unknown.",
+            "Marks: fixed mode at mid, BID/ASK at exit side before slippage/commission.",
+            "Final orders may be pending; liquidation value is hypothetical, not another fill.",
             "Risk liquidation executes at the next open; it is not a guaranteed loss cap.",
         ],
     }
@@ -391,10 +434,13 @@ def save_run(
     directory: Path,
     *,
     swap_schedule: pd.DataFrame | None = None,
+    execution: ExecutionModel | None = None,
 ) -> dict:
     """Archive bars, equity, orders, fills and trades. Refuses to overwrite a run."""
     git = git_state()
-    report, equity, orders = run_backtest(frame, cfg, swap_schedule=swap_schedule)
+    report, equity, orders = run_backtest(
+        frame, cfg, swap_schedule=swap_schedule, execution=execution
+    )
     trades = completed_trades(orders[orders.status == "Completed"])
     directory.mkdir(parents=True, exist_ok=False)
     frame.to_parquet(directory / "bars.parquet", index=False)
@@ -417,7 +463,7 @@ def save_run(
             cfg,
             report["data_sha256"],
             report.get("swap_sha256"),
-            {"mode": "backtest"},
+            {"mode": "backtest", "execution": report["execution"]},
             git,
         )
     )
