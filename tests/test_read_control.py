@@ -334,3 +334,79 @@ def test_local_cli_status_and_stop_no_reset(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["blocked"]
     with pytest.raises(SystemExit):
         main(["reset", *args])
+
+
+def test_busy_finish_retries_without_repeating_get_or_poisoning_control(tmp_path):
+    clock = Clock()
+    control = create(tmp_path, clock)
+    lock = sqlite3.connect(control.path)
+    retries, requests = [], []
+
+    def wait(seconds):
+        clock.sleep(seconds)
+        if seconds == 0.05:
+            retries.append(seconds)
+            lock.rollback()
+
+    control._wait = wait
+    try:
+        with control.slot():
+            requests.append(True)
+            lock.execute("BEGIN IMMEDIATE")
+        assert requests == [True] and retries == [0.05]
+        assert not control.status()["blocked"]
+        assert [kind for kind, _ in events(control)] == ["CREATED", "CLAIMED", "COMPLETED"]
+    finally:
+        lock.close()
+
+
+def test_busy_finish_exhaustion_keeps_durable_claim_and_readable_status(tmp_path):
+    control = create(tmp_path)
+    with sqlite3.connect(control.path) as lock:
+        with pytest.raises(PrivateReadError, match="storage_busy"), control.slot():
+            lock.execute("BEGIN IMMEDIATE")
+        lock.rollback()
+    assert control.status()["in_flight"]
+    with pytest.raises(PrivateReadError, match="claim_unresolved"), control.slot():
+        pytest.fail("unresolved claim reused")
+
+
+def test_failed_stop_under_busy_cannot_release_claim_or_resume(tmp_path):
+    control = create(tmp_path)
+    with sqlite3.connect(control.path) as lock:
+        with pytest.raises(PrivateReadError), control.slot():
+            lock.execute("BEGIN IMMEDIATE")
+            control.stop()
+        lock.rollback()
+    with pytest.raises(PrivateReadError, match="storage_failed"), control.slot():
+        pytest.fail("failed stop resumed")
+    assert PersistentReadLimiter(control.path.parent, SCOPE).status()["in_flight"]
+
+
+def test_generation_query_uses_index_in_existing_database(tmp_path):
+    control = create(tmp_path)
+    with sqlite3.connect(control.path) as conn:
+        conn.execute("DROP INDEX events_kind_id")
+    PersistentReadLimiter(control.path.parent, SCOPE)
+    with sqlite3.connect(control.path) as conn:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COALESCE(MAX(id),0) FROM events "
+            "WHERE kind='RECOVERY_APPROVED'"
+        ).fetchall()
+    assert any("events_kind_id" in row[-1] for row in plan)
+
+
+def test_api_body_stop_survives_control_reopen(tmp_path):
+    clock = Clock()
+    control = create(tmp_path, clock)
+    with PrivateReadClient(
+        SecretStr("fixture-key"),
+        SecretStr("fixture-secret"),
+        limiter=control,
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": 1})),
+        clock=lambda: datetime(2026, 9, 30, tzinfo=UTC),
+    ) as client:
+        with pytest.raises(PrivateReadError, match="api_error_stop"):
+            client.get(RequestPlan("GET", "/v1/account/assets"))
+    status = PersistentReadLimiter(control.path.parent, SCOPE).status()
+    assert status["stopped"] and not status["in_flight"]

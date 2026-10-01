@@ -17,6 +17,7 @@ from pydantic import SecretStr
 
 from trading.private_read import PrivateReadClient, PrivateReadError
 from trading.read_control import PersistentReadLimiter
+from trading.wire_validation import unique_object
 
 PREFIX = "TradingLab/GMOFX/ReadOnly/v1/"
 MAX_BLOB = 2560
@@ -142,12 +143,10 @@ def _secret(value):
 
 
 def _object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise CredentialError("invalid_credential_payload")
-        result[key] = value
-    return result
+    try:
+        return unique_object(pairs)
+    except ValueError:
+        raise CredentialError("invalid_credential_payload") from None
 
 
 class CredentialVault:

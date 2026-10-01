@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, TypeAdapter
 from trading.account_events import AccountEvent, EventError, parse_event
 from trading.account_reader import ASSETS, ORDERS, POSITIONS, AccountReadReport
 from trading.broker_contracts import Contract
+from trading.wire_validation import clock_skew
 
 TIME = TypeAdapter(AwareDatetime)
 BLOCKERS = (
@@ -76,6 +77,7 @@ class AccountSyncMonitor:
         max_collection_seconds=30,
         max_observation_seconds=30,
         max_session_events=1000,
+        clock_skew_ms=0,
     ):
         for value, upper in (
             (max_idle_seconds, 300),
@@ -86,6 +88,8 @@ class AccountSyncMonitor:
             if type(value) is not int or not 1 <= value <= upper:
                 raise ValueError("invalid_sync_limits")
         self._clock, self._monotonic = clock, monotonic
+        self._clock_skew = clock_skew(clock_skew_ms)
+        self._clock_skew_ms = clock_skew_ms
         self._idle_limit, self._collection_limit = max_idle_seconds, max_collection_seconds
         self._observation_limit = max_observation_seconds
         self._observed_at = None
@@ -102,6 +106,7 @@ class AccountSyncMonitor:
         self._positions: dict[int, AccountEvent] = {}
         self._orders: dict[int, AccountEvent] = {}
         self._executions: dict[int, str] = {}
+        self._completed_orders: set[int] = set()
 
     def _invalidate(self, reason, *, disconnect=False):
         self._revision += 1
@@ -160,6 +165,7 @@ class AccountSyncMonitor:
             self._positions.clear()
             self._orders.clear()
             self._executions.clear()
+            self._completed_orders.clear()
             self._invalidate("new_stream_baseline_required")
             return self._session
 
@@ -185,7 +191,7 @@ class AccountSyncMonitor:
                 self._invalidate("event_capacity_exceeded", disconnect=True)
                 raise SyncError("event_capacity_exceeded")
             try:
-                event = parse_event(payload, now)
+                event = parse_event(payload, now, clock_skew_ms=self._clock_skew_ms)
             except EventError:
                 self._invalidate("event_rejected", disconnect=True)
                 raise SyncError("event_rejected") from None
@@ -195,6 +201,8 @@ class AccountSyncMonitor:
                     self._invalidate("execution_identity_conflict", disconnect=True)
                     raise SyncError("execution_identity_conflict")
                 self._executions[event.entity_id] = event.payload_sha256
+                if event.execution_order_complete:
+                    self._completed_orders.add(event.execution_order_id)
             elif event.channel == "positionEvents":
                 self._positions[event.entity_id] = event
             else:
@@ -254,6 +262,8 @@ class AccountSyncMonitor:
             for identity, event in sorted(pending.items()):
                 item = event.position if name == "position" else event.order
                 expected = None if event.removed else project(item)
+                if name == "order" and identity in self._completed_orders:
+                    expected = None
                 if current.get(identity) != expected:
                     problems.append(f"{name}_event_mismatch:{identity}")
             if self._baseline is not None:
@@ -262,8 +272,17 @@ class AccountSyncMonitor:
                 )
                 previous = {getattr(item, identify): project(item) for item in old_rows}
                 for identity in sorted(current.keys() | previous.keys()):
+                    if (
+                        name == "order"
+                        and identity in self._completed_orders
+                        and identity not in current
+                    ):
+                        continue
                     if current.get(identity) != previous.get(identity) and identity not in pending:
                         problems.append(f"{name}_change_without_event:{identity}")
+        for identity in sorted(self._completed_orders):
+            if any(order.order_id == identity for order in report.active_orders):
+                problems.append(f"executed_order_still_active:{identity}")
         if self._baseline is not None and report.assets.balance != self._baseline.assets.balance:
             problems.append("balance_change_unverified")
         return tuple(problems)
@@ -306,7 +325,13 @@ class AccountSyncMonitor:
                     not observations
                     or {o.path for o in observations} != {ASSETS, POSITIONS, ORDERS}
                     or any(
-                        not started <= o.response_at <= o.received_at <= now for o in observations
+                        not (
+                            started <= o.received_at <= now
+                            and started - self._clock_skew
+                            <= o.response_at
+                            <= o.received_at + self._clock_skew
+                        )
+                        for o in observations
                     )
                     or any(
                         b.received_at < a.received_at or b.response_at < a.response_at

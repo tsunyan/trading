@@ -6,7 +6,6 @@ Source: https://api.coin.z.com/fxdocs/ (reviewed 2026-09-30).
 
 import hashlib
 import json
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -24,6 +23,7 @@ from trading.broker_contracts import (
     parse_evidence,
     response_data,
 )
+from trading.wire_validation import clock_skew, decimal_string, positive_id, timestamp_string
 
 ASSETS = "/v1/account/assets"
 POSITIONS = "/v1/openPositions"
@@ -113,17 +113,10 @@ class OrderReadReport(Contract):
 
 
 def _number(row: dict, key: str) -> Decimal:
-    value = row.get(key)
-    # Documented monetary quantities are strings; refuse floats and booleans.
-    if not isinstance(value, str) or not re.fullmatch(r"-?\d+(?:\.\d+)?", value):
-        raise CollectionError("invalid_numeric_field:" + key)
     try:
-        result = Decimal(value)
-    except InvalidOperation:
+        return decimal_string(row.get(key))
+    except ValueError:
         raise CollectionError("invalid_numeric_field:" + key) from None
-    if not result.is_finite():
-        raise CollectionError("nonfinite_field:" + key)
-    return result
 
 
 def _size(row: dict, key: str, *, zero: bool = False) -> int:
@@ -134,10 +127,10 @@ def _size(row: dict, key: str, *, zero: bool = False) -> int:
 
 
 def _id(row: dict, key: str) -> int:
-    value = row.get(key)
-    if type(value) is not int or value <= 0:
-        raise CollectionError("invalid_identity:" + key)
-    return value
+    try:
+        return positive_id(row.get(key))
+    except ValueError:
+        raise CollectionError("invalid_identity:" + key) from None
 
 
 def _rows(data: object) -> list[dict]:
@@ -150,6 +143,36 @@ def _rows(data: object) -> list[dict]:
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _asset_structure(data):
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise CollectionError("expected_one_asset_record")
+    # Exclude only documented market-valued fields, after validating each sample.
+    # Unknown fields, cash, swaps and estimated fees still participate in equality.
+    volatile = {
+        "equity",
+        "availableAmount",
+        "margin",
+        "positionLossGain",
+        "transferableAmount",
+        "marginRatio",
+    }
+    for key in volatile:
+        if key != "marginRatio" or key in data[0]:
+            _number(data[0], key)
+    return {key: value for key, value in data[0].items() if key not in volatile}
+
+
+def _account_structure(sweep):
+    assets, positions, orders = sweep
+    for row in positions:
+        _number(row, "lossGain")
+    return (
+        _asset_structure(assets),
+        [{key: value for key, value in row.items() if key != "lossGain"} for row in positions],
+        orders,
+    )
 
 
 class AccountReader:
@@ -169,6 +192,7 @@ class AccountReader:
         max_pages: int = 100,
         max_duration_seconds: int = 30,
         max_response_age_seconds: int = 5,
+        clock_skew_ms: int = 0,
     ):
         for value, upper in (
             (page_size, 100),
@@ -184,6 +208,7 @@ class AccountReader:
         self.max_pages = max_pages
         self.max_duration = max_duration_seconds
         self.max_response_age = max_response_age_seconds
+        self.clock_skew = clock_skew(clock_skew_ms)
 
     def _read(self, request, started, observations):
         if (
@@ -205,11 +230,15 @@ class AccountReader:
             raise CollectionError("collection_clock_or_deadline")
         try:
             data = response_data(response)
-            stamp = TIME.validate_python(response["responsetime"])
+            stamp = timestamp_string(response["responsetime"])
             digest = hashlib.sha256(_canonical(response)).hexdigest()
         except (ValueError, TypeError, KeyError):
             raise CollectionError("invalid_api_envelope") from None
-        if not 0 <= (received - stamp).total_seconds() <= self.max_response_age:
+        if (
+            not -self.clock_skew.total_seconds()
+            <= (received - stamp).total_seconds()
+            <= self.max_response_age
+        ):
             raise CollectionError("stale_or_future_response")
         if observations and stamp < observations[-1].response_at:
             raise CollectionError("response_time_moved_backwards")
@@ -253,7 +282,7 @@ class AccountReader:
         positions = self._pages(POSITIONS, "positionId", started, observations)
         orders = self._pages(ORDERS, "orderId", started, observations)
         after = self._read(RequestPlan("GET", ASSETS), started, observations)
-        if before != after:
+        if _asset_structure(before) != _asset_structure(after):
             raise CollectionError("assets_changed_during_collection")
         return after, positions, orders
 
@@ -262,7 +291,7 @@ class AccountReader:
         observations = []
         first = self._sweep(started, observations)
         second = self._sweep(started, observations)
-        if first != second:
+        if _account_structure(first) != _account_structure(second):
             raise CollectionError("account_changed_between_sweeps")
         assets, positions, orders = second
         if not isinstance(assets, list) or len(assets) != 1 or not isinstance(assets[0], dict):
@@ -295,7 +324,7 @@ class AccountReader:
                     price=_number(p, "price"),
                     loss_gain=_number(p, "lossGain"),
                     total_swap=_number(p, "totalSwap"),
-                    timestamp=p["timestamp"],
+                    timestamp=timestamp_string(p["timestamp"]),
                 )
                 if item.ordered_units > item.units or item.timestamp > observations[-1].response_at:
                     raise CollectionError("invalid_position_quantity_or_time")
@@ -315,7 +344,7 @@ class AccountReader:
                     units=_size(o, "size"),
                     price=_number(o, "price"),
                     status=o["status"],
-                    timestamp=o["timestamp"],
+                    timestamp=timestamp_string(o["timestamp"]),
                 )
                 if item.timestamp > observations[-1].response_at:
                     raise CollectionError("future_order")
@@ -364,11 +393,16 @@ class AccountReader:
                 and sum(_size(f, "size") for f in fills) != intent.units
             ):
                 raise CollectionError("executed_order_missing_fills")
+            for row in (*orders, *fills):
+                timestamp_string(row["timestamp"])
+                for key in ("size", "price", "fee", "lossGain", "settledSwap", "amount"):
+                    if key in row:
+                        _number(row, key)
             evidence = parse_evidence(
                 intent,
                 {"status": 0, "data": {"list": orders}},
                 {"status": 0, "data": {"list": fills}},
-                observed_at=observations[0].response_at,
+                observed_at=observations[-1].response_at,
                 executions_complete=False,
             )
             return OrderReadReport(evidence=evidence, observations=tuple(observations))

@@ -383,3 +383,97 @@ def test_complete_fill_still_does_not_assert_account_consistency():
     report = reader(FixtureTransport(mutate)).collect_order(intent(), 201)
     assert report.evidence.status == "EXECUTED"
     assert not report.evidence.executions_complete
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "equity",
+        "availableAmount",
+        "margin",
+        "positionLossGain",
+        "transferableAmount",
+        "marginRatio",
+    ],
+)
+def test_market_values_may_change_but_latest_values_are_retained(field):
+    def mutate(req, response, number):
+        if req.path == ASSETS:
+            response["data"][0][field] = str(number)
+        if req.path == POSITIONS and response["data"]["list"]:
+            response["data"]["list"][0]["lossGain"] = str(number)
+
+    report = reader(FixtureTransport(mutate)).collect_account()
+    assert report.positions[0].loss_gain == 8
+    if field == "equity":
+        assert report.assets.equity == 12
+    assert not report.atomic_snapshot_verified
+
+
+@pytest.mark.parametrize("field", ["balance", "totalSwap", "estimatedTradeFee", "unknownField"])
+def test_non_market_asset_changes_still_rejected(field):
+    def mutate(req, response, number):
+        if req.path == ASSETS:
+            response["data"][0][field] = str(number)
+
+    with pytest.raises(CollectionError, match="assets_changed"):
+        reader(FixtureTransport(mutate)).collect_account()
+
+
+def test_invalid_early_market_value_cannot_be_hidden_by_latest_sample():
+    def mutate(req, response, number):
+        if number == 1:
+            response["data"][0]["equity"] = "NaN"
+
+    with pytest.raises(CollectionError):
+        reader(FixtureTransport(mutate)).collect_account()
+
+
+def test_fill_after_first_order_response_uses_final_observation_time():
+    later = NOW + timedelta(milliseconds=100)
+
+    def mutate(req, response, number):
+        if number > 1:
+            response["responsetime"] = later.isoformat()
+        if req.path == "/v1/executions":
+            response["data"]["list"][0]["timestamp"] = later.isoformat()
+
+    report = AccountReader(FixtureTransport(mutate), clock=lambda: later).collect_order(
+        intent(), 201
+    )
+    assert report.evidence.observed_at == later
+    assert report.evidence.executions[0].timestamp == later
+
+
+@pytest.mark.parametrize("value", ["４００", "٤٠٠", "4e2", "+400"])
+def test_non_ascii_or_non_decimal_wire_numbers_rejected(value):
+    with pytest.raises(CollectionError):
+        reader(FixtureTransport(positions=[position(size=value)])).collect_account()
+
+
+@pytest.mark.parametrize("value", [1700000000, "1700000000", True])
+@pytest.mark.parametrize("target", ["response", "position", "order", "fill"])
+def test_wire_times_require_iso_strings(value, target):
+    def mutate(req, response, number):
+        if target == "response":
+            response["responsetime"] = value
+        elif req.path == {"position": POSITIONS, "order": ORDERS, "fill": "/v1/executions"}[target]:
+            for row in response["data"]["list"]:
+                row["timestamp"] = value
+
+    with pytest.raises(CollectionError):
+        subject = reader(FixtureTransport(mutate))
+        subject.collect_order(intent(), 201) if target == "fill" else subject.collect_account()
+
+
+@pytest.mark.parametrize("offset,accepted", [(0, True), (50, True), (100, True), (101, False)])
+def test_response_future_skew_boundary(offset, accepted):
+    def mutate(req, response, number):
+        response["responsetime"] = (NOW + timedelta(milliseconds=offset)).isoformat()
+
+    subject = reader(FixtureTransport(mutate), clock_skew_ms=100)
+    if accepted:
+        assert subject.collect_account().observations[0].response_at >= NOW
+    else:
+        with pytest.raises(CollectionError, match="stale_or_future"):
+            subject.collect_account()

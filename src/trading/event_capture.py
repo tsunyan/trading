@@ -21,10 +21,14 @@ class JournaledEventCapture:
         *,
         clock=lambda: datetime.now(UTC),
         monotonic_ns=time.monotonic_ns,
+        clock_skew_ms=0,
     ):
         self._journal = journal
         self._clock, self._mono = clock, monotonic_ns
-        self._monitor = AccountSyncMonitor(clock=clock, monotonic=lambda: monotonic_ns() / 1e9)
+        self._monitor = AccountSyncMonitor(
+            clock=clock, monotonic=lambda: monotonic_ns() / 1e9, clock_skew_ms=clock_skew_ms
+        )
+        self._clock_skew_ms = clock_skew_ms
         self._session = self._monitor_session = None
         self._failed = False
         self._ended = False
@@ -47,9 +51,12 @@ class JournaledEventCapture:
             self._poison()
             raise JournalError("invalid_capture_clock") from None
 
-    def _ready(self):
+    def _check_ready(self):
         if self._failed or self._ended or self._session is None:
             raise JournalError("capture_not_ready")
+
+    def _ready(self):
+        self._check_ready()
         try:
             return self._journal.current(self._session)
         except JournalError:
@@ -63,7 +70,10 @@ class JournaledEventCapture:
                 raise JournalError("new_capture_object_required")
             at, mono = self._stamp()
             self._session = self._journal.start_session(
-                expected_head=expected_head, at=at, monotonic_ns=mono
+                expected_head=expected_head,
+                at=at,
+                monotonic_ns=mono,
+                clock_skew_ms=self._clock_skew_ms,
             )
             try:
                 self._monitor_session = self._monitor.start_session()
@@ -73,7 +83,8 @@ class JournaledEventCapture:
 
     def _deliver(self, kind, *, sequence=None, payload=None):
         with self._lock:
-            self._ready()
+            # record() verifies the journal and session within its transaction.
+            self._check_ready()
             at, mono = self._stamp()
             try:
                 record_id = self._journal.record(
@@ -120,7 +131,7 @@ class JournaledEventCapture:
         with self._lock:
             view = None
             try:
-                if self._session is None or self._ended:
+                if self._session is None or self._ended or self._failed:
                     view = self._journal.inspect()
                 else:
                     view = self._ready()

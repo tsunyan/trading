@@ -17,6 +17,7 @@ import httpx
 from pydantic import SecretStr
 
 from trading.broker_contracts import RequestPlan, response_data, sign_request
+from trading.wire_validation import unique_object
 
 ENDPOINT = "https://forex-api.coin.z.com/private"
 
@@ -125,12 +126,10 @@ def _credentials(value):
 
 
 def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise PrivateReadError("duplicate_json_key")
-        result[key] = value
-    return result
+    try:
+        return unique_object(pairs)
+    except ValueError:
+        raise PrivateReadError("duplicate_json_key") from None
 
 
 def _invalid_constant(value):
@@ -282,6 +281,16 @@ class PrivateReadClient:
                     parse_constant=_invalid_constant,
                     parse_float=_finite_float,
                 )
+                # The FX docs list error codes but do not specify the error body
+                # shape. Conservatively stop on every explicit API failure rather
+                # than guess where authentication/rate-limit codes are nested.
+                if (
+                    isinstance(payload, dict)
+                    and type(payload.get("status")) is int
+                    and payload["status"] != 0
+                ):
+                    self._limiter.stop()
+                    raise PrivateReadError("api_error_stop")
                 # API errors are not valid snapshots, even with HTTP 200.
                 response_data(payload)
                 return payload

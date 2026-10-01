@@ -8,13 +8,19 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 
 from pydantic import AwareDatetime, Field, TypeAdapter
 
 from trading.account_reader import ActiveOrder, HeldPosition
 from trading.broker_contracts import Contract, Units
+from trading.wire_validation import (
+    clock_skew,
+    decimal_string,
+    positive_id,
+    timestamp_string,
+    unique_object,
+)
 
 TIME = TypeAdapter(AwareDatetime)
 MAX_FRAME_BYTES = 16_384
@@ -34,22 +40,18 @@ class AccountEvent(Contract):
     removed: bool = False
     # Executions invalidate observations but are not booked or promoted to fills.
     execution_order_id: Units | None = None
+    execution_order_complete: bool = False
 
 
 def _object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise EventError("invalid_event_frame")
-        result[key] = value
-    return result
+    try:
+        return unique_object(pairs)
+    except ValueError:
+        raise EventError("invalid_event_frame") from None
 
 
 def _number(row, key, *, positive=False, integer=False, zero=False):
-    value = row[key]
-    if not isinstance(value, str) or not re.fullmatch(r"-?\d+(?:\.\d+)?", value):
-        raise EventError("invalid_event_frame")
-    number = Decimal(value)
+    number = decimal_string(row[key])
     if not number.is_finite() or (positive and number <= 0):
         raise EventError("invalid_event_frame")
     if integer:
@@ -60,10 +62,7 @@ def _number(row, key, *, positive=False, integer=False, zero=False):
 
 
 def _id(row, key):
-    value = row[key]
-    if type(value) is not int or value <= 0:
-        raise EventError("invalid_event_frame")
-    return value
+    return positive_id(row[key])
 
 
 def _shape(row, required, optional=()):
@@ -71,7 +70,7 @@ def _shape(row, required, optional=()):
         raise EventError("unsupported_event_fields")
 
 
-def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
+def parse_event(payload: bytes, received_at: datetime, *, clock_skew_ms: int = 0) -> AccountEvent:
     """Decode supported USD/JPY NORMAL LIMIT events; reject unknown schemas.
 
     Only raw bounded JSON is accepted so duplicate keys are detectable. All raw
@@ -79,6 +78,7 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
     """
     try:
         received_at = TIME.validate_python(received_at)
+        skew = clock_skew(clock_skew_ms)
         if type(payload) is not bytes or not 0 < len(payload) <= MAX_FRAME_BYTES:
             raise EventError("invalid_event_frame")
         row = json.loads(payload.decode("utf-8"), object_pairs_hook=_object)
@@ -112,7 +112,7 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
             # The documented WS key is orderdSize, unlike REST orderedSize.
             units = _number(row, "size", integer=True, zero=True)
             ordered = _number(row, "orderdSize", integer=True, zero=True)
-            stamp = TIME.validate_python(row["timestamp"])
+            stamp = timestamp_string(row["timestamp"])
             price = _number(row, "price", positive=True)
             loss = _number(row, "lossGain")
             swap = _number(row, "totalSwap")
@@ -175,7 +175,7 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
                 units=_number(row, "orderSize", integer=True),
                 price=_number(row, "orderPrice", positive=True),
                 status="ORDERED",
-                timestamp=TIME.validate_python(row["orderTimestamp"]),
+                timestamp=timestamp_string(row["orderTimestamp"]),
             )
             if channel == "orderEvents":
                 _shape(row, (*common, "orderStatus", "expiry"), ("cancelType",))
@@ -183,7 +183,7 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
                     row["msgType"] not in {"NOR", "ROR", "COR"}
                     or row["orderStatus"] not in {"WAITING", "ORDERED", "CANCELED", "EXPIRED"}
                     or not isinstance(row["expiry"], str)
-                    or not re.fullmatch(r"\d{8}", row["expiry"])
+                    or not re.fullmatch(r"[0-9]{8}", row["expiry"])
                 ):
                     raise EventError("unsupported_event")
                 datetime.strptime(row["expiry"], "%Y%m%d")
@@ -239,7 +239,7 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
                     raise EventError("invalid_event_frame")
                 for field in ("amount", "lossGain", "settledSwap", "fee"):
                     _number(row, field)
-                stamp = TIME.validate_python(row["executionTimestamp"])
+                stamp = timestamp_string(row["executionTimestamp"])
                 if stamp < order.timestamp:
                     raise EventError("invalid_event_frame")
                 result = AccountEvent(
@@ -248,10 +248,11 @@ def parse_event(payload: bytes, received_at: datetime) -> AccountEvent:
                     payload_sha256=digest,
                     occurred_at=stamp,
                     execution_order_id=order.order_id,
+                    execution_order_complete=executed == order.units,
                 )
         else:
             raise EventError("unsupported_event")
-        if result.occurred_at > received_at:
+        if result.occurred_at > received_at + skew:
             raise EventError("future_event_timestamp")
         return result
     except EventError:

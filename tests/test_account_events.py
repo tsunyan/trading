@@ -8,6 +8,33 @@ from trading.account_events import MAX_FRAME_BYTES, EventError, parse_event
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [{"size": "４００"}, {"size": "٤٠٠"}, {"timestamp": 1700000000}, {"timestamp": "1700000000"}],
+)
+def test_noncanonical_wire_values_rejected(changes):
+    with pytest.raises(EventError):
+        parse_event(raw(position(**changes)), NOW)
+
+
+@pytest.mark.parametrize("offset", [50, 100, 101])
+def test_event_clock_skew_is_explicit_and_bounded(offset):
+    payload = raw(position(timestamp=(NOW + timedelta(milliseconds=offset)).isoformat()))
+    with pytest.raises(EventError, match="future_event"):
+        parse_event(payload, NOW)
+    if offset <= 100:
+        assert parse_event(payload, NOW, clock_skew_ms=100).entity_id == 401
+    else:
+        with pytest.raises(EventError, match="future_event"):
+            parse_event(payload, NOW, clock_skew_ms=100)
+
+
+@pytest.mark.parametrize("value", [-1, 1001, True, 0.1])
+def test_invalid_clock_skew_rejected(value):
+    with pytest.raises(EventError):
+        parse_event(raw(position()), NOW, clock_skew_ms=value)
+
+
 def position(**changes):
     return {
         "channel": "positionEvents",

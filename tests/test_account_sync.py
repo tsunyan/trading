@@ -379,3 +379,67 @@ def test_malformed_event_invalidates_existing_observation(setup):
     with pytest.raises(SyncError, match="event_rejected"):
         monitor.ingest(session, 1, b'{"secret":"never echo"}')
     assert monitor.status()["phase"] == "DISCONNECTED"
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_full_execution_explains_order_disappearance_in_same_epoch(setup, pending):
+    clock, monitor, session = setup
+    monitor.resync(session, lambda: report(clock))
+    if pending:
+        monitor.ingest(session, 1, order())
+    monitor.ingest(session, 2 if pending else 1, execution(orderExecutedSize="1000"))
+    for _ in range(3):
+        result = monitor.resync(session, lambda: report(clock, orders=False))
+        assert result.structural_match
+        assert "execution_events_not_reconciled" in result.blockers
+        assert monitor.status()["phase"] == "OBSERVED_UNVERIFIED"
+        assert monitor.status()["epoch"] == 1
+
+
+def test_partial_execution_does_not_explain_disappearance(setup):
+    clock, monitor, session = setup
+    monitor.resync(session, lambda: report(clock))
+    monitor.ingest(session, 1, execution())
+    result = monitor.resync(session, lambda: report(clock, orders=False))
+    assert "order_change_without_event:201" in result.mismatches
+
+
+def test_completed_order_still_active_and_balance_changes_remain_unverified(setup):
+    clock, monitor, session = setup
+    monitor.resync(session, lambda: report(clock))
+    monitor.ingest(session, 1, execution(orderExecutedSize="1000"))
+    result = monitor.resync(session, lambda: report(clock))
+    assert "executed_order_still_active:201" in result.mismatches
+    result = monitor.resync(session, lambda: report(clock, orders=False, balance="999997"))
+    assert result.mismatches == ("balance_change_unverified",)
+
+
+@pytest.mark.parametrize("offset", [-101, -100, 50, 100, 101])
+def test_sync_response_skew_boundaries(offset):
+    clock = Clock()
+    monitor = AccountSyncMonitor(**clock.args(), clock_skew_ms=100)
+    session = monitor.start_session()
+    source = report(clock)
+    adjusted = source.model_copy(
+        update={
+            "observations": tuple(
+                o.model_copy(update={"response_at": o.response_at + timedelta(milliseconds=offset)})
+                for o in source.observations
+            )
+        }
+    )
+    if abs(offset) <= 100:
+        assert monitor.resync(session, lambda: adjusted).structural_match
+    else:
+        with pytest.raises(SyncError, match="stale_or_invalid"):
+            monitor.resync(session, lambda: adjusted)
+
+
+def test_tolerance_does_not_allow_old_local_receipt():
+    clock = Clock()
+    monitor = AccountSyncMonitor(**clock.args(), clock_skew_ms=100)
+    session = monitor.start_session()
+    old = report(clock)
+    clock.advance(0.05)
+    with pytest.raises(SyncError, match="stale_or_invalid"):
+        monitor.resync(session, lambda: old)

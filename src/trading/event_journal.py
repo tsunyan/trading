@@ -14,6 +14,8 @@ from pydantic import AwareDatetime, Field, TypeAdapter
 
 from trading.account_events import MAX_FRAME_BYTES, EventError, parse_event
 from trading.broker_contracts import Contract
+from trading.storage_init import new_storage_directory
+from trading.wire_validation import clock_skew
 
 ZERO = "0" * 64
 MAX_BYTES = 32_000_000
@@ -45,6 +47,15 @@ class Entry(Contract):
         None
     )
     rejected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    clock_skew_ms: int | None = Field(default=None, strict=True, ge=0, le=1000)
+
+
+def _entry_body(entry):
+    # Preserve canonical bytes of pre-tolerance records for existing journals.
+    data = entry.model_dump(mode="json")
+    if entry.clock_skew_ms is None:
+        data.pop("clock_skew_ms")
+    return _canonical(data)
 
 
 def _canonical(value):
@@ -82,19 +93,21 @@ class EventJournal:
         if type(max_records) is not int or not 4 <= max_records <= 20_000:
             raise JournalError("invalid_journal_capacity")
         directory = Path(directory).resolve()
-        directory.mkdir(parents=True, exist_ok=False)
-        try:
-            with closing(sqlite3.connect(directory / "event-journal.sqlite")) as conn:
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.executescript(SCHEMA)
-                conn.execute(
-                    "INSERT INTO journal VALUES(1,1,?,?,?,0,0,?)",
-                    (uuid.uuid4().hex, scope, max_records, ZERO),
-                )
-                conn.commit()
-        except (OSError, sqlite3.Error):
-            raise JournalError("journal_initialization_failed") from None
-        return cls(directory, scope)
+        with new_storage_directory(
+            directory, ("event-journal.sqlite-journal", "event-journal.sqlite")
+        ):
+            try:
+                with closing(sqlite3.connect(directory / "event-journal.sqlite")) as conn:
+                    conn.execute("PRAGMA synchronous=FULL")
+                    conn.executescript(SCHEMA)
+                    conn.execute(
+                        "INSERT INTO journal VALUES(1,1,?,?,?,0,0,?)",
+                        (uuid.uuid4().hex, scope, max_records, ZERO),
+                    )
+                    conn.commit()
+            except (OSError, sqlite3.Error):
+                raise JournalError("journal_initialization_failed") from None
+            return cls(directory, scope)
 
     @contextmanager
     def _transaction(self, *, write=False):
@@ -169,7 +182,7 @@ class EventJournal:
                 if row["digest"] != _digest(meta["instance"], self.scope, index, previous, body):
                     raise ValueError
                 entry = Entry.model_validate_json(body)
-                if _canonical(entry.model_dump(mode="json")) != body:
+                if _entry_body(entry) != body:
                     raise ValueError
                 self._reduce(state, entry, index)
                 entries.append(entry)
@@ -183,6 +196,8 @@ class EventJournal:
 
     @staticmethod
     def _reduce(state, entry, index):
+        if entry.kind != "BEGIN" and entry.clock_skew_ms is not None:
+            raise ValueError
         populated = {
             name
             for name in ("sequence", "payload", "target", "reason", "rejected_sha256")
@@ -209,7 +224,12 @@ class EventJournal:
             if entry.epoch != state["epoch"] + 1 or entry.session == state["session"]:
                 raise ValueError
             state.update(
-                epoch=entry.epoch, session=entry.session, active=True, sequence=0, pending=None
+                epoch=entry.epoch,
+                session=entry.session,
+                active=True,
+                sequence=0,
+                pending=None,
+                clock_skew_ms=entry.clock_skew_ms or 0,
             )
         else:
             if (
@@ -227,7 +247,11 @@ class EventJournal:
             if entry.kind == "EVENT":
                 if entry.sequence != state["sequence"] + 1:
                     raise ValueError
-                parse_event(entry.payload.encode("utf-8"), entry.at)
+                parse_event(
+                    entry.payload.encode("utf-8"),
+                    entry.at,
+                    clock_skew_ms=state["clock_skew_ms"],
+                )
                 state["sequence"] = entry.sequence
                 state["events"] += 1
             if entry.kind in {"EVENT", "HEARTBEAT"}:
@@ -249,7 +273,7 @@ class EventJournal:
         state.update(at=entry.at, mono=entry.monotonic_ns)
 
     def _append(self, conn, meta, entry):
-        body = _canonical(entry.model_dump(mode="json"))
+        body = _entry_body(entry)
         size = len(body.encode())
         if meta["count"] >= meta["max_records"] or meta["bytes"] + size > MAX_BYTES:
             raise JournalError("journal_capacity_exceeded")
@@ -297,7 +321,8 @@ class EventJournal:
             "live_enabled": False,
         }
 
-    def start_session(self, *, expected_head, at: datetime, monotonic_ns: int):
+    def start_session(self, *, expected_head, at: datetime, monotonic_ns: int, clock_skew_ms=0):
+        clock_skew(clock_skew_ms)
         at, mono = self._stamp(at, monotonic_ns)
         with self._transaction(write=True) as conn:
             meta, _, state = self._verify(conn)
@@ -307,7 +332,12 @@ class EventJournal:
                 raise JournalError("invalid_capture_clock")
             session = uuid.uuid4().hex
             entry = Entry(
-                kind="BEGIN", epoch=state["epoch"] + 1, session=session, at=at, monotonic_ns=mono
+                kind="BEGIN",
+                epoch=state["epoch"] + 1,
+                session=session,
+                at=at,
+                monotonic_ns=mono,
+                clock_skew_ms=clock_skew_ms or None,
             )
             self._append(conn, meta, entry)
         return session
@@ -349,7 +379,7 @@ class EventJournal:
                     error = "sequence_gap"
                 else:
                     try:
-                        parse_event(payload, at)
+                        parse_event(payload, at, clock_skew_ms=state["clock_skew_ms"])
                     except EventError:
                         error = "frame_rejected"
                 if error:
@@ -412,7 +442,9 @@ class EventJournal:
             error = None
             if entry.kind == "BEGIN":
                 monitor = AccountSyncMonitor(
-                    clock=lambda: clock[0], monotonic=lambda: clock[1] / 1e9
+                    clock=lambda: clock[0],
+                    monotonic=lambda: clock[1] / 1e9,
+                    clock_skew_ms=entry.clock_skew_ms or 0,
                 )
                 session = monitor.start_session()
             elif entry.kind in {"EVENT", "HEARTBEAT"}:

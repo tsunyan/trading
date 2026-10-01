@@ -248,3 +248,54 @@ c.heartbeat()
     assert process.returncode == 23
     assert journal.inspect()["unacknowledged_records"] == (2,)
     assert journal.replay()["outcomes"][-1]["error"] == "delivery_outcome_unknown"
+
+
+def test_failed_capture_status_preserves_unknown_delivery(setup, monkeypatch):
+    _, journal, capture = setup
+    begin(journal, capture)
+
+    def broken(*args):
+        raise RuntimeError("private consumer details")
+
+    monkeypatch.setattr(capture._monitor, "ingest", broken)
+    with pytest.raises(JournalError, match="delivery_failed"):
+        capture.ingest(1, frame())
+    status = capture.status()
+    assert status["capture_failed"]
+    assert status["journal_epoch"] == 1
+    assert status["journal_unacknowledged_records"] == (2,)
+    assert "journal_delivery_outcome_unknown" in status["blockers"]
+
+
+def test_delivery_verifies_twice_and_stale_session_still_fenced(setup, monkeypatch):
+    _, journal, capture = setup
+    begin(journal, capture)
+    original, checks = journal._verify, []
+
+    def verify(conn):
+        checks.append(True)
+        return original(conn)
+
+    monkeypatch.setattr(journal, "_verify", verify)
+    capture.ingest(1, frame())
+    assert len(checks) == 2
+    journal.start_session(expected_head=journal.inspect()["head"], at=NOW, monotonic_ns=0)
+    with pytest.raises(JournalError, match="fenced"):
+        capture.ingest(2, frame())
+    assert capture.status()["capture_failed"]
+
+
+def test_clock_tolerance_is_persisted_for_verify_reopen_and_replay(setup):
+    clock, journal, _ = setup
+    capture = JournaledEventCapture(journal, **clock.args(), clock_skew_ms=100)
+    begin(journal, capture)
+    capture.ingest(1, frame(timestamp=(NOW + timedelta(milliseconds=50)).isoformat()))
+    assert capture.status()["phase"] == "NEEDS_RESYNC"
+    reopened = EventJournal(journal.path.parent, "synthetic")
+    assert reopened.inspect()["captured_events"] == 1
+    assert all(item["error"] is None for item in reopened.replay()["outcomes"])
+    # A new epoch does not inherit the preceding epoch's clock tolerance.
+    strict = JournaledEventCapture(reopened, **clock.args())
+    begin(reopened, strict)
+    with pytest.raises(JournalError, match="frame_rejected"):
+        strict.ingest(1, frame(timestamp=(NOW + timedelta(milliseconds=50)).isoformat()))

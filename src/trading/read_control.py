@@ -10,10 +10,11 @@ import stat
 import sys
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 
 from trading.private_read import AccountReadLimiter, PrivateReadError
+from trading.storage_init import new_storage_directory
 
 SCHEMA = """
 CREATE TABLE control (
@@ -34,6 +35,10 @@ REASONS = {"client_stop", "operator_stop", "clock_invalid", "interrupted", "clai
 RECOVERY_CHECKS = frozenset({"cause", "permissions", "wait", "clock", "workers-paused"})
 RECOVERY_TTL_NS = 300_000_000_000
 ORPHAN_CHECKS = frozenset({"cause", "clock", "workers-paused", "get-only"})
+
+
+class _ControlBusy(PrivateReadError):
+    """A rolled-back transaction may be retried; this is not corruption."""
 
 
 class PersistentReadLimiter(AccountReadLimiter):
@@ -67,6 +72,8 @@ class PersistentReadLimiter(AccountReadLimiter):
         with self._transaction() as conn:
             row = self._state(conn)
             self._instance = row["instance_id"]
+            # Additive index also accelerates databases created by older versions.
+            conn.execute("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind,id)")
             self._generation = self._current_generation(conn)
 
     @classmethod
@@ -75,32 +82,34 @@ class PersistentReadLimiter(AccountReadLimiter):
             raise PrivateReadError("invalid_control_scope")
         directory = Path(directory).resolve()
         # Explicit initialization only. Existing directories are never overwritten.
-        directory.mkdir(parents=True, exist_ok=False)
-        path = directory / "read-control.sqlite"
-        try:
-            instance = uuid.uuid4().hex
-            # Never recreate this file on reopen: its filesystem identity is the
-            # lock domain. Copying/restoring a directory requires separate review.
-            with (directory / "read-owner.lock").open("xb") as owner:
-                owner.write(instance.encode("ascii"))
-                owner.flush()
-                os.fsync(owner.fileno())
-                identity = os.fstat(owner.fileno())
-            with closing(sqlite3.connect(path)) as conn:
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.executescript(SCHEMA)
-                conn.execute(
-                    "INSERT INTO control VALUES (1,3,?,?,0,NULL,NULL,0)", (instance, scope)
-                )
-                conn.execute(
-                    "INSERT INTO owner_file VALUES (1,?,?)",
-                    (str(identity.st_dev), str(identity.st_ino)),
-                )
-                conn.execute("INSERT INTO events(wall_ns,kind) VALUES (0,'CREATED')")
-                conn.commit()
-        except (sqlite3.Error, OSError):
-            raise PrivateReadError("control_initialization_failed") from None
-        return cls(directory, scope, **clocks)
+        with new_storage_directory(
+            directory, ("read-control.sqlite-journal", "read-control.sqlite", "read-owner.lock")
+        ):
+            path = directory / "read-control.sqlite"
+            try:
+                instance = uuid.uuid4().hex
+                # Never recreate this file on reopen: its filesystem identity is the
+                # lock domain. Copying/restoring a directory requires separate review.
+                with (directory / "read-owner.lock").open("xb") as owner:
+                    owner.write(instance.encode("ascii"))
+                    owner.flush()
+                    os.fsync(owner.fileno())
+                    identity = os.fstat(owner.fileno())
+                with closing(sqlite3.connect(path)) as conn:
+                    conn.execute("PRAGMA synchronous=FULL")
+                    conn.executescript(SCHEMA)
+                    conn.execute(
+                        "INSERT INTO control VALUES (1,3,?,?,0,NULL,NULL,0)", (instance, scope)
+                    )
+                    conn.execute(
+                        "INSERT INTO owner_file VALUES (1,?,?)",
+                        (str(identity.st_dev), str(identity.st_ino)),
+                    )
+                    conn.execute("INSERT INTO events(wall_ns,kind) VALUES (0,'CREATED')")
+                    conn.commit()
+            except (sqlite3.Error, OSError):
+                raise PrivateReadError("control_initialization_failed") from None
+            return cls(directory, scope, **clocks)
 
     @contextmanager
     def _transaction(self):
@@ -120,7 +129,12 @@ class PersistentReadLimiter(AccountReadLimiter):
                 except BaseException:
                     conn.rollback()
                     raise
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError) as error:
+            if (
+                isinstance(error, sqlite3.Error)
+                and (getattr(error, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
+            ):
+                raise _ControlBusy("control_storage_busy") from None
             self._failed = True
             raise PrivateReadError("control_storage_failed") from None
 
@@ -251,8 +265,18 @@ class PersistentReadLimiter(AccountReadLimiter):
         if reason not in REASONS:
             raise PrivateReadError("invalid_stop_reason")
         # Do not wait for a network slot: stop can be recorded while a GET runs.
-        with self._transaction() as conn:
-            self._halt(conn, self._state(conn), reason)
+        for attempt in range(3):
+            try:
+                with self._transaction() as conn:
+                    self._halt(conn, self._state(conn), reason)
+                return
+            except _ControlBusy:
+                if attempt == 2:
+                    # An unpersisted stop must not allow this client to send again
+                    # or release an in-flight claim as though stopping succeeded.
+                    self._failed = True
+                    raise
+                self._wait(0.05)
 
     def status(self):
         with self._transaction() as conn:
@@ -319,72 +343,12 @@ class PersistentReadLimiter(AccountReadLimiter):
         return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
     def prepare_recovery(self):
-        """Persist a single-use, state-bound proposal; does NOT clear a stop."""
-        result = None
-        with self._transaction() as conn:
-            row = self._recovery_state(conn)
-            now = self._stamp(conn, row)
-            if now is not None:
-                proposal = uuid.uuid4().hex
-                self._event(conn, now, "RECOVERY_PROPOSED", proposal)
-                result = {
-                    "proposal": proposal,
-                    "revision": self._recovery_revision(conn),
-                    "scope": self.scope,
-                    "instance_id": self._instance,
-                    "reason": row["reason"],
-                    "expires_at_ns": now + RECOVERY_TTL_NS,
-                    "required_confirmations": sorted(RECOVERY_CHECKS),
-                    "live_orders_enabled": False,
-                }
-        if result is None:
-            raise PrivateReadError("control_clock_invalid")
-        return result
+        """Persist a state-bound proposal; do not clear the stop."""
+        return self._prepare_resolution("recovery")
 
     def approve_recovery(self, proposal, revision, *, confirmations):
-        """Operator attestations only, NOT broker identity or two-person authorization.
-
-        This atomically clears only a stopped, idle GET control. Any old client
-        remains fenced by its captured generation; reopen explicitly after approval.
-        """
-        if (
-            not isinstance(proposal, str)
-            or not re.fullmatch(r"[a-f0-9]{32}", proposal)
-            or not isinstance(revision, str)
-            or not re.fullmatch(r"[a-f0-9]{64}", revision)
-            or type(confirmations) not in {set, frozenset}
-            or confirmations != RECOVERY_CHECKS
-        ):
-            raise PrivateReadError("recovery_confirmation_required")
-        error = None
-        with self._transaction() as conn:
-            row = self._recovery_state(conn)
-            last = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
-            if (
-                not last
-                or last["kind"] != "RECOVERY_PROPOSED"
-                or last["token"] != proposal
-                or self._recovery_revision(conn) != revision
-            ):
-                raise PrivateReadError("recovery_proposal_changed")
-            now = self._stamp(conn, row)
-            if now is None:
-                error = "control_clock_invalid"
-            elif not 0 <= now - last["wall_ns"] < RECOVERY_TTL_NS:
-                self._event(conn, now, "RECOVERY_EXPIRED", proposal)
-                error = "recovery_proposal_expired"
-            else:
-                self._event(conn, now, "RECOVERY_CHECKS_CONFIRMED", proposal)
-                # Pre-recovery binaries only understand v1 and must fail closed
-                # after an operator-approved recovery rather than bypass fencing.
-                conn.execute(
-                    "UPDATE control SET version=MAX(version,2),stopped=0,reason=NULL WHERE id=1"
-                )
-                self._event(conn, now, "RECOVERY_APPROVED", proposal)
-        if error:
-            raise PrivateReadError(error)
-        # Do not update self._generation: this instance must not send after reset.
-        return {"recovered": True, "reopen_required": True, "live_orders_enabled": False}
+        """Clear an idle stop; old clients stay fenced until explicitly reopened."""
+        return self._approve_resolution("recovery", proposal, revision, confirmations)
 
     def _orphan_state(self, conn):
         row = self._state(conn)
@@ -411,66 +375,90 @@ class PersistentReadLimiter(AccountReadLimiter):
         return row
 
     def prepare_orphan_resolution(self):
-        """Propose clearing a dead GET claim, never a stop or order journal claim."""
+        """Propose clearing a dead GET claim, never the stop."""
+        return self._prepare_resolution("orphan")
+
+    def approve_orphan_resolution(self, proposal, revision, *, confirmations):
+        """Reacquire the owner lock and clear only the proposed claim."""
+        return self._approve_resolution("orphan", proposal, revision, confirmations)
+
+    def _resolution_context(self, kind):
+        return self._owner_lock(required=True) if kind == "orphan" else nullcontext()
+
+    def _resolution_state(self, conn, kind):
+        return self._orphan_state(conn) if kind == "orphan" else self._recovery_state(conn)
+
+    def _prepare_resolution(self, kind):
         result = None
-        with self._owner_lock(required=True), self._transaction() as conn:
-            row = self._orphan_state(conn)
+        checks = ORPHAN_CHECKS if kind == "orphan" else RECOVERY_CHECKS
+        with self._resolution_context(kind), self._transaction() as conn:
+            row = self._resolution_state(conn, kind)
             now = self._stamp(conn, row)
             if now is not None:
                 proposal = uuid.uuid4().hex
-                self._event(conn, now, "ORPHAN_PROPOSED", proposal)
+                self._event(conn, now, kind.upper() + "_PROPOSED", proposal)
                 result = {
                     "proposal": proposal,
                     "revision": self._recovery_revision(conn),
                     "scope": self.scope,
                     "instance_id": self._instance,
-                    "claim": row["in_flight"],
                     "expires_at_ns": now + RECOVERY_TTL_NS,
-                    "required_confirmations": sorted(ORPHAN_CHECKS),
+                    "required_confirmations": sorted(checks),
                     "live_orders_enabled": False,
                 }
+                if kind == "orphan":
+                    result["claim"] = row["in_flight"]
+                else:
+                    result["reason"] = row["reason"]
         if result is None:
             raise PrivateReadError("control_clock_invalid")
         return result
 
-    def approve_orphan_resolution(self, proposal, revision, *, confirmations):
-        """Reacquire the OS lock and atomically clear only the proposed GET claim.
-
-        The stop stays latched. A separate recovery and client reopen are required.
-        """
+    def _approve_resolution(self, kind, proposal, revision, confirmations):
+        checks = ORPHAN_CHECKS if kind == "orphan" else RECOVERY_CHECKS
         if (
             not isinstance(proposal, str)
             or not re.fullmatch(r"[a-f0-9]{32}", proposal)
             or not isinstance(revision, str)
             or not re.fullmatch(r"[a-f0-9]{64}", revision)
             or type(confirmations) not in {set, frozenset}
-            or confirmations != ORPHAN_CHECKS
+            or confirmations != checks
         ):
-            raise PrivateReadError("orphan_confirmation_required")
+            raise PrivateReadError(kind + "_confirmation_required")
         error = None
-        with self._owner_lock(required=True), self._transaction() as conn:
-            row = self._orphan_state(conn)
+        with self._resolution_context(kind), self._transaction() as conn:
+            row = self._resolution_state(conn, kind)
             last = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
             if (
                 not last
-                or last["kind"] != "ORPHAN_PROPOSED"
+                or last["kind"] != kind.upper() + "_PROPOSED"
                 or last["token"] != proposal
                 or self._recovery_revision(conn) != revision
             ):
-                raise PrivateReadError("orphan_proposal_changed")
+                raise PrivateReadError(kind + "_proposal_changed")
             now = self._stamp(conn, row)
             if now is None:
                 error = "control_clock_invalid"
             elif not 0 <= now - last["wall_ns"] < RECOVERY_TTL_NS:
-                self._event(conn, now, "ORPHAN_EXPIRED", proposal)
-                error = "orphan_proposal_expired"
+                self._event(conn, now, kind.upper() + "_EXPIRED", proposal)
+                error = kind + "_proposal_expired"
             else:
-                self._event(conn, now, "ORPHAN_CHECKS_CONFIRMED", proposal)
-                conn.execute("UPDATE control SET in_flight=NULL WHERE id=1")
-                self._event(conn, now, "ORPHAN_RESOLVED", row["in_flight"])
+                self._event(conn, now, kind.upper() + "_CHECKS_CONFIRMED", proposal)
+                if kind == "orphan":
+                    conn.execute("UPDATE control SET in_flight=NULL WHERE id=1")
+                    self._event(conn, now, "ORPHAN_RESOLVED", row["in_flight"])
+                else:
+                    # Old v1 binaries must fail closed after recovery. Do not
+                    # update self._generation: this object must remain fenced.
+                    conn.execute(
+                        "UPDATE control SET version=MAX(version,2),stopped=0,reason=NULL WHERE id=1"
+                    )
+                    self._event(conn, now, "RECOVERY_APPROVED", proposal)
         if error:
             raise PrivateReadError(error)
-        return {"resolved": True, "stopped": True, "live_orders_enabled": False}
+        if kind == "orphan":
+            return {"resolved": True, "stopped": True, "live_orders_enabled": False}
+        return {"recovered": True, "reopen_required": True, "live_orders_enabled": False}
 
     def _check_claim(self, token):
         error = None
@@ -487,6 +475,17 @@ class PersistentReadLimiter(AccountReadLimiter):
             raise PrivateReadError(error)
 
     def _finish(self, token, outcome):
+        # Retry only the local completion transaction, never the HTTP request.
+        # The owner lock remains held until the claim is durably released.
+        for attempt in range(3):
+            try:
+                return self._finish_once(token, outcome)
+            except _ControlBusy:
+                if attempt == 2:
+                    raise
+                self._wait(0.05)
+
+    def _finish_once(self, token, outcome):
         error = None
         with self._transaction() as conn:
             row = self._state(conn)

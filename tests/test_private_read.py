@@ -25,6 +25,41 @@ SECRET = "fixture-secret-NOT-REAL"
 ASSETS = RequestPlan("GET", "/v1/account/assets")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": 1, "messages": [{"message_code": code, "message_string": SECRET}]}
+        for code in (
+            "ERR-5003",
+            "ERR-5008",
+            "ERR-5009",
+            "ERR-5010",
+            "ERR-5011",
+            "ERR-5012",
+            "UNKNOWN",
+        )
+    ]
+    + [{"status": 2, "unknown_error_shape": SECRET}],
+)
+def test_http_200_api_error_latches_stop_without_assuming_error_body(payload):
+    clock = Clock()
+    limiter = AccountReadLimiter(monotonic=clock.monotonic, sleep=clock.sleep)
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json=payload)
+
+    with make_client(handler, limiter=limiter, clock=clock) as client:
+        with pytest.raises(PrivateReadError, match="api_error_stop") as caught:
+            client.get(ASSETS)
+        assert SECRET not in str(caught.value)
+        with make_client(handler, limiter=limiter, clock=clock) as other:
+            with pytest.raises(PrivateReadError, match="account_reads_stopped"):
+                other.get(ASSETS)
+    assert len(calls) == 1
+
+
 class Clock:
     def __init__(self):
         self.value = 0.0

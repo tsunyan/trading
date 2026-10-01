@@ -12,6 +12,7 @@ from trading.account_read_lab import Transcript, demo_transcript
 from trading.account_read_lab import replay as replay_account
 from trading.account_sync import AccountSyncMonitor, SyncError
 from trading.broker_contracts import Contract
+from trading.wire_validation import unique_object
 
 
 class ControlStep(Contract):
@@ -40,12 +41,10 @@ class SyncTranscript(Contract):
 
 
 def _unique_fields(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate_transcript_field")
-        result[key] = value
-    return result
+    try:
+        return unique_object(pairs)
+    except ValueError:
+        raise ValueError("duplicate_transcript_field") from None
 
 
 def _nonfinite(value):
