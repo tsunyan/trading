@@ -3,6 +3,7 @@
 One database is one explicitly declared scope and opening cash boundary. This
 is not a broker account snapshot or proof of complete history. Version 2 also
 checks position inventory and realized P&L from an explicit starting basis.
+Version 3 adds matched external cash records from two declared evidence sources.
 """
 
 import hashlib
@@ -22,6 +23,12 @@ from pydantic import AwareDatetime, Field
 from trading.account_events import AccountEvent
 from trading.account_reader import AccountReadReport, OrderReadReport
 from trading.broker_contracts import Contract, Execution, OrderIntent, Units
+from trading.cash_transfers import (
+    CashTransferMatch,
+    CashTransferPolicy,
+    check_transfer,
+    transfer_identity,
+)
 from trading.execution_positions import (
     PositionAccountingError,
     PositionBasis,
@@ -64,6 +71,20 @@ CREATE TABLE postings (
  PRIMARY KEY(sequence, account)
 );
 """
+TRANSFER_SCHEMA = """
+CREATE TABLE transfer_state (
+ id INTEGER PRIMARY KEY CHECK(id=1), count INTEGER NOT NULL,
+ bytes INTEGER NOT NULL, head TEXT NOT NULL
+);
+CREATE TABLE cash_transfers (
+ sequence INTEGER PRIMARY KEY, transfer_id TEXT UNIQUE NOT NULL,
+ body TEXT NOT NULL, digest TEXT NOT NULL
+);
+CREATE TABLE transfer_postings (
+ sequence INTEGER NOT NULL, account TEXT NOT NULL, amount TEXT NOT NULL,
+ PRIMARY KEY(sequence, account)
+);
+"""
 
 
 class CashBookError(ValueError):
@@ -75,6 +96,7 @@ class OpeningCash(Contract):
     cutoff: AwareDatetime
     currency: Literal["JPY"] = "JPY"
     position_basis: PositionBasis | None = None
+    transfer_policy: CashTransferPolicy | None = None
 
 
 class ExecutionCashBatch(Contract):
@@ -121,6 +143,8 @@ def _normalize(value):
         if value.position_basis is None:
             # Preserve v1's exact canonical body / seed, without migration.
             data.pop("position_basis")
+        if value.transfer_policy is None:
+            data.pop("transfer_policy")
         return _normalize(data)
     if isinstance(value, Contract):
         return _normalize(value.model_dump(warnings=False))
@@ -147,13 +171,61 @@ def _hash(body):
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def _blockers(version):
-    if version == 1:
-        return BLOCKERS
-    return tuple(b for b in BLOCKERS if b != "position_accounting_not_applied") + (
-        "opening_position_boundary_not_verified",
-        "position_cost_rounding_not_verified",
-    )
+def _blockers(version, has_positions=False):
+    result = BLOCKERS
+    if version == 2 or has_positions:
+        result = tuple(b for b in result if b != "position_accounting_not_applied") + (
+            "opening_position_boundary_not_verified",
+            "position_cost_rounding_not_verified",
+        )
+    if version == 3:
+        result += ("external_cash_evidence_not_authenticated", "external_cash_history_not_proven")
+    return result
+
+
+def _public_head(execution_head, info):
+    if info is None:
+        return execution_head
+    return _hash(_json({"executions": execution_head, "transfers": info["head"], "version": 3}))
+
+
+def _transfer_result(info, records):
+    if info is None:
+        return {}
+    return {
+        "external_cash_accounting_applied": True,
+        "external_transfer_ids": tuple(sorted(records)),
+        "external_transfers": info["count"],
+        "external_cash_amount": _money(info["cash"]),
+        "external_capital_amount": _money(info["capital"]),
+        "transfer_fee_debit": _money(info["fee"]),
+    }
+
+
+def _transfer_legs(match):
+    record = match.primary.record
+    capital = _minor(record.amount) * (1 if record.kind == "DEPOSIT" else -1)
+    fee = _minor(record.fee_debit)
+    return {"cash": capital - fee, "external_capital": -capital, "fee_expense": fee}
+
+
+def _transfer_matches(source):
+    try:
+        if not isinstance(source, tuple) or not 1 <= len(source) <= 1000:
+            raise ValueError
+        result, size = [], 0
+        for item in source:
+            if not isinstance(item, CashTransferMatch):
+                raise ValueError
+            match = CashTransferMatch.model_validate(item.model_dump(warnings=False))
+            body = _json(match)
+            size += len(body.encode())
+            if size > MAX_PROOF:
+                raise ValueError
+            result.append((match, body))
+        return tuple(result)
+    except Exception:
+        raise CashBookError("cash_book_transfer_input_invalid") from None
 
 
 def _legs(fill):
@@ -278,8 +350,14 @@ class ExecutionCashBook:
             if len(opening_body.encode()) > MAX_OPENING:
                 raise ValueError
             cash = _minor(opening.balance)
-            version = 1 if opening.position_basis is None else 2
-            if version == 2:
+            version = (
+                3
+                if opening.transfer_policy is not None
+                else 1
+                if opening.position_basis is None
+                else 2
+            )
+            if opening.position_basis is not None:
                 rebuild_positions(opening.position_basis, ())
         except Exception:
             raise CashBookError("invalid_cash_book_opening") from None
@@ -293,6 +371,12 @@ class ExecutionCashBook:
                 with closing(sqlite3.connect(directory / "execution-cash.sqlite")) as conn:
                     conn.execute("PRAGMA synchronous=FULL")
                     conn.executescript(SCHEMA)
+                    if version == 3:
+                        conn.executescript(TRANSFER_SCHEMA)
+                        transfer_seed = _hash(
+                            _json({"opening_seed": head, "kind": "external-cash-v1"})
+                        )
+                        conn.execute("INSERT INTO transfer_state VALUES(1,0,0,?)", (transfer_seed,))
                     conn.execute(
                         "INSERT INTO book VALUES(1,?,?,?,?,?,0,0,0,?,0,NULL)",
                         (version, instance, scope, opening_body, max_entries, head),
@@ -372,7 +456,7 @@ class ExecutionCashBook:
             meta = dict(metas[0])
             if (
                 meta["id"] != 1
-                or meta["version"] not in (1, 2)
+                or meta["version"] not in (1, 2, 3)
                 or meta["scope"] != self.scope
                 or not re.fullmatch(r"[a-f0-9]{32}", meta["instance"])
                 or (self._instance is not None and meta["instance"] != self._instance)
@@ -381,13 +465,32 @@ class ExecutionCashBook:
                 or not 0 <= meta["proof_count"] <= meta["count"]
                 or not 0 <= meta["bytes"] <= MAX_BYTES
                 or meta["halted"] not in (0, 1)
-                or meta["reason"] != ("cash_book_identity_conflict" if meta["halted"] else None)
+                or (not meta["halted"] and meta["reason"] is not None)
+                or (
+                    meta["halted"]
+                    and meta["reason"]
+                    not in (
+                        "cash_book_identity_conflict",
+                        *(
+                            ("cash_book_transfer_identity_conflict",)
+                            if meta["version"] == 3
+                            else ()
+                        ),
+                    )
+                )
             ):
                 raise ValueError
             opening = OpeningCash.model_validate(_load(meta["opening"]))
             if meta["opening"] != _json(opening):
                 raise ValueError
-            if (opening.position_basis is None) != (meta["version"] == 1):
+            expected_version = (
+                3
+                if opening.transfer_policy is not None
+                else 1
+                if opening.position_basis is None
+                else 2
+            )
+            if expected_version != meta["version"]:
                 raise ValueError
             expected_legs = {
                 (0, "cash"): str(_minor(opening.balance)),
@@ -495,13 +598,20 @@ class ExecutionCashBook:
                 or previous != meta["head"]
             ):
                 raise ValueError
-            for value in totals.values():
-                _money(value)
+            for name, value in totals.items():
+                if name != "cash":
+                    _money(value)
             totals["position_state"] = (
                 rebuild_positions(opening.position_basis, tuple(records.values()))
                 if opening.position_basis is not None
                 else None
             )
+            info, transfers = None, {}
+            if meta["version"] == 3:
+                info, transfers = self._verify_transfers(conn, meta, opening)
+                totals["cash"] += info["cash"]
+            _money(totals["cash"])
+            totals["transfer_info"], totals["transfers"] = info, transfers
             return meta, records, totals
         except Exception:
             self._failed = True
@@ -560,11 +670,13 @@ class ExecutionCashBook:
                     identity: selected[identity]
                     for identity in sorted(selected.keys() - existing.keys())
                 }
-                if meta["count"] + len(new) > meta["max_entries"]:
+                info = totals["transfer_info"]
+                transfer_count, transfer_bytes = (info["count"], info["bytes"]) if info else (0, 0)
+                if meta["count"] + transfer_count + len(new) > meta["max_entries"]:
                     raise CashBookError("cash_book_capacity_reached")
                 size = meta["bytes"] + (len(proof.encode()) if new else 0)
                 size += sum(len(_json(record).encode()) for record in new.values())
-                if size > MAX_BYTES:
+                if size + transfer_bytes > MAX_BYTES:
                     raise CashBookError("cash_book_capacity_reached")
                 position_state = totals["position_state"]
                 if opening.position_basis is not None:
@@ -609,7 +721,7 @@ class ExecutionCashBook:
                 result = {
                     "instance": meta["instance"],
                     "scope": self.scope,
-                    "head": head,
+                    "head": _public_head(head, info),
                     "applied_execution_ids": tuple(new),
                     "already_applied_execution_ids": tuple(
                         sorted(selected.keys() & existing.keys())
@@ -619,11 +731,220 @@ class ExecutionCashBook:
                     "accounting_applied": True,
                     "complete": False,
                     "live_enabled": False,
-                    "blockers": _blockers(meta["version"]),
+                    "blockers": _blockers(meta["version"], opening.position_basis is not None),
                     **position_result(position_state),
+                    **_transfer_result(info, totals["transfers"]),
                 }
         if conflict:
             raise CashBookError("cash_book_identity_conflict")
+        return result
+
+    def _verify_transfers(self, conn, meta, opening):
+        if any(r[0] != 64 for r in conn.execute("SELECT length(head) FROM transfer_state LIMIT 2")):
+            raise ValueError
+        states = conn.execute("SELECT * FROM transfer_state LIMIT 2").fetchall()
+        if len(states) != 1:
+            raise ValueError
+        info = dict(states[0])
+        if (
+            info["id"] != 1
+            or type(info["count"]) is not int
+            or type(info["bytes"]) is not int
+            or not 0 <= info["count"] <= meta["max_entries"] - meta["count"]
+            or not 0 <= info["bytes"] <= MAX_BYTES - meta["bytes"]
+        ):
+            raise ValueError
+        dimensions = conn.execute(
+            "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0),"
+            "coalesce(max(length(CAST(body AS BLOB))),0),"
+            "coalesce(max(length(transfer_id)),0),"
+            "coalesce(max(length(digest)),0) FROM cash_transfers"
+        ).fetchone()
+        if (
+            dimensions[0] != info["count"]
+            or dimensions[1] != info["bytes"]
+            or dimensions[2] > MAX_PROOF
+            or dimensions[3] > 128
+            or dimensions[4] > 64
+        ):
+            raise ValueError
+        dimensions = conn.execute(
+            "SELECT count(*),coalesce(sum(length(amount)),0),coalesce(max(length(amount)),0),"
+            "coalesce(max(length(account)),0) FROM transfer_postings"
+        ).fetchone()
+        if (
+            dimensions[0] != 3 * info["count"]
+            or dimensions[1] > MAX_BYTES
+            or dimensions[2] > 64
+            or dimensions[3] > 32
+        ):
+            raise ValueError
+        seed = self._seed(meta["instance"], self.scope, meta["opening"], meta["max_entries"], 3)
+        previous = _hash(_json({"opening_seed": seed, "kind": "external-cash-v1"}))
+        records, refs, legs = {}, set(), {}
+        cash = capital = fee = 0
+        latest_at = None
+        for sequence, row in enumerate(
+            conn.execute(
+                "SELECT * FROM cash_transfers ORDER BY sequence LIMIT ?", (MAX_ENTRIES + 1,)
+            ),
+            1,
+        ):
+            match, body = _transfer_matches(
+                (CashTransferMatch.model_validate(_load(row["body"])),)
+            )[0]
+            check_transfer(match, opening.transfer_policy, opening.cutoff)
+            identity = match.primary.record.transfer_id
+            references = {(e.source, e.reference) for e in (match.primary, match.confirmation)}
+            if (
+                row["sequence"] != sequence
+                or row["transfer_id"] != identity
+                or identity in records
+                or refs.intersection(references)
+                or row["body"] != body
+            ):
+                raise ValueError
+            previous = self._transfer_digest(previous, sequence, identity, body)
+            if row["digest"] != previous:
+                raise ValueError
+            posting = _transfer_legs(match)
+            cash += posting["cash"]
+            capital -= posting["external_capital"]
+            fee += posting["fee_expense"]
+            legs.update({(sequence, key): str(amount) for key, amount in posting.items()})
+            latest_at = (
+                max(latest_at, match.primary.record.occurred_at)
+                if latest_at
+                else match.primary.record.occurred_at
+            )
+            refs.update(references)
+            records[identity] = match
+        actual = {
+            (r["sequence"], r["account"]): r["amount"]
+            for r in conn.execute("SELECT * FROM transfer_postings LIMIT ?", (3 * MAX_ENTRIES + 1,))
+        }
+        if actual != legs or previous != info["head"]:
+            raise ValueError
+        for value in (cash, capital, fee):
+            _money(value)
+        return {
+            **info,
+            "cash": cash,
+            "capital": capital,
+            "fee": fee,
+            "latest_at": latest_at,
+        }, records
+
+    @staticmethod
+    def _transfer_digest(previous, sequence, identity, body):
+        return _hash(
+            _json(
+                {"previous": previous, "sequence": sequence, "transfer_id": identity, "body": body}
+            )
+        )
+
+    def apply_transfers(self, source: tuple[CashTransferMatch, ...]):
+        """Book explicitly matched settled statement records; never infer from balance."""
+        candidates = _transfer_matches(source)
+        conflict = False
+        with self._transaction(write=True) as conn:
+            meta, _, totals = self._verify(conn)
+            if meta["halted"]:
+                raise CashBookError("cash_book_halted")
+            opening = OpeningCash.model_validate(_load(meta["opening"]))
+            if opening.transfer_policy is None:
+                raise CashBookError("cash_book_transfer_policy_required")
+            try:
+                for match, _ in candidates:
+                    check_transfer(match, opening.transfer_policy, opening.cutoff)
+            except Exception:
+                raise CashBookError("cash_book_transfer_evidence_not_matched") from None
+            existing, info = totals["transfers"], totals["transfer_info"]
+            known = dict(existing)
+            refs = {
+                (e.source, e.reference): identity
+                for identity, match in existing.items()
+                for e in (match.primary, match.confirmation)
+            }
+            selected = {}
+            for match, body in candidates:
+                identity = match.primary.record.transfer_id
+                prior = known.get(identity)
+                if prior is not None and transfer_identity(prior) != transfer_identity(match):
+                    conflict = True
+                for evidence in (match.primary, match.confirmation):
+                    key = (evidence.source, evidence.reference)
+                    if key in refs and refs[key] != identity:
+                        conflict = True
+                    refs[key] = identity
+                known[identity] = match
+                selected.setdefault(identity, (match, body))
+            if conflict:
+                conn.execute(
+                    "UPDATE book SET halted=1,reason='cash_book_transfer_identity_conflict' "
+                    "WHERE id=1"
+                )
+            else:
+                new = {
+                    identity: selected[identity]
+                    for identity in sorted(selected.keys() - existing.keys())
+                }
+                size = info["bytes"] + sum(len(body.encode()) for _, body in new.values())
+                if (
+                    meta["count"] + info["count"] + len(new) > meta["max_entries"]
+                    or meta["bytes"] + size > MAX_BYTES
+                ):
+                    raise CashBookError("cash_book_capacity_reached")
+                cash_delta = sum(_transfer_legs(match)["cash"] for match, _ in new.values())
+                capital_delta = sum(
+                    -_transfer_legs(match)["external_capital"] for match, _ in new.values()
+                )
+                fee_delta = sum(_transfer_legs(match)["fee_expense"] for match, _ in new.values())
+                for value in (
+                    cash_delta,
+                    totals["cash"] + cash_delta,
+                    info["cash"] + cash_delta,
+                    info["capital"] + capital_delta,
+                    info["fee"] + fee_delta,
+                ):
+                    _money(value)
+                sequence, head = info["count"], info["head"]
+                for identity, (match, body) in new.items():
+                    sequence += 1
+                    head = self._transfer_digest(head, sequence, identity, body)
+                    conn.execute(
+                        "INSERT INTO cash_transfers VALUES(?,?,?,?)",
+                        (sequence, identity, body, head),
+                    )
+                    conn.executemany(
+                        "INSERT INTO transfer_postings VALUES(?,?,?)",
+                        (
+                            (sequence, key, str(value))
+                            for key, value in _transfer_legs(match).items()
+                        ),
+                    )
+                if new:
+                    conn.execute(
+                        "UPDATE transfer_state SET count=?,bytes=?,head=? WHERE id=1",
+                        (sequence, size, head),
+                    )
+                result = {
+                    "scope": self.scope,
+                    "instance": meta["instance"],
+                    "head": _public_head(meta["head"], {"head": head}),
+                    "applied_transfer_ids": tuple(new),
+                    "already_applied_transfer_ids": tuple(
+                        sorted(selected.keys() & existing.keys())
+                    ),
+                    "cash_delta": _money(cash_delta),
+                    "balance": _money(totals["cash"] + cash_delta),
+                    "external_cash_accounting_applied": True,
+                    "complete": False,
+                    "live_enabled": False,
+                    "blockers": _blockers(3, totals["position_state"] is not None),
+                }
+        if conflict:
+            raise CashBookError("cash_book_transfer_identity_conflict")
         return result
 
     def snapshot(self):
@@ -632,7 +953,7 @@ class ExecutionCashBook:
         return {
             "instance": meta["instance"],
             "scope": self.scope,
-            "head": meta["head"],
+            "head": _public_head(meta["head"], totals["transfer_info"]),
             "opening": _load(meta["opening"]),
             "executions": len(records),
             "execution_ids": tuple(sorted(records)),
@@ -645,8 +966,9 @@ class ExecutionCashBook:
             "settled_swap": _money(totals["settled_swap"]),
             "complete": False,
             "live_enabled": False,
-            "blockers": _blockers(meta["version"]),
+            "blockers": _blockers(meta["version"], totals["position_state"] is not None),
             **position_result(totals["position_state"]),
+            **_transfer_result(totals["transfer_info"], totals["transfers"]),
         }
 
     @staticmethod
@@ -677,10 +999,12 @@ class ExecutionCashBook:
         return report, observed
 
     @staticmethod
-    def _check_report_boundary(report, records, opening):
+    def _check_report_boundary(report, records, opening, transfer_info=None):
         last_execution = max(
             (r.execution.timestamp for r in records.values()), default=opening.cutoff
         )
+        if transfer_info is not None and transfer_info["latest_at"] is not None:
+            last_execution = max(last_execution, transfer_info["latest_at"])
         if any(o.response_at < last_execution for o in report.observations):
             raise CashBookError("cash_book_balance_report_before_postings")
 
@@ -690,11 +1014,11 @@ class ExecutionCashBook:
         with self._transaction() as conn:
             meta, records, totals = self._verify(conn)
         opening = OpeningCash.model_validate(_load(meta["opening"]))
-        self._check_report_boundary(report, records, opening)
+        self._check_report_boundary(report, records, opening, totals["transfer_info"])
         difference = observed - totals["cash"]
         return {
             "scope": self.scope,
-            "head": meta["head"],
+            "head": _public_head(meta["head"], totals["transfer_info"]),
             "book_balance": _money(totals["cash"]),
             "observed_balance": _money(observed),
             "difference": _money(difference),
@@ -705,7 +1029,7 @@ class ExecutionCashBook:
             "blockers": tuple(
                 dict.fromkeys(
                     (
-                        *_blockers(meta["version"]),
+                        *_blockers(meta["version"], totals["position_state"] is not None),
                         *report.blockers,
                         *(("cash_book_halted",) if meta["halted"] else ()),
                         *(("cash_balance_difference_unexplained",) if difference else ()),
@@ -748,7 +1072,7 @@ class ExecutionCashBook:
         with self._transaction() as conn:
             meta, records, totals = self._verify(conn)
         opening = OpeningCash.model_validate(_load(meta["opening"]))
-        self._check_report_boundary(report, records, opening)
+        self._check_report_boundary(report, records, opening, totals["transfer_info"])
         state = totals["position_state"]
         if state is None:
             raise CashBookError("cash_book_position_basis_required")
@@ -770,7 +1094,7 @@ class ExecutionCashBook:
                     problems.append(f"position_price_mismatch:{pid}")
         return {
             "scope": self.scope,
-            "head": meta["head"],
+            "head": _public_head(meta["head"], totals["transfer_info"]),
             "position_match": not problems,
             "mismatches": tuple(problems),
             "price_tolerance_jpy": _money(_minor(price_tolerance_jpy)),
@@ -781,7 +1105,7 @@ class ExecutionCashBook:
             "blockers": tuple(
                 dict.fromkeys(
                     (
-                        *_blockers(meta["version"]),
+                        *_blockers(meta["version"], totals["position_state"] is not None),
                         *report.blockers,
                         "position_reservations_not_reconciled",
                         *(("cash_book_halted",) if meta["halted"] else ()),

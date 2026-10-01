@@ -35,6 +35,7 @@ posting = assessment.execution_cash  # 計上対象がなければNone
 新しい約定による残高変化まで計上拒否すると、初回以外の会計反映が進まないためです。
 その結果も `structural_match=false` のままで、全口座同期の成功には変換しません。
 入出金や外部操作による差は、`book.compare_balance(assessment.report)` で診断し、補正しません。
+[入出金会計](cash-transfers.md)を明示したversion 3では、別途入力した資料一致記録も残高へ反映します。
 
 ## 世代と鮮度の確認
 
@@ -92,4 +93,4 @@ uv run pytest tests/test_execution_cash_sync.py -q
 再現します。認証情報・ネットワーク・実口座を使わず、既存出力を上書きしません。
 テストでは取得中の配信、古いrevision、期限切れ、別接続の世代引継ぎ、結果不明の通知、
 commit前後の失敗、commit直後のプロセス終了、受信アダプターの終了も確認します。
-実購読の受入確認、初期履歴・入出金・建玉の照合は次の工程です。
+実購読の受入確認、初期履歴・全入出金・初期建玉の実資料との照合は次の工程です。
