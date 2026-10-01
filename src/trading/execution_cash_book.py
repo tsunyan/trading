@@ -22,6 +22,7 @@ from pydantic import AwareDatetime, Field
 
 from trading.account_events import AccountEvent
 from trading.account_reader import AccountReadReport, OrderReadReport
+from trading.account_valuation import ValuationError, ValuationPolicy, ValuationQuote, value_account
 from trading.broker_contracts import Contract, Execution, OrderIntent, Units
 from trading.cash_transfers import (
     CashTransferMatch,
@@ -1164,6 +1165,111 @@ class ExecutionCashBook:
                         *(("cash_book_halted",) if meta["halted"] else ()),
                         *(
                             ("position_reservation_difference_unexplained",)
+                            if comparison["mismatches"]
+                            else ()
+                        ),
+                    )
+                )
+            ),
+        }
+
+    def compare_valuation(
+        self,
+        source: AccountReadReport,
+        quote: ValuationQuote,
+        policy: ValuationPolicy,
+        *,
+        evaluated_at: datetime,
+        clock_skew_ms=0,
+    ):
+        """Read-only declared model diagnostics, never broker formula certification."""
+        try:
+            if (
+                len(source.positions) > 1000
+                or len(source.active_orders) > 1000
+                or not 8 <= len(source.observations) <= 10_000
+            ):
+                raise ValueError
+            source = AccountReadReport.model_validate(source.model_dump(warnings=False))
+            report, _ = self._account_report(source, clock_skew_ms)
+            quote = ValuationQuote.model_validate(quote.model_dump(warnings=False))
+            policy = ValuationPolicy.model_validate(policy.model_dump(warnings=False))
+            if len(_json((report, quote, policy)).encode()) > MAX_PROOF:
+                raise ValueError
+            skew = clock_skew(clock_skew_ms)
+            validate_reports(report, (), skew)
+            if not isinstance(evaluated_at, datetime) or evaluated_at.utcoffset() is None:
+                raise ValueError
+            if (
+                quote.observed_at > evaluated_at
+                or (evaluated_at - quote.observed_at).total_seconds() > policy.max_quote_age_seconds
+                or any(
+                    o.received_at > evaluated_at
+                    or o.response_at > evaluated_at + skew
+                    or (evaluated_at - o.response_at).total_seconds()
+                    > policy.max_report_age_seconds
+                    or abs((o.response_at - quote.observed_at).total_seconds())
+                    > policy.max_quote_age_seconds
+                    for o in report.observations
+                )
+            ):
+                raise ValueError
+        except Exception:
+            raise CashBookError("cash_book_valuation_input_invalid") from None
+        with self._transaction() as conn:
+            meta, records, totals = self._verify(conn)
+            state = totals["position_state"]
+            if state is None:
+                raise CashBookError("cash_book_position_basis_required")
+            opening = OpeningCash.model_validate(_load(meta["opening"]))
+            self._check_report_boundary(report, records, opening, totals["transfer_info"])
+            boundary = max(
+                (r.execution.timestamp for r in records.values()), default=opening.cutoff
+            )
+            if (
+                totals["transfer_info"] is not None
+                and totals["transfer_info"]["latest_at"] is not None
+            ):
+                boundary = max(boundary, totals["transfer_info"]["latest_at"])
+            if quote.observed_at < boundary:
+                raise CashBookError("cash_book_valuation_quote_before_postings")
+            try:
+                comparison = value_account(
+                    state, Fraction(totals["cash"], SCALE), report, quote, policy
+                )
+            except ValuationError:
+                raise CashBookError("cash_book_valuation_precision_capacity") from None
+        return {
+            "scope": self.scope,
+            "head": _public_head(meta["head"], totals["transfer_info"]),
+            "evaluated_at": evaluated_at.isoformat(),
+            "quote": _normalize(quote),
+            "policy": _normalize(policy),
+            **comparison,
+            "halted": bool(meta["halted"]),
+            "complete": False,
+            "live_enabled": False,
+            "blockers": tuple(
+                dict.fromkeys(
+                    (
+                        *_blockers(meta["version"], True),
+                        *report.blockers,
+                        "local_valuation_model_not_broker_verified",
+                        "valuation_quote_not_authenticated",
+                        "position_reservations_not_reconciled",
+                        *(
+                            ("reported_unsettled_swap_not_rebuilt",)
+                            if policy.include_reported_swap
+                            else ()
+                        ),
+                        *(
+                            ("reported_fee_estimate_not_verified",)
+                            if policy.subtract_reported_estimated_fee
+                            else ()
+                        ),
+                        *(("cash_book_halted",) if meta["halted"] else ()),
+                        *(
+                            ("local_valuation_difference_unexplained",)
                             if comparison["mismatches"]
                             else ()
                         ),
