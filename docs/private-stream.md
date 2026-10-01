@@ -7,6 +7,9 @@
 [同期モニターからの現金計上](execution-cash-sync.md)を追加しました。
 `resync(..., collect_orders=..., cash_book=book)` で明示指定した台帳に個別の一致約定を渡せます。
 計上経路の失敗では受信・トークンを終了します。台帳なしの照合は従来どおり診断です。
+[同期経路からの建玉拘束照合](position-reservation-sync.md)も追加しました。
+`collect_reservations` と `reservation_book` を明示すると現在の取得に対して拘束数量を比較します。
+この比較経路の失敗でも受信・トークンを終了し、発注許可には変換しません。
 
 ## 通信と期限
 

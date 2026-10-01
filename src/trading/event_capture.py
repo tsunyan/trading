@@ -15,6 +15,7 @@ class JournaledEventCapture:
     Private record/ack internals must not be bypassed by callers. Resync results
     remain diagnostic and are never persisted as reusable account proof. Explicit
     cash integration saves only individual fills and their comparison evidence.
+    Reservation integration returns non-persistent diagnostics for this revision.
     """
 
     def __init__(
@@ -185,17 +186,49 @@ class JournaledEventCapture:
                 self._poison()
                 raise
 
-    def resync(self, collect, *, collect_orders=None, cash_book=None):
+    def compare_position_reservations(self, book: ExecutionCashBook, *, expected_revision):
+        with self._lock:
+            self._check_cash_book(book)
+            self._ready()
+            try:
+                with self._journal.guard_session(self._session):
+                    return self._monitor.compare_position_reservations(
+                        self._monitor_session, book, expected_revision=expected_revision
+                    )
+            except BaseException:
+                self._poison()
+                raise
+
+    def resync(
+        self,
+        collect,
+        *,
+        collect_orders=None,
+        cash_book=None,
+        collect_reservations=None,
+        reservation_book=None,
+    ):
         with self._lock:
             if cash_book is not None:
                 self._check_cash_book(cash_book)
                 if collect_orders is None:
                     raise SyncError("execution_cash_requires_order_collection")
+            if reservation_book is not None:
+                self._check_cash_book(reservation_book)
+                if collect_reservations is None:
+                    raise SyncError("reservations_require_order_collection")
+                if cash_book is not None and cash_book.path != reservation_book.path:
+                    raise SyncError("reservation_cash_book_mismatch")
             self._ready()
             session = self._session
         # Never hold the capture lock across REST: arriving events must be committed
         # and delivered while collection is in progress, invalidating that attempt.
-        result = self._monitor.resync(self._monitor_session, collect, collect_orders=collect_orders)
+        result = self._monitor.resync(
+            self._monitor_session,
+            collect,
+            collect_orders=collect_orders,
+            collect_reservations=collect_reservations,
+        )
         with self._lock:
             view = self._ready()
             current = self._monitor.status()
@@ -212,15 +245,25 @@ class JournaledEventCapture:
                 execution_cash = self.apply_execution_cash(
                     cash_book, expected_revision=result.revision
                 )
+            reservations = None
+            if reservation_book is not None:
+                reservations = self.compare_position_reservations(
+                    reservation_book, expected_revision=result.revision
+                )
+                if execution_cash is not None and reservations["head"] != execution_cash["head"]:
+                    self._poison()
+                    raise SyncError("cash_book_changed_during_reservation_comparison")
             # Journal presence never proves continuity or authenticates the account.
             return result.model_copy(
                 update={
                     "execution_cash": execution_cash,
+                    "position_reservations": reservations,
                     "blockers": tuple(
                         dict.fromkeys(
                             (
                                 *result.blockers,
                                 *self._blockers(view),
+                                *(reservations["blockers"] if reservations else ()),
                             )
                         )
                     ),

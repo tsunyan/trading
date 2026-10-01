@@ -45,6 +45,7 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 [約定からの建玉会計](docs/execution-positions.md)では、開始建玉を宣言した台帳で数量・取得価格・決済損益を検証します。
 部分決済と再起動に対応し、RESTとの差を補正せず表示します。
 [建玉拘束数量の照合](docs/position-reservations.md)では、決済割当から計上済み約定を引き、RESTの拘束数量と比較します。
+[同期経路からの拘束照合](docs/position-reservation-sync.md)では、現在の世代・revision・鮮度を確認して同じ比較を実行します。
 [明細証拠による入出金会計](docs/cash-transfers.md)では、宣言した2資料の一致記録から入出金・手数料を一度だけ計上します。
 実資料の認証・取得と全履歴の照合は残っています。
 [通知の永続記録・履歴再生](docs/event-journal.md)では、保存後に処理を渡し、

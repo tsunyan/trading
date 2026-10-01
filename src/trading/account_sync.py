@@ -1,4 +1,4 @@
-"""Event/REST diagnostics and explicit matched cash postings, never a trade gate."""
+"""Current event/REST, cash and reservation diagnostics; never a trade gate."""
 
 import math
 import threading
@@ -40,6 +40,7 @@ class SyncAssessment(Contract):
     blockers: tuple[str, ...]
     execution_reconciliation: ExecutionReconciliation | None = None
     execution_cash: dict | None = None
+    position_reservations: dict | None = None
     complete: Literal[False] = False
     live_enabled: Literal[False] = False
 
@@ -70,6 +71,7 @@ class AccountSyncMonitor:
     Reconnect means a NEW observation baseline, not restoration of missing history.
     Resync is diagnostic. Only explicit apply_execution_cash writes a supplied book;
     no API keys, network transport or order journal are used.
+    Reservation comparisons use current internally retained evidence, not replay.
     The caller must feed every captured data frame with a consecutive LOCAL ordinal.
     """
 
@@ -110,6 +112,8 @@ class AccountSyncMonitor:
         self._baseline = None
         self._cash_batch = None
         self._cash_observed_at = None
+        self._reservation_input = None
+        self._reservation_observed_at = None
         self._positions: dict[int, AccountEvent] = {}
         self._orders: dict[int, AccountEvent] = {}
         self._executions: dict[int, AccountEvent] = {}
@@ -122,6 +126,8 @@ class AccountSyncMonitor:
         self._verified_executions.clear()
         self._cash_batch = None
         self._cash_observed_at = None
+        self._reservation_input = None
+        self._reservation_observed_at = None
         self._reason = reason
         if disconnect:
             self._connected = False
@@ -150,6 +156,10 @@ class AccountSyncMonitor:
             or (
                 self._cash_batch is not None
                 and mono - self._cash_observed_at > self._observation_limit
+            )
+            or (
+                self._reservation_input is not None
+                and mono - self._reservation_observed_at > self._observation_limit
             )
         ):
             self._invalidate("rest_observation_expired")
@@ -342,12 +352,42 @@ class AccountSyncMonitor:
             problems.append("balance_change_unverified")
         return tuple(problems)
 
+    def compare_position_reservations(self, session, book: ExecutionCashBook, *, expected_revision):
+        """Compare only internally retained, current evidence; never returned dicts."""
+        with self._lock:
+            self._current(session)
+            if type(expected_revision) is not int or expected_revision != self._revision:
+                raise SyncError("stale_reservation_sync_revision")
+            if self._ticket is not None or self._reservation_input is None:
+                raise SyncError("reservations_require_current_collection")
+            if not isinstance(book, ExecutionCashBook):
+                raise SyncError("execution_cash_book_required")
+            inputs = self._reservation_input
+            epoch, sequence = self._epoch, self._sequence
+            try:
+                result = book.compare_reservations(*inputs, clock_skew_ms=self._clock_skew_ms)
+                self._current(session)
+                if self._reservation_input is not inputs or expected_revision != self._revision:
+                    raise SyncError("reservation_sync_changed_during_comparison")
+            except BaseException as error:
+                self._invalidate("position_reservation_comparison_failed")
+                if not isinstance(error, Exception):
+                    raise
+                raise SyncError("position_reservation_comparison_failed") from None
+            return {
+                **result,
+                "epoch": epoch,
+                "revision": expected_revision,
+                "received_sequence": sequence,
+            }
+
     def resync(
         self,
         session,
         collect: Callable[[], AccountReadReport],
         *,
         collect_orders: Callable[[tuple[int, ...]], tuple[OrderReadReport, ...]] | None = None,
+        collect_reservations: Callable[[], tuple[OrderReadReport, ...]] | None = None,
     ) -> SyncAssessment:
         """Collect once outside the lock, then fence concurrent changes at acceptance.
 
@@ -373,6 +413,28 @@ class AccountSyncMonitor:
                 raise SyncError("execution_collection_capacity")
         try:
             try:
+                reservation_reports = None
+                if collect_reservations is not None:
+                    collected = collect_reservations()
+                    if (
+                        not isinstance(collected, tuple)
+                        or len(collected) > 1000
+                        or sum(len(r.evidence.executions) for r in collected) > 10_000
+                    ):
+                        raise ValueError
+                    reservation_reports = tuple(
+                        OrderReadReport.model_validate(r.model_dump(warnings=False))
+                        for r in collected
+                    )
+                    if (
+                        sum(len(r.model_dump_json().encode()) for r in reservation_reports)
+                        > 2_000_000
+                    ):
+                        raise ValueError
+                    with self._lock:
+                        self._current(session)
+                        if ticket != self._ticket or self._revision != revision:
+                            raise SyncError("stream_changed_during_collection")
                 report = collect()
                 # Detach/revalidate even model_construct/model_copy inputs.
                 if not isinstance(report, AccountReadReport):
@@ -442,6 +504,20 @@ class AccountSyncMonitor:
                                 raise SyncError("stale_or_invalid_execution_report")
                             last_received = observation.received_at
                             last_response = observation.response_at
+                if reservation_reports is not None:
+                    for order_report in reservation_reports:
+                        order_observations = order_report.observations
+                        if len(order_observations) != 4:
+                            raise SyncError("invalid_reservation_read_report")
+                        for observation in order_observations:
+                            if not (
+                                started <= observation.received_at <= observations[0].received_at
+                                and started - self._clock_skew
+                                <= observation.response_at
+                                <= observation.received_at + self._clock_skew
+                                and observation.response_at <= observations[0].response_at
+                            ):
+                                raise SyncError("stale_or_invalid_reservation_report")
                 mismatches = self._compare(report)
                 if reconciliation is not None:
                     mismatches += reconciliation.mismatches
@@ -460,6 +536,9 @@ class AccountSyncMonitor:
                     report=report,
                     blockers=tuple(dict.fromkeys((*self._blockers(), *report.blockers))),
                 )
+                if reservation_reports is not None:
+                    self._reservation_input = (report, reservation_reports)
+                    self._reservation_observed_at = mono
                 if (
                     reconciliation is not None
                     and not reconciliation.unverified_execution_ids

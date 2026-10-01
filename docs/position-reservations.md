@@ -21,7 +21,8 @@ comparison = book.compare_reservations(account, order_reports)
 すべてのREST未約定注文に対応する個別資料を要求します。資料がない注文は
 `reservation_order_not_collected` とし、未確認の注文IDを返します。
 注文意図と実口座本人性の対応は未認証で、渡された資料が全注文を網羅することも未証明です。
-現在の注文台帳から意図を自動で取り込む処理や、同期モニターからの自動実行はありません。
+現在の注文台帳から意図を自動で取り込む処理はありません。
+[同期経路からの明示指定による拘束照合](position-reservation-sync.md)も追加しました。
 
 ## 残数量の計算
 
