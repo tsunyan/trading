@@ -127,6 +127,7 @@ uv run python -m trading.account_sync_lab replay --input runs/account-sync-demo/
   [開始建玉を宣言した建玉会計](execution-positions.md)も追加済みです。
   [明細証拠による入出金会計](cash-transfers.md)も追加済みです。入出金は別APIへ明示入力します。
   実資料の認証・取得、初期建玉の確認・全入出金・全履歴の照合は残っています。
+  [建玉拘束数量の照合](position-reservations.md)は非永続APIとして追加済みで、同期経路との接続は残っています。
 - 口座本人性・権限・費用・丸めの実口座検証、発注ゲートとの接続条件の確立。
 
 検証: `uv run pytest tests/test_account_events.py tests/test_account_sync.py tests/test_account_sync_lab.py -q`

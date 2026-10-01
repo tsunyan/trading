@@ -36,6 +36,7 @@ from trading.execution_positions import (
     rebuild_positions,
 )
 from trading.execution_reconciliation import reconcile_executions
+from trading.position_reservations import compare_reservations, validate_reports
 from trading.storage_init import new_storage_directory
 from trading.wire_validation import clock_skew, unique_object
 
@@ -1110,6 +1111,62 @@ class ExecutionCashBook:
                         "position_reservations_not_reconciled",
                         *(("cash_book_halted",) if meta["halted"] else ()),
                         *(("position_inventory_difference_unexplained",) if problems else ()),
+                    )
+                )
+            ),
+        }
+
+    def compare_reservations(
+        self, source: AccountReadReport, orders: tuple[OrderReadReport, ...], *, clock_skew_ms=0
+    ):
+        """Diagnose close-order reservations without writing or granting permission."""
+        try:
+            report, _ = self._account_report(source, clock_skew_ms)
+            if not isinstance(orders, tuple) or len(orders) > 1000:
+                raise ValueError
+            if sum(len(r.evidence.executions) for r in orders) > 10_000:
+                raise ValueError
+            # Revalidate caller-constructed nested models and bound all money.
+            orders = tuple(OrderReadReport.model_validate(r.model_dump()) for r in orders)
+            if len(_json((report, orders)).encode()) > MAX_PROOF:
+                raise ValueError
+            validate_reports(report, orders, clock_skew(clock_skew_ms))
+        except Exception:
+            raise CashBookError("cash_book_reservation_report_invalid") from None
+        with self._transaction() as conn:
+            meta, records, totals = self._verify(conn)
+            state = totals["position_state"]
+            if state is None:
+                raise CashBookError("cash_book_position_basis_required")
+            opening = OpeningCash.model_validate(_load(meta["opening"]))
+            self._check_report_boundary(report, records, opening, totals["transfer_info"])
+            boundary = max(
+                (r.execution.timestamp for r in records.values()), default=opening.cutoff
+            )
+            if any(o.response_at < boundary for r in orders for o in r.observations):
+                raise CashBookError("cash_book_reservation_report_before_postings")
+            comparison = compare_reservations(report, orders, records, state)
+        return {
+            "scope": self.scope,
+            "head": _public_head(meta["head"], totals["transfer_info"]),
+            **comparison,
+            "halted": bool(meta["halted"]),
+            "complete": False,
+            "live_enabled": False,
+            "blockers": tuple(
+                dict.fromkeys(
+                    (
+                        *_blockers(meta["version"], True),
+                        *report.blockers,
+                        "reservation_intents_not_authenticated",
+                        "reservation_execution_history_not_proven",
+                        "broker_reservation_semantics_not_verified",
+                        *(("cash_book_halted",) if meta["halted"] else ()),
+                        *(
+                            ("position_reservation_difference_unexplained",)
+                            if comparison["mismatches"]
+                            else ()
+                        ),
                     )
                 )
             ),
