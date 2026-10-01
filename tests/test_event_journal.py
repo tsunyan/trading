@@ -327,3 +327,67 @@ else:
     assert result.returncode == 0
     assert result.stdout.decode().strip() == "capture_session_fenced"
     assert journal.inspect()["unacknowledged_records"] == (pending,)
+
+
+@pytest.mark.parametrize("operation", ["open", "inspect", "current", "replay"])
+def test_read_only_verification_never_blocks_a_writer_commit(journal, monkeypatch, operation):
+    session = start(journal)
+    writer = EventJournal(journal.path.parent, "synthetic")
+    reader = EventJournal(journal.path.parent, "synthetic")
+    original, written = EventJournal._check, []
+
+    def check(self, meta, rows):
+        # A rollback-journal COMMIT needs every shared lock released. Verifying
+        # while still holding one would make this write time out as busy.
+        if self is not writer and not written:
+            written.append(event(writer, session))
+        return original(self, meta, rows)
+
+    monkeypatch.setattr(EventJournal, "_check", check)
+    if operation == "open":
+        EventJournal(journal.path.parent, "synthetic")
+    elif operation == "current":
+        assert reader.current(session)["unacknowledged_records"] == ()
+    else:
+        getattr(reader, operation)()
+    assert written == [2]
+    assert not writer._failed and not reader._failed
+    assert reader.inspect()["unacknowledged_records"] == (2,)
+
+
+def test_busy_write_is_retried_once_without_duplicate(journal, monkeypatch):
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    session = start(journal)
+    lock = sqlite3.connect(journal.path)
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        lock.rollback()
+
+    journal._wait = wait
+    try:
+        lock.execute("BEGIN IMMEDIATE")
+        assert event(journal, session) == 2
+    finally:
+        lock.close()
+    assert waits == [0.05]
+    view = journal.inspect()
+    assert view["records"] == 2 and view["unacknowledged_records"] == (2,)
+
+
+def test_busy_exhaustion_is_not_treated_as_corruption(journal, monkeypatch):
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    session = start(journal)
+    before = journal.inspect()
+    waits = []
+    journal._wait = waits.append
+    with sqlite3.connect(journal.path) as lock:
+        lock.execute("BEGIN IMMEDIATE")
+        with pytest.raises(JournalError, match="journal_busy"):
+            event(journal, session)
+        lock.rollback()
+    assert waits == [0.05, 0.05]
+    assert not journal._failed
+    assert journal.inspect() == before
+    assert event(journal, session) == 2
