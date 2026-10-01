@@ -74,7 +74,8 @@ REST手数料の不一致 → 修正されたRESTとの一致、の7ステップ
 履歴完全性・口座本人性・原子的な同期の未確認条件は残ります。
 残高変化は引き続き `balance_change_unverified` として扱います。
 入出金・外部操作・失った履歴・初期残高との会計照合、永続会計への一度だけの反映、
-実WebSocketとトークン管理、実口座受入検証が次の工程です。
+実口座受入検証が次の工程です。
+[WebSocket受信とトークン管理](private-stream.md)は追加済みです。
 
 フィールドは[GMO FXの約定REST仕様](https://api.coin.z.com/fxdocs/#executions)と
 [約定通知仕様](https://api.coin.z.com/fxdocs/#ws-execution-events)を2026-10-01に確認しました。

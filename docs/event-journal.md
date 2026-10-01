@@ -101,8 +101,9 @@ uv run pytest tests/test_event_journal.py tests/test_event_capture.py tests/test
 再取得中の通知、不正入力の本文非保存を検証します。
 実業者API、実口座、電源断・ディスク障害の実機試験ではありません。
 
-[既知注文のREST約定照合](execution-reconciliation.md)を追加しました。
-実WebSocket受信とトークン管理、会計反映・履歴の再同期、長期保存の運用が残っています。
+[既知注文のREST約定照合](execution-reconciliation.md)と
+[WebSocket受信・トークン管理](private-stream.md)を追加しました。
+実購読の受入確認、全口座会計・履歴の再同期、長期保存の運用が残っています。
 
 ## 2026-10-01 レビュー対応
 
