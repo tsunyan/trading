@@ -73,9 +73,11 @@ REST手数料の不一致 → 修正されたRESTとの一致、の7ステップ
 `execution_events_not_reconciled` が解消しても、`execution_accounting_not_applied` と
 履歴完全性・口座本人性・原子的な同期の未確認条件は残ります。
 残高変化は引き続き `balance_change_unverified` として扱います。
-入出金・外部操作・失った履歴・初期残高との会計照合、永続会計への一度だけの反映、
-実口座受入検証が次の工程です。
+入出金・外部操作・失った履歴・初期残高との会計照合と実口座受入検証が必要です。
 [WebSocket受信とトークン管理](private-stream.md)は追加済みです。
+[個別約定の永続現金会計](execution-cash-book.md)も2026-10-02に追加しました。
+明示入力した個別約定を別DBへ一度だけ計上しますが、この照合結果から自動計上はせず、
+全口座会計の完了や会計反映済み状態への変換もしません。
 
 フィールドは[GMO FXの約定REST仕様](https://api.coin.z.com/fxdocs/#executions)と
 [約定通知仕様](https://api.coin.z.com/fxdocs/#ws-execution-events)を2026-10-01に確認しました。

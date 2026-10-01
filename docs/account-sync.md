@@ -120,6 +120,8 @@ uv run python -m trading.account_sync_lab replay --input runs/account-sync-demo/
   [通知の永続記録と履歴再生](event-journal.md)へ受信アダプターを接続済み。実購読・長期運用は未検証。
 - 約定通知の永続会計への反映、失った履歴・入出金・外部操作の照合。
   既知注文の約定REST照合と一致通知の金額内訳の診断集計は2026-10-01に追加済み。
+  [個別約定の永続現金会計](execution-cash-book.md)は2026-10-02に別DBとして追加済み。
+  同期モニターとの自動接続、建玉会計・全履歴の照合は残っています。
 - 口座本人性・権限・費用・丸めの実口座検証、発注ゲートとの接続条件の確立。
 
 検証: `uv run pytest tests/test_account_events.py tests/test_account_sync.py tests/test_account_sync_lab.py -q`

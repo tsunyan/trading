@@ -103,6 +103,7 @@ uv run pytest tests/test_event_journal.py tests/test_event_capture.py tests/test
 
 [既知注文のREST約定照合](execution-reconciliation.md)と
 [WebSocket受信・トークン管理](private-stream.md)を追加しました。
+[個別約定の永続現金会計](execution-cash-book.md)も追加済みです。
 実購読の受入確認、全口座会計・履歴の再同期、長期保存の運用が残っています。
 
 ## 2026-10-01 レビュー対応
