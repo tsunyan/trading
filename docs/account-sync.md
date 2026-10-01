@@ -20,7 +20,8 @@
   不一致を消しません。
 - 約定通知は約定IDごとに保持し、同一IDの異なる内容は拒否します。
   同一通知の再配信でも再取得中の結果を無効にしますが、二重計上は行いません。
-  **約定の会計計上・既知注文のREST約定との照合は未接続**で、常に未検証条件を残します。
+  [既知注文のREST約定との照合](execution-reconciliation.md)を任意の `collect_orders` で実行できます。
+  約定の会計計上は未接続で、履歴完全性や会計反映の未検証条件を残します。
 - ローカル受信番号の欠番・逆順、不正通知、切断、時計異常、保持上限到達で無効化します。
 - 再取得は既存の `AccountReader.collect_account` を明示的に渡し、1回だけ実行します。
   取得中の通知・切断・再接続で結果を破棄し、古い接続の完了が新しい観測を上書きしないようにします。
@@ -82,7 +83,9 @@ heartbeatだけでは観測の有効期間を延長しません。
 診断結果は常に `complete=false`、`live_enabled=false` です。
 REST側の本人性・原子性・履歴完全性・費用計算の未確認条件に加え、イベントの連続性と
 資産変化の網羅性の未確認条件を残します。再接続後も `history_gap_not_repaired` を残します。
-約定通知があれば `execution_events_not_reconciled` と該当約定IDを表示します。
+未照合の約定通知があれば `execution_events_not_reconciled` と該当約定IDを表示します。
+任意のREST約定照合も指定した場合、`structural_match` はその不一致も含めた判定になります。
+すべての比較が一致した観測でのみ照合済み表示を採用し、会計反映の未確認条件は維持します。
 
 `resync_required=false` は、現在の構造観測について再取得要求が解消したという意味だけです。
 残高の正しさ・履歴完全性や発注可否を示しません。
@@ -114,7 +117,8 @@ uv run python -m trading.account_sync_lab replay --input runs/account-sync-demo/
 - Private WebSocketの認証・トークン寿命管理・実通信アダプターとローカル連番の受信時付与。
 - 実口座の購読開始境界・反映遅延・再接続挙動の確認。
   [通知の永続記録と履歴再生](event-journal.md)は模擬入力で追加済み。実受信との接続・長期運用は未検証。
-- 既知注文の約定REST照合、約定通知の会計反映、失った履歴・入出金・外部操作の照合。
+- 約定通知の永続会計への反映、失った履歴・入出金・外部操作の照合。
+  既知注文の約定REST照合と一致通知の金額内訳の診断集計は2026-10-01に追加済み。
 - 口座本人性・権限・費用・丸めの実口座検証、発注ゲートとの接続条件の確立。
 
 検証: `uv run pytest tests/test_account_events.py tests/test_account_sync.py tests/test_account_sync_lab.py -q`

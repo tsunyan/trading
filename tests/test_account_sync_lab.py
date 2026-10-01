@@ -4,9 +4,48 @@ from datetime import UTC, datetime
 
 import pytest
 
-from trading.account_sync_lab import SyncTranscript, demo_transcript_events, main, replay
+from trading.account_sync_lab import (
+    SyncTranscript,
+    demo_execution_transcript,
+    demo_transcript_events,
+    main,
+    replay,
+)
 
 NOW = datetime(2026, 9, 30, tzinfo=UTC)
+
+
+def test_execution_demo_replays_matches_duplicates_and_fee_conflict(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("network attempted"))
+    directory = tmp_path / "executions"
+    main(["demo", "--executions", "--directory", str(directory)])
+    capsys.readouterr()
+    main(["replay", "--input", str(directory / "transcript.json")])
+    result = json.loads(capsys.readouterr().out)
+    assert result == json.loads((directory / "report.json").read_text())
+    rows = result["steps"]
+    for index in (2, 4, 6):
+        assessment = rows[index]["assessment"]
+        assert assessment["structural_match"]
+        assert assessment["execution_reconciliation"]["matched_cash_amount"] == "-2"
+        assert not assessment["complete"]
+    assert rows[5]["assessment"]["mismatches"] == ["execution_fields_mismatch:501"]
+    assert rows[5]["status"]["resync_required"]
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "wrong_query"])
+def test_order_transcript_requires_exact_exchanges(change):
+    data = demo_execution_transcript(NOW).model_dump(mode="json")
+    exchanges = data["steps"][2]["order_reads"][0]["transcript"]["exchanges"]
+    if change == "missing":
+        exchanges.pop()
+    elif change == "extra":
+        exchanges.append(exchanges[-1])
+    else:
+        exchanges[0]["query"] = [["orderId", "999"]]
+    step = replay(SyncTranscript.model_validate(data))["steps"][2]
+    assert step["error"] == "sync_collection_failed"
+    assert step["status"]["reconciled_executions"] == 0
 
 
 def test_demo_and_replay_are_identical_offline(tmp_path, capsys, monkeypatch):

@@ -11,8 +11,9 @@ from typing import Literal
 from pydantic import AwareDatetime, TypeAdapter
 
 from trading.account_events import AccountEvent, EventError, parse_event
-from trading.account_reader import ASSETS, ORDERS, POSITIONS, AccountReadReport
+from trading.account_reader import ASSETS, ORDERS, POSITIONS, AccountReadReport, OrderReadReport
 from trading.broker_contracts import Contract
+from trading.execution_reconciliation import ExecutionReconciliation, reconcile_executions
 from trading.wire_validation import clock_skew
 
 TIME = TypeAdapter(AwareDatetime)
@@ -36,6 +37,7 @@ class SyncAssessment(Contract):
     unverified_execution_ids: tuple[int, ...]
     report: AccountReadReport
     blockers: tuple[str, ...]
+    execution_reconciliation: ExecutionReconciliation | None = None
     complete: Literal[False] = False
     live_enabled: Literal[False] = False
 
@@ -105,12 +107,14 @@ class AccountSyncMonitor:
         self._baseline = None
         self._positions: dict[int, AccountEvent] = {}
         self._orders: dict[int, AccountEvent] = {}
-        self._executions: dict[int, str] = {}
+        self._executions: dict[int, AccountEvent] = {}
+        self._verified_executions: set[int] = set()
         self._completed_orders: set[int] = set()
 
     def _invalidate(self, reason, *, disconnect=False):
         self._revision += 1
         self._observed = False
+        self._verified_executions.clear()
         self._reason = reason
         if disconnect:
             self._connected = False
@@ -197,10 +201,10 @@ class AccountSyncMonitor:
                 raise SyncError("event_rejected") from None
             if event.channel == "executionEvents":
                 prior = self._executions.get(event.entity_id)
-                if prior is not None and prior != event.payload_sha256:
+                if prior is not None and prior.payload_sha256 != event.payload_sha256:
                     self._invalidate("execution_identity_conflict", disconnect=True)
                     raise SyncError("execution_identity_conflict")
-                self._executions[event.entity_id] = event.payload_sha256
+                self._executions[event.entity_id] = event
                 if event.execution_order_complete:
                     self._completed_orders.add(event.execution_order_id)
             elif event.channel == "positionEvents":
@@ -237,7 +241,8 @@ class AccountSyncMonitor:
                 "history_gap_observed": self._gap,
                 "pending_positions": len(self._positions),
                 "pending_orders": len(self._orders),
-                "unverified_executions": len(self._executions),
+                "unverified_executions": len(self._executions.keys() - self._verified_executions),
+                "reconciled_executions": len(self._verified_executions),
                 "complete": False,
                 "live_enabled": False,
                 "blockers": list(self._blockers()),
@@ -247,7 +252,12 @@ class AccountSyncMonitor:
         return (
             *BLOCKERS,
             *(("history_gap_not_repaired",) if self._gap else ()),
-            *(("execution_events_not_reconciled",) if self._executions else ()),
+            *(
+                ("execution_events_not_reconciled",)
+                if self._executions.keys() - self._verified_executions
+                else ()
+            ),
+            *(("execution_accounting_not_applied",) if self._executions else ()),
         )
 
     def _compare(self, report):
@@ -287,7 +297,13 @@ class AccountSyncMonitor:
             problems.append("balance_change_unverified")
         return tuple(problems)
 
-    def resync(self, session, collect: Callable[[], AccountReadReport]) -> SyncAssessment:
+    def resync(
+        self,
+        session,
+        collect: Callable[[], AccountReadReport],
+        *,
+        collect_orders: Callable[[tuple[int, ...]], tuple[OrderReadReport, ...]] | None = None,
+    ) -> SyncAssessment:
         """Collect once outside the lock, then fence concurrent changes at acceptance.
 
         Supply AccountReader.collect_account (or an offline transcript replay). No
@@ -300,8 +316,15 @@ class AccountSyncMonitor:
             ticket = uuid.uuid4().hex
             self._ticket = ticket
             self._observed = False
+            self._verified_executions.clear()
             self._reason = "collecting"
             revision = self._revision
+            events = tuple(self._executions.values())
+            order_ids = tuple(sorted({e.execution_order_id for e in events}))
+            if collect_orders is not None and len(order_ids) > 1000:
+                self._ticket = None
+                self._invalidate("execution_collection_capacity")
+                raise SyncError("execution_collection_capacity")
         try:
             try:
                 report = collect()
@@ -309,6 +332,13 @@ class AccountSyncMonitor:
                 if not isinstance(report, AccountReadReport):
                     raise ValueError
                 report = AccountReadReport.model_validate(report.model_dump())
+                reconciliation = None
+                if collect_orders is not None and events:
+                    with self._lock:
+                        self._current(session)
+                        if ticket != self._ticket or self._revision != revision:
+                            raise SyncError("stream_changed_during_collection")
+                    reconciliation = reconcile_executions(events, collect_orders(order_ids))
             except Exception:
                 raise SyncError("sync_collection_failed") from None
             with self._lock:
@@ -339,14 +369,48 @@ class AccountSyncMonitor:
                     )
                 ):
                     raise SyncError("stale_or_invalid_sync_report")
+                if reconciliation is not None:
+                    last_received = observations[-1].received_at
+                    last_response = observations[-1].response_at
+                    for order_report in reconciliation.reports:
+                        evidence = order_report.evidence
+                        query = (("orderId", str(evidence.order_id)),)
+                        order_observations = order_report.observations
+                        if (
+                            len(order_observations) != 4
+                            or tuple(o.path for o in order_observations)
+                            != ("/v1/orders", "/v1/executions") * 2
+                            or any(o.query != query for o in order_observations)
+                            or evidence.executions_complete
+                            or evidence.observed_at != order_observations[-1].response_at
+                        ):
+                            raise SyncError("invalid_execution_read_report")
+                        for observation in order_observations:
+                            if not (
+                                last_received <= observation.received_at <= now
+                                and started - self._clock_skew
+                                <= observation.response_at
+                                <= observation.received_at + self._clock_skew
+                                and last_response <= observation.response_at
+                            ):
+                                raise SyncError("stale_or_invalid_execution_report")
+                            last_received = observation.received_at
+                            last_response = observation.response_at
                 mismatches = self._compare(report)
+                if reconciliation is not None:
+                    mismatches += reconciliation.mismatches
+                    if not mismatches:
+                        self._verified_executions = set(reconciliation.matched_execution_ids)
                 result = SyncAssessment(
                     epoch=self._epoch,
                     revision=revision,
                     received_sequence=self._sequence,
                     structural_match=not mismatches,
                     mismatches=mismatches,
-                    unverified_execution_ids=tuple(sorted(self._executions)),
+                    unverified_execution_ids=tuple(
+                        sorted(self._executions.keys() - self._verified_executions)
+                    ),
+                    execution_reconciliation=reconciliation,
                     report=report,
                     blockers=tuple(dict.fromkeys((*self._blockers(), *report.blockers))),
                 )

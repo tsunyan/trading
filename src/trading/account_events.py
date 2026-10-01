@@ -8,12 +8,13 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import AwareDatetime, Field, TypeAdapter
 
 from trading.account_reader import ActiveOrder, HeldPosition
-from trading.broker_contracts import Contract, Units
+from trading.broker_contracts import Contract, Execution, Units
 from trading.wire_validation import (
     clock_skew,
     decimal_string,
@@ -41,6 +42,10 @@ class AccountEvent(Contract):
     # Executions invalidate observations but are not booked or promoted to fills.
     execution_order_id: Units | None = None
     execution_order_complete: bool = False
+    execution_order: ActiveOrder | None = None
+    execution: Execution | None = None
+    execution_amount: Decimal | None = None
+    execution_cumulative_units: Units | None = None
 
 
 def _object(pairs):
@@ -249,6 +254,19 @@ def parse_event(payload: bytes, received_at: datetime, *, clock_skew_ms: int = 0
                     occurred_at=stamp,
                     execution_order_id=order.order_id,
                     execution_order_complete=executed == order.units,
+                    execution_order=order,
+                    execution=Execution(
+                        execution_id=_id(row, "executionId"),
+                        position_id=_id(row, "positionId"),
+                        units=size,
+                        price=_number(row, "executionPrice", positive=True),
+                        fee=-_number(row, "fee"),
+                        loss_gain=_number(row, "lossGain"),
+                        settled_swap=_number(row, "settledSwap"),
+                        timestamp=stamp,
+                    ),
+                    execution_amount=_number(row, "amount"),
+                    execution_cumulative_units=executed,
                 )
         else:
             raise EventError("unsupported_event")

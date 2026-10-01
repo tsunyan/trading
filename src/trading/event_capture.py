@@ -160,13 +160,13 @@ class JournaledEventCapture:
             ),
         )
 
-    def resync(self, collect):
+    def resync(self, collect, *, collect_orders=None):
         with self._lock:
             self._ready()
             session = self._session
         # Never hold the capture lock across REST: arriving events must be committed
         # and delivered while collection is in progress, invalidating that attempt.
-        result = self._monitor.resync(self._monitor_session, collect)
+        result = self._monitor.resync(self._monitor_session, collect, collect_orders=collect_orders)
         with self._lock:
             view = self._ready()
             current = self._monitor.status()
