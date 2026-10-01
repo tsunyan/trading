@@ -146,6 +146,9 @@ def sign_request(
         ("POST", "/v1/cancelOrders"),
         ("GET", "/v1/orders"),
         ("GET", "/v1/executions"),
+        ("GET", "/v1/account/assets"),
+        ("GET", "/v1/openPositions"),
+        ("GET", "/v1/activeOrders"),
     }
     if (request.method, request.path) not in allowed:
         raise ValueError("unsupported request")
