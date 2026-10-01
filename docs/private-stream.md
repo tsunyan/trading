@@ -3,7 +3,10 @@
 2026-10-02。`PrivateTokenClient` と `PrivateStreamReceiver` を追加しました。
 明示的に渡された資格情報でトークンを取得し、3種類の通知を購読して、
 既存の `JournaledEventCapture` へ保存後に渡します。実口座接続は未検証です。
-診断結果は常に `complete=false`、`live_enabled=false` で、会計反映と発注には接続しません。
+診断結果は常に `complete=false`、`live_enabled=false` で、全口座会計や発注許可には変換しません。
+[同期モニターからの現金計上](execution-cash-sync.md)を追加しました。
+`resync(..., collect_orders=..., cash_book=book)` で明示指定した台帳に個別の一致約定を渡せます。
+計上経路の失敗では受信・トークンを終了します。台帳なしの照合は従来どおり診断です。
 
 ## 通信と期限
 

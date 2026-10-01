@@ -6,13 +6,15 @@ from datetime import UTC, datetime
 
 from trading.account_sync import AccountSyncMonitor, SyncError
 from trading.event_journal import EventJournal, JournalError
+from trading.execution_cash_book import ExecutionCashBook
 
 
 class JournaledEventCapture:
     """Own one process-local monitor and one explicitly started journal epoch.
 
     Private record/ack internals must not be bypassed by callers. Resync results
-    remain diagnostic and are deliberately NOT persisted as reusable account proof.
+    remain diagnostic and are never persisted as reusable account proof. Explicit
+    cash integration saves only individual fills and their comparison evidence.
     """
 
     def __init__(
@@ -160,8 +162,35 @@ class JournaledEventCapture:
             ),
         )
 
-    def resync(self, collect, *, collect_orders=None):
+    def _check_cash_book(self, book):
+        if not isinstance(book, ExecutionCashBook):
+            raise SyncError("execution_cash_book_required")
+        if book.scope != self._journal.scope:
+            raise SyncError("execution_cash_scope_mismatch")
+
+    def apply_execution_cash(self, book: ExecutionCashBook, *, expected_revision):
+        """Explicitly post a current matched batch; never use a returned aggregate."""
         with self._lock:
+            self._check_cash_book(book)
+            self._ready()
+            try:
+                # Hold the journal's write reservation as well as the local
+                # capture lock: another process cannot take over this epoch
+                # between its check and the separate cash book commit.
+                with self._journal.guard_session(self._session):
+                    return self._monitor.apply_execution_cash(
+                        self._monitor_session, book, expected_revision=expected_revision
+                    )
+            except BaseException:
+                self._poison()
+                raise
+
+    def resync(self, collect, *, collect_orders=None, cash_book=None):
+        with self._lock:
+            if cash_book is not None:
+                self._check_cash_book(cash_book)
+                if collect_orders is None:
+                    raise SyncError("execution_cash_requires_order_collection")
             self._ready()
             session = self._session
         # Never hold the capture lock across REST: arriving events must be committed
@@ -172,9 +201,21 @@ class JournaledEventCapture:
             current = self._monitor.status()
             if session != self._session or current["revision"] != result.revision:
                 raise SyncError("capture_changed_during_collection")
+            execution_cash = None
+            reconciliation = result.execution_reconciliation
+            if (
+                cash_book is not None
+                and reconciliation is not None
+                and not reconciliation.unverified_execution_ids
+                and not any(m != "balance_change_unverified" for m in result.mismatches)
+            ):
+                execution_cash = self.apply_execution_cash(
+                    cash_book, expected_revision=result.revision
+                )
             # Journal presence never proves continuity or authenticates the account.
             return result.model_copy(
                 update={
+                    "execution_cash": execution_cash,
                     "blockers": tuple(
                         dict.fromkeys(
                             (
@@ -182,6 +223,6 @@ class JournaledEventCapture:
                                 *self._blockers(view),
                             )
                         )
-                    )
+                    ),
                 }
             )

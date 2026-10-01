@@ -1,4 +1,4 @@
-"""Bounded, process-local event/REST reconciliation diagnostics, never a trade gate."""
+"""Event/REST diagnostics and explicit matched cash postings, never a trade gate."""
 
 import math
 import threading
@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, TypeAdapter
 from trading.account_events import AccountEvent, EventError, parse_event
 from trading.account_reader import ASSETS, ORDERS, POSITIONS, AccountReadReport, OrderReadReport
 from trading.broker_contracts import Contract
+from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import ExecutionReconciliation, reconcile_executions
 from trading.wire_validation import clock_skew
 
@@ -38,6 +39,7 @@ class SyncAssessment(Contract):
     report: AccountReadReport
     blockers: tuple[str, ...]
     execution_reconciliation: ExecutionReconciliation | None = None
+    execution_cash: dict | None = None
     complete: Literal[False] = False
     live_enabled: Literal[False] = False
 
@@ -66,7 +68,8 @@ class AccountSyncMonitor:
     """Single-process monitor for an explicitly supplied event source and reader.
 
     Reconnect means a NEW observation baseline, not restoration of missing history.
-    Nothing is persisted, and no API keys, network transport or order journal are used.
+    Resync is diagnostic. Only explicit apply_execution_cash writes a supplied book;
+    no API keys, network transport or order journal are used.
     The caller must feed every captured data frame with a consecutive LOCAL ordinal.
     """
 
@@ -105,6 +108,8 @@ class AccountSyncMonitor:
         self._reason = "not_connected"
         self._ticket = None
         self._baseline = None
+        self._cash_batch = None
+        self._cash_observed_at = None
         self._positions: dict[int, AccountEvent] = {}
         self._orders: dict[int, AccountEvent] = {}
         self._executions: dict[int, AccountEvent] = {}
@@ -115,6 +120,8 @@ class AccountSyncMonitor:
         self._revision += 1
         self._observed = False
         self._verified_executions.clear()
+        self._cash_batch = None
+        self._cash_observed_at = None
         self._reason = reason
         if disconnect:
             self._connected = False
@@ -138,10 +145,12 @@ class AccountSyncMonitor:
         self._last_wall, self._last_mono = wall, mono
         if self._connected and mono - self._last_seen > self._idle_limit:
             self._invalidate("stream_liveness_expired", disconnect=True)
-        if (
-            self._connected
-            and self._observed
-            and mono - self._observed_at > self._observation_limit
+        if self._connected and (
+            (self._observed and mono - self._observed_at > self._observation_limit)
+            or (
+                self._cash_batch is not None
+                and mono - self._cash_observed_at > self._observation_limit
+            )
         ):
             self._invalidate("rest_observation_expired")
         return wall, mono
@@ -260,6 +269,42 @@ class AccountSyncMonitor:
             *(("execution_accounting_not_applied",) if self._executions else ()),
         )
 
+    def apply_execution_cash(self, session, book: ExecutionCashBook, *, expected_revision):
+        """Explicitly book this accepted observation's individual fills, never totals.
+
+        The monitor lock fences local delivery through the cash transaction. A
+        crash after commit can hide the result; fresh reconciliation and retry
+        are safe because execution identity is enforced by the durable book.
+        This does not mark the whole account's accounting as applied.
+        """
+        with self._lock:
+            self._current(session)
+            if type(expected_revision) is not int or expected_revision != self._revision:
+                raise SyncError("stale_cash_sync_revision")
+            if self._ticket is not None or self._cash_batch is None:
+                raise SyncError("execution_cash_requires_current_reconciliation")
+            if not isinstance(book, ExecutionCashBook):
+                raise SyncError("execution_cash_book_required")
+            epoch, sequence = self._epoch, self._sequence
+            try:
+                result = book.apply(self._cash_batch)
+                # SQL / evidence verification can take time. Never report the
+                # old observation as current if it expired during the commit.
+                self._current(session)
+                if self._cash_batch is None or expected_revision != self._revision:
+                    raise SyncError("cash_sync_changed_during_posting")
+            except BaseException as error:
+                self._invalidate("execution_cash_posting_failed")
+                if not isinstance(error, Exception):
+                    raise
+                raise SyncError("execution_cash_posting_failed") from None
+            return {
+                **result,
+                "epoch": epoch,
+                "revision": expected_revision,
+                "received_sequence": sequence,
+            }
+
     def _compare(self, report):
         problems = []
         for name, rows, pending, identify, project in (
@@ -315,9 +360,10 @@ class AccountSyncMonitor:
                 raise SyncError("resync_already_running")
             ticket = uuid.uuid4().hex
             self._ticket = ticket
-            self._observed = False
-            self._verified_executions.clear()
-            self._reason = "collecting"
+            # Every attempt has its own revision, including consecutive REST
+            # collections with no intervening event. Old callers cannot post a
+            # later attempt's evidence by reusing the previous revision.
+            self._invalidate("collecting")
             revision = self._revision
             events = tuple(self._executions.values())
             order_ids = tuple(sorted({e.execution_order_id for e in events}))
@@ -414,6 +460,20 @@ class AccountSyncMonitor:
                     report=report,
                     blockers=tuple(dict.fromkeys((*self._blockers(), *report.blockers))),
                 )
+                if (
+                    reconciliation is not None
+                    and not reconciliation.unverified_execution_ids
+                    and not any(m != "balance_change_unverified" for m in mismatches)
+                ):
+                    # Balance movement is exactly what cash postings explain.
+                    # Keep it as an account-level blocker; it must not prevent
+                    # an individually matched cash batch from being recorded.
+                    self._cash_batch = ExecutionCashBatch(
+                        events=events,
+                        reports=reconciliation.reports,
+                        clock_skew_ms=self._clock_skew_ms,
+                    )
+                    self._cash_observed_at = mono
                 if not mismatches:
                     self._baseline = report
                     self._positions.clear()

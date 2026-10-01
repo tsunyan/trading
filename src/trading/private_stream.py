@@ -173,7 +173,7 @@ class PrivateStreamReceiver:
                     raise
                 raise StreamError(self._reason) from None
 
-    def resync(self, collect, *, collect_orders=None):
+    def resync(self, collect, *, collect_orders=None, cash_book=None):
         with self._lock:
             if not self._running or self._closed:
                 raise StreamError("private_stream_not_running")
@@ -184,7 +184,16 @@ class PrivateStreamReceiver:
                 self._shutdown()
                 raise StreamError(self._reason) from None
         # Capture / monitor perform the final generation and revision fences.
-        result = self._capture.resync(collect, collect_orders=collect_orders)
+        try:
+            result = self._capture.resync(
+                collect, collect_orders=collect_orders, cash_book=cash_book
+            )
+        except BaseException:
+            if cash_book is not None:
+                with self._lock:
+                    self._reason = "private_stream_cash_sync_failed"
+                    self._shutdown()
+            raise
         with self._lock:
             if not self._running or self._closed:
                 raise StreamError("private_stream_not_running")

@@ -354,6 +354,20 @@ class EventJournal:
             "unacknowledged_records": tuple(state["unacknowledged"]),
         }
 
+    @contextmanager
+    def guard_session(self, session):
+        """Fence epoch takeover / delivery during a separate cash transaction.
+
+        No journal entry is added. The two databases do not commit atomically;
+        a committed cash posting must remain safe to retry after interruption.
+        """
+        with self._transaction(write=True) as conn:
+            _, _, state = self._verify(conn)
+            self._current(state, session)
+            if state["pending"] is not None or state["unacknowledged"]:
+                raise JournalError("capture_delivery_unresolved")
+            yield
+
     def record(self, session, kind, *, at, monotonic_ns, sequence=None, payload=None):
         if not isinstance(kind, str) or kind not in {"EVENT", "HEARTBEAT", "END"}:
             raise JournalError("invalid_capture_kind")

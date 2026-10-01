@@ -43,6 +43,8 @@ result = book.apply(ExecutionCashBatch(events=notices, reports=reports))
 RESTの要求パス・注文ID・4回の観測順・時刻・応答ハッシュ形式を検査します。
 過去の個別約定は後から照合できるため、この会計APIは現在時刻に対する観測鮮度を要求しません。
 過去のREST証拠を現在の口座状態や発注許可へ昇格させるものではありません。
+[同期モニターからの現金計上](execution-cash-sync.md)も追加しました。
+捕捉アダプターへ台帳を明示すると、現在の世代・revision・鮮度を検査して個別証拠を渡します。
 
 `ExecutionCashBatch(..., clock_skew_ms=100)` のように、業者応答時刻の許容差を明示できます。
 整数0〜1,000ms、既定0msです。Readerと同じ実測に基づく値を指定し、保存した証拠と
