@@ -124,7 +124,8 @@ uv run python -m trading.account_sync_lab replay --input runs/account-sync-demo/
   既知注文の約定REST照合と一致通知の金額内訳の診断集計は2026-10-01に追加済み。
   [個別約定の永続現金会計](execution-cash-book.md)は2026-10-02に別DBとして追加済み。
   [同期モニターからの明示指定による現金計上](execution-cash-sync.md)も追加済みです。
-  建玉会計・入出金・全履歴の照合は残っています。
+  [開始建玉を宣言した建玉会計](execution-positions.md)も追加済みです。
+  初期建玉の確認・入出金・全履歴の照合は残っています。
 - 口座本人性・権限・費用・丸めの実口座検証、発注ゲートとの接続条件の確立。
 
 検証: `uv run pytest tests/test_account_events.py tests/test_account_sync.py tests/test_account_sync_lab.py -q`

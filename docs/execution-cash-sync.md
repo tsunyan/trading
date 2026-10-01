@@ -76,7 +76,9 @@ REST取得中は受信処理を止めません。計上中だけローカル捕�
 捕捉の `epoch`・`revision`・受信番号を返します。後続通知で古くなる診断値です。
 `execution_cash.accounting_applied=true` は指定した個別約定の現金仕訳だけを表します。
 `ExecutionReconciliation.accounting_applied=false` と全口座の `execution_accounting_not_applied` は維持します。
-建玉会計・入出金・全履歴・口座本人性の確認は残り、`complete=false`、`live_enabled=false` です。
+全口座の建玉・入出金・全履歴・口座本人性の確認は残り、`complete=false`、`live_enabled=false` です。
+[開始建玉を宣言した建玉会計](execution-positions.md)も追加済みです。この台帳を明示すると
+計上時に数量・取得価格・決済損益も検証します。初期履歴・外部操作・全口座の確認は残ります。
 
 ## 合成デモと検証
 

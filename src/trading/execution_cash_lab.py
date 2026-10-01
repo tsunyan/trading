@@ -12,6 +12,7 @@ from trading.account_reader import AccountReader
 from trading.account_sync_lab import demo_execution_transcript
 from trading.broker_contracts import OrderIntent
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook, OpeningCash
+from trading.execution_positions import PositionBasis
 
 
 def synthetic_batch(now: datetime, *, closing=False):
@@ -72,14 +73,25 @@ def synthetic_batch(now: datetime, *, closing=False):
     )
 
 
-def demo(directory: Path, scope="synthetic-cash"):
+def demo(directory: Path, scope="synthetic-cash", *, position_accounting=False):
     now = datetime(2026, 10, 2, tzinfo=UTC)
     book = ExecutionCashBook.create(
-        directory, scope, OpeningCash(balance="1000000", cutoff=now - timedelta(seconds=1))
+        directory,
+        scope,
+        OpeningCash(
+            balance="1000000",
+            cutoff=now - timedelta(seconds=1),
+            position_basis=PositionBasis(positions=()) if position_accounting else None,
+        ),
     )
     opening = book.snapshot()
     first = synthetic_batch(now)
     posted = book.apply(first)
+    position_before_close = (
+        book.compare_positions(replay_account(demo_execution_transcript(now).steps[2].transcript))
+        if position_accounting
+        else None
+    )
     duplicate = book.apply(first)
     reopened = ExecutionCashBook(directory, scope)
     restarted_duplicate = reopened.apply(first)
@@ -94,6 +106,7 @@ def demo(directory: Path, scope="synthetic-cash"):
             exchange["response"]["data"][0]["balance"] = state["balance"]
     account = replay_account(Transcript.model_validate(data))
     matched = reopened.compare_balance(account)
+    position_after_close = reopened.compare_positions(account) if position_accounting else None
     for exchange in data["exchanges"]:
         if exchange["path"] == "/v1/account/assets":
             exchange["response"]["data"][0]["balance"] = "1000139"
@@ -111,6 +124,11 @@ def demo(directory: Path, scope="synthetic-cash"):
         "balance_match": matched,
         "unexplained_cash": mismatch,
     }
+    if position_accounting:
+        result.update(
+            position_before_close=position_before_close,
+            position_after_close_with_unchanged_rest=position_after_close,
+        )
     with (directory / "report.json").open("x", encoding="utf-8") as output:
         json.dump(result, output, ensure_ascii=False, indent=2)
     return result
@@ -121,9 +139,12 @@ def main(argv=None):
     parser.add_argument("command", choices=("demo", "status"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--scope", default="synthetic-cash")
+    parser.add_argument(
+        "--positions", action="store_true", help="Declare an initially flat position basis for demo"
+    )
     args = parser.parse_args(argv)
     result = (
-        demo(args.directory, args.scope)
+        demo(args.directory, args.scope, position_accounting=args.positions)
         if args.command == "demo"
         else (ExecutionCashBook(args.directory, args.scope).snapshot())
     )

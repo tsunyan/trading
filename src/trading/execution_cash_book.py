@@ -1,7 +1,8 @@
 """Local, balanced cash postings for individually matched WS/REST executions.
 
 One database is one explicitly declared scope and opening cash boundary. This
-is not a broker account snapshot, position ledger, or proof of complete history.
+is not a broker account snapshot or proof of complete history. Version 2 also
+checks position inventory and realized P&L from an explicit starting basis.
 """
 
 import hashlib
@@ -12,6 +13,7 @@ import uuid
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +22,12 @@ from pydantic import AwareDatetime, Field
 from trading.account_events import AccountEvent
 from trading.account_reader import AccountReadReport, OrderReadReport
 from trading.broker_contracts import Contract, Execution, OrderIntent, Units
+from trading.execution_positions import (
+    PositionAccountingError,
+    PositionBasis,
+    position_result,
+    rebuild_positions,
+)
 from trading.execution_reconciliation import reconcile_executions
 from trading.storage_init import new_storage_directory
 from trading.wire_validation import clock_skew, unique_object
@@ -29,6 +37,7 @@ MAX_MONEY = Decimal("1000000000000000000")
 MAX_ENTRIES = 5000
 MAX_PROOF = 2_000_000
 MAX_BYTES = 32_000_000
+MAX_OPENING = 1_000_000
 BLOCKERS = (
     "cash_book_scope_not_authenticated",
     "opening_cash_boundary_not_verified",
@@ -65,6 +74,7 @@ class OpeningCash(Contract):
     balance: Decimal
     cutoff: AwareDatetime
     currency: Literal["JPY"] = "JPY"
+    position_basis: PositionBasis | None = None
 
 
 class ExecutionCashBatch(Contract):
@@ -106,6 +116,12 @@ def _money(integer):
 
 
 def _normalize(value):
+    if isinstance(value, OpeningCash):
+        data = value.model_dump(warnings=False)
+        if value.position_basis is None:
+            # Preserve v1's exact canonical body / seed, without migration.
+            data.pop("position_basis")
+        return _normalize(data)
     if isinstance(value, Contract):
         return _normalize(value.model_dump(warnings=False))
     if isinstance(value, Decimal):
@@ -129,6 +145,15 @@ def _load(body):
 
 def _hash(body):
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _blockers(version):
+    if version == 1:
+        return BLOCKERS
+    return tuple(b for b in BLOCKERS if b != "position_accounting_not_applied") + (
+        "opening_position_boundary_not_verified",
+        "position_cost_rounding_not_verified",
+    )
 
 
 def _legs(fill):
@@ -250,7 +275,12 @@ class ExecutionCashBook:
         try:
             opening = OpeningCash.model_validate(opening.model_dump())
             opening_body = _json(opening)
+            if len(opening_body.encode()) > MAX_OPENING:
+                raise ValueError
             cash = _minor(opening.balance)
+            version = 1 if opening.position_basis is None else 2
+            if version == 2:
+                rebuild_positions(opening.position_basis, ())
         except Exception:
             raise CashBookError("invalid_cash_book_opening") from None
         directory = Path(directory).resolve()
@@ -259,13 +289,13 @@ class ExecutionCashBook:
         ):
             try:
                 instance = uuid.uuid4().hex
-                head = cls._seed(instance, scope, opening_body, max_entries)
+                head = cls._seed(instance, scope, opening_body, max_entries, version)
                 with closing(sqlite3.connect(directory / "execution-cash.sqlite")) as conn:
                     conn.execute("PRAGMA synchronous=FULL")
                     conn.executescript(SCHEMA)
                     conn.execute(
-                        "INSERT INTO book VALUES(1,1,?,?,?,?,0,0,0,?,0,NULL)",
-                        (instance, scope, opening_body, max_entries, head),
+                        "INSERT INTO book VALUES(1,?,?,?,?,?,0,0,0,?,0,NULL)",
+                        (version, instance, scope, opening_body, max_entries, head),
                     )
                     conn.executemany(
                         "INSERT INTO postings VALUES(0,?,?)",
@@ -277,7 +307,7 @@ class ExecutionCashBook:
             return cls(directory, scope)
 
     @staticmethod
-    def _seed(instance, scope, opening, capacity):
+    def _seed(instance, scope, opening, capacity, version=1):
         return _hash(
             _json(
                 {
@@ -285,7 +315,7 @@ class ExecutionCashBook:
                     "scope": scope,
                     "opening": opening,
                     "capacity": capacity,
-                    "version": 1,
+                    "version": version,
                 }
             )
         )
@@ -331,13 +361,18 @@ class ExecutionCashBook:
 
     def _verify(self, conn):
         try:
+            if any(
+                r[0] is None or r[0] > MAX_OPENING
+                for r in conn.execute("SELECT length(CAST(opening AS BLOB)) FROM book LIMIT 2")
+            ):
+                raise ValueError
             metas = conn.execute("SELECT * FROM book LIMIT 2").fetchall()
             if len(metas) != 1:
                 raise ValueError
             meta = dict(metas[0])
             if (
                 meta["id"] != 1
-                or meta["version"] != 1
+                or meta["version"] not in (1, 2)
                 or meta["scope"] != self.scope
                 or not re.fullmatch(r"[a-f0-9]{32}", meta["instance"])
                 or (self._instance is not None and meta["instance"] != self._instance)
@@ -351,6 +386,8 @@ class ExecutionCashBook:
                 raise ValueError
             opening = OpeningCash.model_validate(_load(meta["opening"]))
             if meta["opening"] != _json(opening):
+                raise ValueError
+            if (opening.position_basis is None) != (meta["version"] == 1):
                 raise ValueError
             expected_legs = {
                 (0, "cash"): str(_minor(opening.balance)),
@@ -391,7 +428,7 @@ class ExecutionCashBook:
             if len(rows) != meta["count"]:
                 raise ValueError
             previous = self._seed(
-                meta["instance"], self.scope, meta["opening"], meta["max_entries"]
+                meta["instance"], self.scope, meta["opening"], meta["max_entries"], meta["version"]
             )
             records, used_proofs = {}, set()
             totals = {
@@ -460,6 +497,11 @@ class ExecutionCashBook:
                 raise ValueError
             for value in totals.values():
                 _money(value)
+            totals["position_state"] = (
+                rebuild_positions(opening.position_basis, tuple(records.values()))
+                if opening.position_basis is not None
+                else None
+            )
             return meta, records, totals
         except Exception:
             self._failed = True
@@ -524,6 +566,14 @@ class ExecutionCashBook:
                 size += sum(len(_json(record).encode()) for record in new.values())
                 if size > MAX_BYTES:
                     raise CashBookError("cash_book_capacity_reached")
+                position_state = totals["position_state"]
+                if opening.position_basis is not None:
+                    try:
+                        position_state = rebuild_positions(
+                            opening.position_basis, tuple({**existing, **new}.values())
+                        )
+                    except PositionAccountingError as error:
+                        raise CashBookError(str(error)) from None
                 cash_delta = sum(_legs(r.execution)["cash"] for r in new.values())
                 _money(totals["cash"] + cash_delta)
                 for key, field in (
@@ -569,7 +619,8 @@ class ExecutionCashBook:
                     "accounting_applied": True,
                     "complete": False,
                     "live_enabled": False,
-                    "blockers": BLOCKERS,
+                    "blockers": _blockers(meta["version"]),
+                    **position_result(position_state),
                 }
         if conflict:
             raise CashBookError("cash_book_identity_conflict")
@@ -594,11 +645,12 @@ class ExecutionCashBook:
             "settled_swap": _money(totals["settled_swap"]),
             "complete": False,
             "live_enabled": False,
-            "blockers": BLOCKERS,
+            "blockers": _blockers(meta["version"]),
+            **position_result(totals["position_state"]),
         }
 
-    def compare_balance(self, source: AccountReadReport, *, clock_skew_ms=0):
-        """Non-persistent comparison only; never adjust cash to match an account."""
+    @staticmethod
+    def _account_report(source: AccountReadReport, clock_skew_ms):
         try:
             skew = clock_skew(clock_skew_ms)
             report = AccountReadReport.model_validate(source.model_dump())
@@ -622,14 +674,23 @@ class ExecutionCashBook:
                 previous = observation.received_at
         except Exception:
             raise CashBookError("cash_book_balance_report_invalid") from None
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
-        opening = OpeningCash.model_validate(_load(meta["opening"]))
+        return report, observed
+
+    @staticmethod
+    def _check_report_boundary(report, records, opening):
         last_execution = max(
             (r.execution.timestamp for r in records.values()), default=opening.cutoff
         )
         if any(o.response_at < last_execution for o in report.observations):
             raise CashBookError("cash_book_balance_report_before_postings")
+
+    def compare_balance(self, source: AccountReadReport, *, clock_skew_ms=0):
+        """Non-persistent comparison only; never adjust cash to match an account."""
+        report, observed = self._account_report(source, clock_skew_ms)
+        with self._transaction() as conn:
+            meta, records, totals = self._verify(conn)
+        opening = OpeningCash.model_validate(_load(meta["opening"]))
+        self._check_report_boundary(report, records, opening)
         difference = observed - totals["cash"]
         return {
             "scope": self.scope,
@@ -644,10 +705,87 @@ class ExecutionCashBook:
             "blockers": tuple(
                 dict.fromkeys(
                     (
-                        *BLOCKERS,
+                        *_blockers(meta["version"]),
                         *report.blockers,
                         *(("cash_book_halted",) if meta["halted"] else ()),
                         *(("cash_balance_difference_unexplained",) if difference else ()),
+                    )
+                )
+            ),
+        }
+
+    def compare_positions(
+        self, source: AccountReadReport, *, price_tolerance_jpy=Decimal(0), clock_skew_ms=0
+    ):
+        """Compare reconstructed inventory; never import or repair broker totals."""
+        try:
+            report, _ = self._account_report(source, clock_skew_ms)
+            _minor(price_tolerance_jpy)
+            if not 0 <= price_tolerance_jpy <= Decimal("0.01"):
+                raise ValueError
+            if (
+                len(report.positions) > 1000
+                or len({p.position_id for p in report.positions}) != len(report.positions)
+                or {o.path for o in report.observations}
+                != {"/v1/account/assets", "/v1/openPositions", "/v1/activeOrders"}
+                or sum(o.path == "/v1/openPositions" for o in report.observations) < 2
+                or sum(o.path == "/v1/activeOrders" for o in report.observations) < 2
+                or any(
+                    b.response_at < a.response_at
+                    for a, b in zip(report.observations, report.observations[1:], strict=False)
+                )
+            ):
+                raise ValueError
+            for position in report.positions:
+                _minor(position.price)
+                if (
+                    position.timestamp > report.observations[-1].response_at
+                    or position.ordered_units > position.units
+                ):
+                    raise ValueError
+        except Exception:
+            raise CashBookError("cash_book_position_report_invalid") from None
+        with self._transaction() as conn:
+            meta, records, totals = self._verify(conn)
+        opening = OpeningCash.model_validate(_load(meta["opening"]))
+        self._check_report_boundary(report, records, opening)
+        state = totals["position_state"]
+        if state is None:
+            raise CashBookError("cash_book_position_basis_required")
+        observed = {p.position_id: p for p in report.positions}
+        problems = []
+        tolerance = Fraction(price_tolerance_jpy)
+        for pid in sorted(state.positions.keys() | observed.keys()):
+            expected, actual = state.positions.get(pid), observed.get(pid)
+            if expected is None:
+                problems.append(f"position_unexpected:{pid}")
+            elif actual is None:
+                problems.append(f"position_missing:{pid}")
+            else:
+                if expected.side != actual.side:
+                    problems.append(f"position_side_mismatch:{pid}")
+                if expected.units != actual.units:
+                    problems.append(f"position_units_mismatch:{pid}")
+                if abs(expected.average_price - Fraction(actual.price)) > tolerance:
+                    problems.append(f"position_price_mismatch:{pid}")
+        return {
+            "scope": self.scope,
+            "head": meta["head"],
+            "position_match": not problems,
+            "mismatches": tuple(problems),
+            "price_tolerance_jpy": _money(_minor(price_tolerance_jpy)),
+            **position_result(state),
+            "halted": bool(meta["halted"]),
+            "complete": False,
+            "live_enabled": False,
+            "blockers": tuple(
+                dict.fromkeys(
+                    (
+                        *_blockers(meta["version"]),
+                        *report.blockers,
+                        "position_reservations_not_reconciled",
+                        *(("cash_book_halted",) if meta["halted"] else ()),
+                        *(("position_inventory_difference_unexplained",) if problems else ()),
                     )
                 )
             ),
