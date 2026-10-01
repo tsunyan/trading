@@ -16,6 +16,7 @@ class JournaledEventCapture:
     remain diagnostic and are never persisted as reusable account proof. Explicit
     cash integration saves only individual fills and their comparison evidence.
     Reservation integration returns non-persistent diagnostics for this revision.
+    Valuation integration requires freshly collected quotes and a declared model.
     """
 
     def __init__(
@@ -199,6 +200,19 @@ class JournaledEventCapture:
                 self._poison()
                 raise
 
+    def compare_account_valuation(self, book: ExecutionCashBook, *, expected_revision):
+        with self._lock:
+            self._check_cash_book(book)
+            self._ready()
+            try:
+                with self._journal.guard_session(self._session):
+                    return self._monitor.compare_account_valuation(
+                        self._monitor_session, book, expected_revision=expected_revision
+                    )
+            except BaseException:
+                self._poison()
+                raise
+
     def resync(
         self,
         collect,
@@ -207,6 +221,9 @@ class JournaledEventCapture:
         cash_book=None,
         collect_reservations=None,
         reservation_book=None,
+        collect_quote=None,
+        valuation_policy=None,
+        valuation_book=None,
     ):
         with self._lock:
             if cash_book is not None:
@@ -219,6 +236,17 @@ class JournaledEventCapture:
                     raise SyncError("reservations_require_order_collection")
                 if cash_book is not None and cash_book.path != reservation_book.path:
                     raise SyncError("reservation_cash_book_mismatch")
+            if (collect_quote is None) != (valuation_policy is None):
+                raise SyncError("valuation_requires_quote_and_policy")
+            if valuation_book is not None:
+                self._check_cash_book(valuation_book)
+                if collect_quote is None:
+                    raise SyncError("valuation_requires_quote_and_policy")
+                if any(
+                    other is not None and other.path != valuation_book.path
+                    for other in (cash_book, reservation_book)
+                ):
+                    raise SyncError("valuation_cash_book_mismatch")
             self._ready()
             session = self._session
         # Never hold the capture lock across REST: arriving events must be committed
@@ -228,6 +256,8 @@ class JournaledEventCapture:
             collect,
             collect_orders=collect_orders,
             collect_reservations=collect_reservations,
+            collect_quote=collect_quote,
+            valuation_policy=valuation_policy,
         )
         with self._lock:
             view = self._ready()
@@ -253,17 +283,30 @@ class JournaledEventCapture:
                 if execution_cash is not None and reservations["head"] != execution_cash["head"]:
                     self._poison()
                     raise SyncError("cash_book_changed_during_reservation_comparison")
+            valuation = None
+            if valuation_book is not None:
+                valuation = self.compare_account_valuation(
+                    valuation_book, expected_revision=result.revision
+                )
+                if any(
+                    prior is not None and prior["head"] != valuation["head"]
+                    for prior in (execution_cash, reservations)
+                ):
+                    self._poison()
+                    raise SyncError("cash_book_changed_during_valuation_comparison")
             # Journal presence never proves continuity or authenticates the account.
             return result.model_copy(
                 update={
                     "execution_cash": execution_cash,
                     "position_reservations": reservations,
+                    "account_valuation": valuation,
                     "blockers": tuple(
                         dict.fromkeys(
                             (
                                 *result.blockers,
                                 *self._blockers(view),
                                 *(reservations["blockers"] if reservations else ()),
+                                *(valuation["blockers"] if valuation else ()),
                             )
                         )
                     ),

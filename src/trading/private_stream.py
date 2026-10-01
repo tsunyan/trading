@@ -181,6 +181,9 @@ class PrivateStreamReceiver:
         cash_book=None,
         collect_reservations=None,
         reservation_book=None,
+        collect_quote=None,
+        valuation_policy=None,
+        valuation_book=None,
     ):
         with self._lock:
             if not self._running or self._closed:
@@ -199,14 +202,19 @@ class PrivateStreamReceiver:
                 cash_book=cash_book,
                 collect_reservations=collect_reservations,
                 reservation_book=reservation_book,
+                collect_quote=collect_quote,
+                valuation_policy=valuation_policy,
+                valuation_book=valuation_book,
             )
         except BaseException:
-            if cash_book is not None or reservation_book is not None:
+            if cash_book is not None or reservation_book is not None or valuation_book is not None:
                 with self._lock:
                     self._reason = (
                         "private_stream_cash_sync_failed"
                         if cash_book is not None
-                        else ("private_stream_reservation_sync_failed")
+                        else "private_stream_reservation_sync_failed"
+                        if reservation_book is not None
+                        else "private_stream_valuation_sync_failed"
                     )
                     self._shutdown()
             raise

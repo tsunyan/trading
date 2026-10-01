@@ -48,6 +48,7 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 [同期経路からの拘束照合](docs/position-reservation-sync.md)では、現在の世代・revision・鮮度を確認して同じ比較を実行します。
 [台帳の評価損益・保有証拠金の診断](docs/account-valuation.md)では、明示した率・丸め条件で建玉を評価し、REST値との差を表示します。
 業者の計算式・有効注文の証拠金は未確認で、発注許可への変換はありません。
+[同期経路からの評価診断](docs/account-valuation-sync.md)では、取得回ごとの口座・気配・計算条件を使い、世代・revision・期限・台帳ハッシュを検査します。
 [明細証拠による入出金会計](docs/cash-transfers.md)では、宣言した2資料の一致記録から入出金・手数料を一度だけ計上します。
 実資料の認証・取得と全履歴の照合は残っています。
 [通知の永続記録・履歴再生](docs/event-journal.md)では、保存後に処理を渡し、

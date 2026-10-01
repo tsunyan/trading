@@ -1,4 +1,4 @@
-"""Current event/REST, cash and reservation diagnostics; never a trade gate."""
+"""Current event/REST, cash, reservation and valuation diagnostics; never a trade gate."""
 
 import math
 import threading
@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, TypeAdapter
 
 from trading.account_events import AccountEvent, EventError, parse_event
 from trading.account_reader import ASSETS, ORDERS, POSITIONS, AccountReadReport, OrderReadReport
+from trading.account_valuation import ValuationPolicy, ValuationQuote
 from trading.broker_contracts import Contract
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import ExecutionReconciliation, reconcile_executions
@@ -41,6 +42,7 @@ class SyncAssessment(Contract):
     execution_reconciliation: ExecutionReconciliation | None = None
     execution_cash: dict | None = None
     position_reservations: dict | None = None
+    account_valuation: dict | None = None
     complete: Literal[False] = False
     live_enabled: Literal[False] = False
 
@@ -72,6 +74,7 @@ class AccountSyncMonitor:
     Resync is diagnostic. Only explicit apply_execution_cash writes a supplied book;
     no API keys, network transport or order journal are used.
     Reservation comparisons use current internally retained evidence, not replay.
+    Valuation also requires a quote and declared policy from the same attempt.
     The caller must feed every captured data frame with a consecutive LOCAL ordinal.
     """
 
@@ -114,6 +117,8 @@ class AccountSyncMonitor:
         self._cash_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
+        self._valuation_input = None
+        self._valuation_observed_at = None
         self._positions: dict[int, AccountEvent] = {}
         self._orders: dict[int, AccountEvent] = {}
         self._executions: dict[int, AccountEvent] = {}
@@ -128,6 +133,8 @@ class AccountSyncMonitor:
         self._cash_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
+        self._valuation_input = None
+        self._valuation_observed_at = None
         self._reason = reason
         if disconnect:
             self._connected = False
@@ -160,6 +167,10 @@ class AccountSyncMonitor:
             or (
                 self._reservation_input is not None
                 and mono - self._reservation_observed_at > self._observation_limit
+            )
+            or (
+                self._valuation_input is not None
+                and mono - self._valuation_observed_at > self._observation_limit
             )
         ):
             self._invalidate("rest_observation_expired")
@@ -381,6 +392,45 @@ class AccountSyncMonitor:
                 "received_sequence": sequence,
             }
 
+    def compare_account_valuation(self, session, book: ExecutionCashBook, *, expected_revision):
+        """Use this attempt's retained report, quote and declared policy only."""
+        with self._lock:
+            now, _ = self._current(session)
+            if type(expected_revision) is not int or expected_revision != self._revision:
+                raise SyncError("stale_valuation_sync_revision")
+            if self._ticket is not None or self._valuation_input is None:
+                raise SyncError("valuation_requires_current_collection")
+            if not isinstance(book, ExecutionCashBook):
+                raise SyncError("execution_cash_book_required")
+            inputs = self._valuation_input
+            epoch, sequence = self._epoch, self._sequence
+            try:
+                result = book.compare_valuation(
+                    *inputs, evaluated_at=now, clock_skew_ms=self._clock_skew_ms
+                )
+                finished, _ = self._current(session)
+                if self._valuation_input is not inputs or expected_revision != self._revision:
+                    raise SyncError("valuation_sync_changed_during_comparison")
+                report, quote, policy = inputs
+                if (
+                    finished - quote.observed_at
+                ).total_seconds() > policy.max_quote_age_seconds or any(
+                    (finished - o.response_at).total_seconds() > policy.max_report_age_seconds
+                    for o in report.observations
+                ):
+                    raise SyncError("valuation_expired_during_comparison")
+            except BaseException as error:
+                self._invalidate("account_valuation_comparison_failed")
+                if not isinstance(error, Exception):
+                    raise
+                raise SyncError("account_valuation_comparison_failed") from None
+            return {
+                **result,
+                "epoch": epoch,
+                "revision": expected_revision,
+                "received_sequence": sequence,
+            }
+
     def resync(
         self,
         session,
@@ -388,6 +438,8 @@ class AccountSyncMonitor:
         *,
         collect_orders: Callable[[tuple[int, ...]], tuple[OrderReadReport, ...]] | None = None,
         collect_reservations: Callable[[], tuple[OrderReadReport, ...]] | None = None,
+        collect_quote: Callable[[], ValuationQuote] | None = None,
+        valuation_policy: ValuationPolicy | None = None,
     ) -> SyncAssessment:
         """Collect once outside the lock, then fence concurrent changes at acceptance.
 
@@ -395,6 +447,15 @@ class AccountSyncMonitor:
         retry, network creation, ledger mutation, stop reset, or trade permission.
         """
         with self._lock:
+            if (collect_quote is None) != (valuation_policy is None):
+                raise SyncError("valuation_requires_quote_and_policy")
+            if valuation_policy is not None:
+                try:
+                    valuation_policy = ValuationPolicy.model_validate(
+                        valuation_policy.model_dump(warnings=False)
+                    )
+                except Exception:
+                    raise SyncError("invalid_valuation_sync_policy") from None
             started, start_mono = self._current(session)
             if self._ticket is not None:
                 raise SyncError("resync_already_running")
@@ -447,6 +508,16 @@ class AccountSyncMonitor:
                         if ticket != self._ticket or self._revision != revision:
                             raise SyncError("stream_changed_during_collection")
                     reconciliation = reconcile_executions(events, collect_orders(order_ids))
+                quote = None
+                if collect_quote is not None:
+                    with self._lock:
+                        self._current(session)
+                        if ticket != self._ticket or self._revision != revision:
+                            raise SyncError("stream_changed_during_collection")
+                    collected_quote = collect_quote()
+                    quote = ValuationQuote.model_validate(
+                        collected_quote.model_dump(warnings=False)
+                    )
             except Exception:
                 raise SyncError("sync_collection_failed") from None
             with self._lock:
@@ -459,6 +530,8 @@ class AccountSyncMonitor:
                 ):
                     raise SyncError("sync_collection_expired")
                 observations = report.observations
+                if quote is not None and not started <= quote.observed_at <= now:
+                    raise SyncError("stale_or_invalid_valuation_quote")
                 if (
                     not observations
                     or {o.path for o in observations} != {ASSETS, POSITIONS, ORDERS}
@@ -539,6 +612,9 @@ class AccountSyncMonitor:
                 if reservation_reports is not None:
                     self._reservation_input = (report, reservation_reports)
                     self._reservation_observed_at = mono
+                if quote is not None:
+                    self._valuation_input = (report, quote, valuation_policy)
+                    self._valuation_observed_at = mono
                 if (
                     reconciliation is not None
                     and not reconciliation.unverified_execution_ids
