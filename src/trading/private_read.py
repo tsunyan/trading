@@ -31,7 +31,8 @@ class AccountReadLimiter:
 
     Serializes complete requests and spaces starts by >=250ms (<=4/s), below the
     documented 6 GET/s. Cannot coordinate other processes or manual/API activity.
-    Authentication failures and HTTP 429 latch a stop; there is no auto-reset.
+    HTTP 401/403/429 and explicit API failures (integer status != 0) latch a stop,
+    including API errors returned with HTTP 200; there is no auto-reset.
     """
 
     def __init__(
