@@ -121,11 +121,12 @@ class EventJournal:
         if self._failed:
             raise JournalError("journal_failed_closed")
         try:
+            # Reads open read-write too, but never write. Only a writable
+            # connection can roll back a hot journal left by a crash during a
+            # commit; a read-only one cannot, and the journal would never reopen.
             with closing(
                 sqlite3.connect(
-                    self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
-                    uri=True,
-                    timeout=BUSY_TIMEOUT_SECONDS,
+                    self.path.as_uri() + "?mode=rw", uri=True, timeout=BUSY_TIMEOUT_SECONDS
                 )
             ) as conn:
                 conn.row_factory = sqlite3.Row

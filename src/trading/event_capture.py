@@ -5,7 +5,7 @@ import time
 from datetime import UTC, datetime
 
 from trading.account_sync import AccountSyncMonitor, SyncError
-from trading.event_journal import EventJournal, JournalError
+from trading.event_journal import EventJournal, JournalError, _JournalBusy
 from trading.execution_cash_book import ExecutionCashBook
 
 
@@ -63,6 +63,8 @@ class JournaledEventCapture:
         self._check_ready()
         try:
             return self._journal.current(self._session)
+        except _JournalBusy:
+            raise  # Lock contention after retries; nothing was observed to be wrong.
         except JournalError:
             self._poison()
             raise
@@ -133,12 +135,14 @@ class JournaledEventCapture:
 
     def status(self):
         with self._lock:
-            view = None
+            view, busy = None, False
             try:
                 if self._session is None or self._ended or self._failed:
                     view = self._journal.inspect()
                 else:
                     view = self._ready()
+            except _JournalBusy:
+                busy = True  # A diagnostic read must not stop a healthy capture.
             except JournalError:
                 self._poison()
             result = self._monitor.status()
@@ -149,7 +153,15 @@ class JournaledEventCapture:
             result["journal_unacknowledged_records"] = (
                 view["unacknowledged_records"] if view else None
             )
-            result["blockers"] = list(dict.fromkeys((*result["blockers"], *self._blockers(view))))
+            result["blockers"] = list(
+                dict.fromkeys(
+                    (
+                        *result["blockers"],
+                        *self._blockers(view),
+                        *(("journal_busy_state_unknown",) if busy else ()),
+                    )
+                )
+            )
             return result
 
     @staticmethod

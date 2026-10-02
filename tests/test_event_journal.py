@@ -355,6 +355,32 @@ def test_read_only_verification_never_blocks_a_writer_commit(journal, monkeypatc
     assert reader.inspect()["unacknowledged_records"] == (2,)
 
 
+def test_hot_journal_from_crash_during_commit_is_rolled_back_on_reopen(journal):
+    session = start(journal)
+    event(journal, session)
+    before = journal.inspect()
+    # A one-page cache spills uncommitted pages into the database file, so the
+    # remaining rollback journal is hot: only a writable connection can undo it.
+    script = """
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('PRAGMA cache_size=1')
+conn.execute('BEGIN IMMEDIATE')
+conn.execute('UPDATE journal SET bytes=bytes+1')
+for i in range(3000):
+    conn.execute('INSERT INTO records VALUES(?,?,?)', (100 + i, 'x' * 500, 'y'))
+os._exit(17)
+"""
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(journal.path)], capture_output=True, timeout=15
+    )
+    assert done.returncode == 17, done.stderr.decode()
+    assert journal.path.with_name("event-journal.sqlite-journal").exists()
+    reopened = EventJournal(journal.path.parent, "synthetic")
+    assert reopened.inspect() == before
+    assert not journal.path.with_name("event-journal.sqlite-journal").exists()
+
+
 def test_busy_write_is_retried_once_without_duplicate(journal, monkeypatch):
     monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
     session = start(journal)
