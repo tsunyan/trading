@@ -1,6 +1,7 @@
 """OS-lock tests use temporary local files and subprocesses, never broker HTTP."""
 
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -331,6 +333,33 @@ def test_owner_is_held_before_claim_through_wait_and_finish(tmp_path):
     assert phases == ["before-claim", "wait", "request", "after-finish"]
     with peer._owner_lock():
         pass
+
+
+@pytest.mark.parametrize("unlock_fails", [False, True])
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_windows_owner_lock_unlocks_first_byte_before_close(
+    tmp_path, monkeypatch, body_fails, unlock_fails
+):
+    control = PersistentReadLimiter.create(tmp_path / "control", "synthetic")
+    calls = []
+
+    def locking(descriptor, mode, size):
+        calls.append((mode, os.lseek(descriptor, 0, os.SEEK_CUR), size))
+        if unlock_fails and mode == windows.LK_UNLCK:
+            raise OSError("unlock failed")
+
+    # A stand-in for msvcrt, so the Windows branch also runs on POSIX CI.
+    windows = SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+    monkeypatch.setitem(sys.modules, "msvcrt", windows)
+    monkeypatch.setattr("trading.read_control.os.name", "nt")
+    if body_fails:
+        with pytest.raises(RuntimeError, match="protected"), control._owner_lock():
+            raise RuntimeError("protected operation failed")
+    else:
+        with control._owner_lock():
+            pass
+    # Lock and unlock the same first byte, although read() moved the position.
+    assert calls == [(windows.LK_NBLCK, 0, 1), (windows.LK_UNLCK, 0, 1)]
 
 
 @pytest.mark.parametrize("death", ["exit", "terminate"])

@@ -299,3 +299,39 @@ def test_clock_tolerance_is_persisted_for_verify_reopen_and_replay(setup):
     begin(reopened, strict)
     with pytest.raises(JournalError, match="frame_rejected"):
         strict.ingest(1, frame(timestamp=(NOW + timedelta(milliseconds=50)).isoformat()))
+
+
+def test_diagnostic_reader_during_capture_does_not_poison_delivery(setup, monkeypatch):
+    _, journal, capture = setup
+    begin(journal, capture)
+    original, delivered = EventJournal._check, []
+
+    def check(self, meta, rows):
+        # Deliver while another process-style reader is still verifying.
+        if self is not journal and not delivered:
+            capture.ingest(1, frame())
+            delivered.append(True)
+        return original(self, meta, rows)
+
+    monkeypatch.setattr(EventJournal, "_check", check)
+    EventJournal(journal.path.parent, "synthetic").inspect()
+    status = capture.status()
+    assert delivered and not status["capture_failed"]
+    assert status["journal_unacknowledged_records"] == ()
+
+
+def test_transient_busy_during_delivery_is_retried(setup, monkeypatch):
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    _, journal, capture = setup
+    begin(journal, capture)
+    lock = sqlite3.connect(journal.path)
+    journal._wait = lambda seconds: lock.rollback()
+    try:
+        lock.execute("BEGIN IMMEDIATE")
+        capture.ingest(1, frame())
+    finally:
+        lock.close()
+    status = capture.status()
+    assert not status["capture_failed"]
+    assert status["journal_unacknowledged_records"] == ()
+    assert journal.inspect()["captured_events"] == 1

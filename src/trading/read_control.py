@@ -229,15 +229,26 @@ class PersistentReadLimiter(AccountReadLimiter):
                     raise PrivateReadError("control_owner_platform_unsupported")
             except OSError:
                 raise PrivateReadError("read_claim_unresolved") from None
-            self._verify_owner_path(owner.fileno())
             try:
-                contents = owner.read(33)
-            except OSError:
-                contents = None
-            if contents != self._instance.encode("ascii"):
-                self._failed = True
-                raise PrivateReadError("control_owner_file_changed")
-            yield
+                self._verify_owner_path(owner.fileno())
+                try:
+                    contents = owner.read(33)
+                except OSError:
+                    contents = None
+                if contents != self._instance.encode("ascii"):
+                    self._failed = True
+                    raise PrivateReadError("control_owner_file_changed")
+                yield
+            finally:
+                if os.name == "nt":
+                    # Windows may release a closed handle's byte lock late, which
+                    # would refuse the next slot(). Unlock the same byte first;
+                    # read() moved the position that msvcrt.locking() uses.
+                    try:
+                        owner.seek(0)
+                        msvcrt.locking(owner.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass  # close() still releases it; never mask the original error.
 
     @staticmethod
     def _event(conn, now, kind, token=None):

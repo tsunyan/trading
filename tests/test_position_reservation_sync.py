@@ -243,11 +243,12 @@ def test_journal_takeover_during_collection_prevents_comparison(setup, monkeypat
 
 def test_journal_epoch_is_reserved_during_comparison(setup, monkeypatch):
     clock, journal, capture, book = setup
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
     original = book.compare_reservations
 
     def checked(*args, **kwargs):
         peer = EventJournal(journal.path.parent, "synthetic")
-        with pytest.raises(JournalError, match="journal_storage_failed"):
+        with pytest.raises(JournalError, match="journal_busy"):
             peer.start_session(
                 expected_head=journal.inspect()["head"],
                 at=clock.wall,

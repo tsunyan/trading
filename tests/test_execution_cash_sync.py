@@ -235,12 +235,13 @@ def test_journal_takeover_after_collection_cannot_post(setup, monkeypatch):
 
 def test_journal_epoch_is_reserved_through_cash_commit(setup, monkeypatch):
     clock, journal, capture, book = setup
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
     original = book.apply
     head = journal.inspect()["head"]
 
     def checked(batch):
         peer = EventJournal(journal.path.parent, "synthetic")
-        with pytest.raises(JournalError, match="journal_storage_failed"):
+        with pytest.raises(JournalError, match="journal_busy"):
             peer.start_session(
                 expected_head=head, at=clock.wall, monotonic_ns=int(clock.mono * 1e9)
             )

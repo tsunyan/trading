@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
@@ -19,6 +20,8 @@ from trading.wire_validation import clock_skew
 
 ZERO = "0" * 64
 MAX_BYTES = 32_000_000
+BUSY_TIMEOUT_SECONDS = 1
+BUSY_ATTEMPTS = 3
 TIME = TypeAdapter(AwareDatetime)
 SCHEMA = """
 CREATE TABLE journal (
@@ -32,6 +35,10 @@ CREATE TABLE records (id INTEGER PRIMARY KEY, body TEXT NOT NULL, digest TEXT NO
 
 class JournalError(ValueError):
     """Only fixed reason codes; no account values or OS error text."""
+
+
+class _JournalBusy(JournalError):
+    """SQLite rolled the transaction back, so nothing from it was committed."""
 
 
 class Entry(Contract):
@@ -82,9 +89,9 @@ class EventJournal:
             raise JournalError("invalid_journal_scope")
         self.path = Path(directory).resolve() / "event-journal.sqlite"
         self.scope, self._instance, self._failed = scope, None, False
-        with self._transaction() as conn:
-            meta, _, _ = self._verify(conn)
-            self._instance = meta["instance"]
+        self._wait = time.sleep
+        meta, _, _ = self._read()
+        self._instance = meta["instance"]
 
     @classmethod
     def create(cls, directory: Path, scope: str, *, max_records=10_000):
@@ -116,7 +123,9 @@ class EventJournal:
         try:
             with closing(
                 sqlite3.connect(
-                    self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=1
+                    self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
+                    uri=True,
+                    timeout=BUSY_TIMEOUT_SECONDS,
                 )
             ) as conn:
                 conn.row_factory = sqlite3.Row
@@ -129,12 +138,40 @@ class EventJournal:
                 except BaseException:
                     conn.rollback()
                     raise
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error) as error:
+            if (
+                isinstance(error, sqlite3.Error)
+                and (getattr(error, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
+            ):
+                raise _JournalBusy("journal_busy") from None
             self._failed = True
             raise JournalError("journal_storage_failed") from None
 
+    def _retry_busy(self, operation):
+        # A busy transaction was rolled back, so a retry cannot duplicate a record.
+        for attempt in range(BUSY_ATTEMPTS):
+            try:
+                return operation()
+            except _JournalBusy:
+                if attempt == BUSY_ATTEMPTS - 1:
+                    raise
+                self._wait(0.05)
+
+    def _read(self):
+        def snapshot():
+            with self._transaction() as conn:
+                return self._snapshot(conn)
+
+        # Hold the shared lock only while copying rows. Full verification of a
+        # large journal can outlast a writer's busy timeout at COMMIT.
+        return self._check(*self._retry_busy(snapshot))
+
     def _verify(self, conn):
-        """Bounded full verification, including lifecycle and delivery receipts."""
+        """Verify inside a write transaction, which must see the same state it appends to."""
+        return self._check(*self._snapshot(conn))
+
+    def _snapshot(self, conn):
+        """One consistent copy of the metadata and records; checked by _check()."""
         try:
             metas = conn.execute("SELECT * FROM journal LIMIT 2").fetchall()
             if len(metas) != 1:
@@ -162,6 +199,17 @@ class EventJournal:
             ).fetchone()
             if tuple(lengths[:2]) != (meta["count"], meta["bytes"]) or lengths[2] > 110_000:
                 raise ValueError
+            rows = [
+                tuple(row) for row in conn.execute("SELECT id,body,digest FROM records ORDER BY id")
+            ]
+            return meta, rows
+        except (ValueError, KeyError, TypeError, OverflowError):
+            self._failed = True
+            raise JournalError("journal_integrity_failed") from None
+
+    def _check(self, meta, rows):
+        """Bounded full verification, including lifecycle and delivery receipts."""
+        try:
             state = {
                 "epoch": 0,
                 "session": None,
@@ -175,18 +223,17 @@ class EventJournal:
                 "events": 0,
             }
             previous, entries = ZERO, []
-            for index, row in enumerate(conn.execute("SELECT * FROM records ORDER BY id"), 1):
-                body = row["body"]
-                if row["id"] != index or not isinstance(body, str):
+            for index, (row_id, body, digest) in enumerate(rows, 1):
+                if row_id != index or not isinstance(body, str):
                     raise ValueError
-                if row["digest"] != _digest(meta["instance"], self.scope, index, previous, body):
+                if digest != _digest(meta["instance"], self.scope, index, previous, body):
                     raise ValueError
                 entry = Entry.model_validate_json(body)
                 if _entry_body(entry) != body:
                     raise ValueError
                 self._reduce(state, entry, index)
                 entries.append(entry)
-                previous = row["digest"]
+                previous = digest
             if previous != meta["head"]:
                 raise ValueError
             return meta, entries, state
@@ -302,8 +349,7 @@ class EventJournal:
             raise JournalError("capture_session_fenced")
 
     def inspect(self):
-        with self._transaction() as conn:
-            meta, _, state = self._verify(conn)
+        meta, _, state = self._read()
         return {
             "instance": meta["instance"],
             "scope": self.scope,
@@ -324,30 +370,33 @@ class EventJournal:
     def start_session(self, *, expected_head, at: datetime, monotonic_ns: int, clock_skew_ms=0):
         clock_skew(clock_skew_ms)
         at, mono = self._stamp(at, monotonic_ns)
-        with self._transaction(write=True) as conn:
-            meta, _, state = self._verify(conn)
-            if expected_head != meta["head"]:
-                raise JournalError("journal_head_changed")
-            if state["at"] is not None and at < state["at"]:
-                raise JournalError("invalid_capture_clock")
-            session = uuid.uuid4().hex
-            entry = Entry(
-                kind="BEGIN",
-                epoch=state["epoch"] + 1,
-                session=session,
-                at=at,
-                monotonic_ns=mono,
-                clock_skew_ms=clock_skew_ms or None,
-            )
-            self._append(conn, meta, entry)
-        return session
+
+        def attempt():
+            with self._transaction(write=True) as conn:
+                meta, _, state = self._verify(conn)
+                if expected_head != meta["head"]:
+                    raise JournalError("journal_head_changed")
+                if state["at"] is not None and at < state["at"]:
+                    raise JournalError("invalid_capture_clock")
+                session = uuid.uuid4().hex
+                entry = Entry(
+                    kind="BEGIN",
+                    epoch=state["epoch"] + 1,
+                    session=session,
+                    at=at,
+                    monotonic_ns=mono,
+                    clock_skew_ms=clock_skew_ms or None,
+                )
+                self._append(conn, meta, entry)
+            return session
+
+        return self._retry_busy(attempt)
 
     def current(self, session):
-        with self._transaction() as conn:
-            meta, _, state = self._verify(conn)
-            self._current(state, session)
-            if state["pending"] is not None:
-                raise JournalError("capture_delivery_unresolved")
+        meta, _, state = self._read()
+        self._current(state, session)
+        if state["pending"] is not None:
+            raise JournalError("capture_delivery_unresolved")
         return {
             "epoch": state["epoch"],
             "head": meta["head"],
@@ -372,81 +421,93 @@ class EventJournal:
         if not isinstance(kind, str) or kind not in {"EVENT", "HEARTBEAT", "END"}:
             raise JournalError("invalid_capture_kind")
         at, mono = self._stamp(at, monotonic_ns)
-        error = None
-        with self._transaction(write=True) as conn:
-            meta, _, state = self._verify(conn)
-            self._current(state, session)
-            if state["pending"] is not None:
-                raise JournalError("capture_delivery_unresolved")
-            fields = dict(epoch=state["epoch"], session=session, at=at, monotonic_ns=mono)
-            if at < state["at"] or mono < state["mono"]:
-                fields.update(at=state["at"], monotonic_ns=state["mono"])
-                entry = Entry(kind="FAULT", reason="clock_invalid", **fields)
-                error = "invalid_capture_clock"
-            elif kind == "EVENT":
-                digest = (
-                    hashlib.sha256(payload).hexdigest()
-                    if type(payload) is bytes and len(payload) <= MAX_FRAME_BYTES
-                    else None
-                )
-                if type(sequence) is not int or sequence != state["sequence"] + 1:
-                    error = "sequence_gap"
-                else:
-                    try:
-                        parse_event(payload, at, clock_skew_ms=state["clock_skew_ms"])
-                    except EventError:
-                        error = "frame_rejected"
-                if error:
-                    entry = Entry(kind="REJECTED", reason=error, rejected_sha256=digest, **fields)
-                else:
-                    entry = Entry(
-                        kind=kind, sequence=sequence, payload=payload.decode("utf-8"), **fields
+
+        def attempt():
+            error = None
+            with self._transaction(write=True) as conn:
+                meta, _, state = self._verify(conn)
+                self._current(state, session)
+                if state["pending"] is not None:
+                    raise JournalError("capture_delivery_unresolved")
+                fields = dict(epoch=state["epoch"], session=session, at=at, monotonic_ns=mono)
+                if at < state["at"] or mono < state["mono"]:
+                    fields.update(at=state["at"], monotonic_ns=state["mono"])
+                    entry = Entry(kind="FAULT", reason="clock_invalid", **fields)
+                    error = "invalid_capture_clock"
+                elif kind == "EVENT":
+                    digest = (
+                        hashlib.sha256(payload).hexdigest()
+                        if type(payload) is bytes and len(payload) <= MAX_FRAME_BYTES
+                        else None
                     )
-            else:
-                if payload is not None or sequence is not None:
-                    raise JournalError("invalid_capture_fields")
-                entry = Entry(kind=kind, **fields)
-            index = self._append(conn, meta, entry)
+                    if type(sequence) is not int or sequence != state["sequence"] + 1:
+                        error = "sequence_gap"
+                    else:
+                        try:
+                            parse_event(payload, at, clock_skew_ms=state["clock_skew_ms"])
+                        except EventError:
+                            error = "frame_rejected"
+                    if error:
+                        entry = Entry(
+                            kind="REJECTED", reason=error, rejected_sha256=digest, **fields
+                        )
+                    else:
+                        entry = Entry(
+                            kind=kind, sequence=sequence, payload=payload.decode("utf-8"), **fields
+                        )
+                else:
+                    if payload is not None or sequence is not None:
+                        raise JournalError("invalid_capture_fields")
+                    entry = Entry(kind=kind, **fields)
+                index = self._append(conn, meta, entry)
+            return index, error
+
+        index, error = self._retry_busy(attempt)
         if error:
             raise JournalError(error)
         return index
 
     def acknowledge(self, session, record_id):
-        with self._transaction(write=True) as conn:
-            meta, _, state = self._verify(conn)
-            self._current(state, session)
-            if type(record_id) is not int or state["pending"] != record_id:
-                raise JournalError("capture_receipt_mismatch")
-            entry = Entry(
-                kind="ACK",
-                epoch=state["epoch"],
-                session=session,
-                at=state["at"],
-                monotonic_ns=state["mono"],
-                target=record_id,
-            )
-            self._append(conn, meta, entry)
+        def attempt():
+            with self._transaction(write=True) as conn:
+                meta, _, state = self._verify(conn)
+                self._current(state, session)
+                if type(record_id) is not int or state["pending"] != record_id:
+                    raise JournalError("capture_receipt_mismatch")
+                entry = Entry(
+                    kind="ACK",
+                    epoch=state["epoch"],
+                    session=session,
+                    at=state["at"],
+                    monotonic_ns=state["mono"],
+                    target=record_id,
+                )
+                self._append(conn, meta, entry)
+
+        self._retry_busy(attempt)
 
     def fail_delivery(self, session):
-        with self._transaction(write=True) as conn:
-            meta, _, state = self._verify(conn)
-            self._current(state, session)
-            entry = Entry(
-                kind="FAULT",
-                reason="delivery_failed",
-                epoch=state["epoch"],
-                session=session,
-                at=state["at"],
-                monotonic_ns=state["mono"],
-            )
-            self._append(conn, meta, entry)
+        def attempt():
+            with self._transaction(write=True) as conn:
+                meta, _, state = self._verify(conn)
+                self._current(state, session)
+                entry = Entry(
+                    kind="FAULT",
+                    reason="delivery_failed",
+                    epoch=state["epoch"],
+                    session=session,
+                    at=state["at"],
+                    monotonic_ns=state["mono"],
+                )
+                self._append(conn, meta, entry)
+
+        self._retry_busy(attempt)
 
     def replay(self):
         """Reconstruct recorded, acknowledged input only; never return a live monitor."""
         from trading.account_sync import AccountSyncMonitor, SyncError
 
-        with self._transaction() as conn:
-            meta, entries, state = self._verify(conn)
+        meta, entries, state = self._read()
         clock = [datetime(1970, 1, 1, tzinfo=UTC), 0]
         monitor = None
         session = None

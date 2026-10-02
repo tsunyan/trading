@@ -305,11 +305,12 @@ def test_unresolved_delivery_blocks_even_newly_collected_valuation(setup):
 
 def test_journal_guard_prevents_epoch_takeover_during_comparison(setup, monkeypatch):
     clock, journal, capture, book = setup
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
     original = book.compare_valuation
 
     def checked(*args, **kwargs):
         peer = EventJournal(journal.path.parent, "synthetic")
-        with pytest.raises(JournalError, match="journal_storage_failed"):
+        with pytest.raises(JournalError, match="journal_busy"):
             peer.start_session(
                 expected_head=journal.inspect()["head"], at=clock.wall, monotonic_ns=0
             )
