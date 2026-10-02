@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
@@ -47,6 +48,8 @@ MAX_ENTRIES = 5000
 MAX_PROOF = 2_000_000
 MAX_BYTES = 32_000_000
 MAX_OPENING = 1_000_000
+BUSY_TIMEOUT_SECONDS = 1
+BUSY_ATTEMPTS = 3
 BLOCKERS = (
     "cash_book_scope_not_authenticated",
     "opening_cash_boundary_not_verified",
@@ -91,6 +94,17 @@ CREATE TABLE transfer_postings (
 
 class CashBookError(ValueError):
     """Fixed codes only; no input, SQL, credentials, or network exception text."""
+
+
+class _CashBookBusy(CashBookError):
+    """Lock contention, not damage: the transaction was rolled back and may be retried."""
+
+
+def _is_busy(error):
+    return (
+        isinstance(error, sqlite3.Error)
+        and (getattr(error, "sqlite_errorcode", 0) & 0xFF) == sqlite3.SQLITE_BUSY
+    )
 
 
 class OpeningCash(Contract):
@@ -323,6 +337,27 @@ def _batch(source):
     return body, records, all_rest
 
 
+def _new_proof(body, new):
+    """Keep only the notices and order reports for the executions booked now.
+
+    A monitor batch repeats every notice since connect. Storing it whole on each
+    posting would grow the book quadratically with fills per connection.
+    """
+    batch = ExecutionCashBatch.model_validate(_load(body))
+    orders = {record.order_id for record in new.values()}
+    proof, records, _ = _batch(
+        batch.model_copy(
+            update={
+                "events": tuple(e for e in batch.events if e.entity_id in new),
+                "reports": tuple(r for r in batch.reports if r.evidence.order_id in orders),
+            }
+        )
+    )
+    if records != new:
+        raise CashBookError("cash_book_proof_invalid")
+    return proof
+
+
 class ExecutionCashBook:
     """One transactional cash book. Never auto-books a resync aggregate / replay.
 
@@ -336,9 +371,9 @@ class ExecutionCashBook:
             raise CashBookError("invalid_cash_book_scope")
         self.path = Path(directory).resolve() / "execution-cash.sqlite"
         self.scope, self._instance, self._failed = scope, None, False
-        with self._transaction() as conn:
-            meta, _, _ = self._verify(conn)
-            self._instance = meta["instance"]
+        self._wait = time.sleep
+        meta, _, _ = self._read()
+        self._instance = meta["instance"]
 
     @classmethod
     def create(cls, directory: Path, scope: str, opening: OpeningCash, *, max_entries=MAX_ENTRIES):
@@ -426,9 +461,12 @@ class ExecutionCashBook:
         if self._failed:
             raise CashBookError("cash_book_failed_closed")
         try:
+            # Reads open read-write too, but never write. Only a writable
+            # connection can roll back a hot journal left by a crash during a
+            # commit; a read-only one cannot, and the book would never reopen.
             with closing(
                 sqlite3.connect(
-                    self.path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=1
+                    self.path.as_uri() + "?mode=rw", uri=True, timeout=BUSY_TIMEOUT_SECONDS
                 )
             ) as conn:
                 conn.row_factory = sqlite3.Row
@@ -441,9 +479,28 @@ class ExecutionCashBook:
                 except BaseException:
                     conn.rollback()
                     raise
-        except (sqlite3.Error, OSError):
+        except (sqlite3.Error, OSError) as error:
+            if _is_busy(error):
+                raise _CashBookBusy("cash_book_busy") from None
             self._failed = True
             raise CashBookError("cash_book_storage_failed") from None
+
+    def _retry_busy(self, operation):
+        # A busy transaction was rolled back, so a retry cannot post twice.
+        for attempt in range(BUSY_ATTEMPTS):
+            try:
+                return operation()
+            except _CashBookBusy:
+                if attempt == BUSY_ATTEMPTS - 1:
+                    raise
+                self._wait(0.05)
+
+    def _read(self):
+        def attempt():
+            with self._transaction() as conn:
+                return self._verify(conn)
+
+        return self._retry_busy(attempt)
 
     def _verify(self, conn):
         try:
@@ -615,7 +672,9 @@ class ExecutionCashBook:
             _money(totals["cash"])
             totals["transfer_info"], totals["transfers"] = info, transfers
             return meta, records, totals
-        except Exception:
+        except Exception as error:
+            if _is_busy(error):
+                raise  # Classified by _transaction; contention is not damage.
             self._failed = True
             raise CashBookError("cash_book_integrity_failed") from None
 
@@ -631,7 +690,13 @@ class ExecutionCashBook:
             raise
         except Exception:
             raise CashBookError("cash_book_input_invalid") from None
-        conflict = False
+        conflict, result = self._retry_busy(lambda: self._apply(proof, selected, rest))
+        if conflict:
+            raise CashBookError("cash_book_identity_conflict")
+        return result
+
+    def _apply(self, proof, selected, rest):
+        conflict, result = False, None
         with self._transaction(write=True) as conn:
             meta, existing, totals = self._verify(conn)
             if meta["halted"]:
@@ -676,6 +741,8 @@ class ExecutionCashBook:
                 transfer_count, transfer_bytes = (info["count"], info["bytes"]) if info else (0, 0)
                 if meta["count"] + transfer_count + len(new) > meta["max_entries"]:
                     raise CashBookError("cash_book_capacity_reached")
+                if new:
+                    proof = _new_proof(proof, new)
                 size = meta["bytes"] + (len(proof.encode()) if new else 0)
                 size += sum(len(_json(record).encode()) for record in new.values())
                 if size + transfer_bytes > MAX_BYTES:
@@ -737,9 +804,7 @@ class ExecutionCashBook:
                     **position_result(position_state),
                     **_transfer_result(info, totals["transfers"]),
                 }
-        if conflict:
-            raise CashBookError("cash_book_identity_conflict")
-        return result
+        return conflict, result
 
     def _verify_transfers(self, conn, meta, opening):
         if any(r[0] != 64 for r in conn.execute("SELECT length(head) FROM transfer_state LIMIT 2")):
@@ -848,7 +913,13 @@ class ExecutionCashBook:
     def apply_transfers(self, source: tuple[CashTransferMatch, ...]):
         """Book explicitly matched settled statement records; never infer from balance."""
         candidates = _transfer_matches(source)
-        conflict = False
+        conflict, result = self._retry_busy(lambda: self._apply_transfers(candidates))
+        if conflict:
+            raise CashBookError("cash_book_transfer_identity_conflict")
+        return result
+
+    def _apply_transfers(self, candidates):
+        conflict, result = False, None
         with self._transaction(write=True) as conn:
             meta, _, totals = self._verify(conn)
             if meta["halted"]:
@@ -945,13 +1016,10 @@ class ExecutionCashBook:
                     "live_enabled": False,
                     "blockers": _blockers(3, totals["position_state"] is not None),
                 }
-        if conflict:
-            raise CashBookError("cash_book_transfer_identity_conflict")
-        return result
+        return conflict, result
 
     def snapshot(self):
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
+        meta, records, totals = self._read()
         return {
             "instance": meta["instance"],
             "scope": self.scope,
@@ -1013,8 +1081,7 @@ class ExecutionCashBook:
     def compare_balance(self, source: AccountReadReport, *, clock_skew_ms=0):
         """Non-persistent comparison only; never adjust cash to match an account."""
         report, observed = self._account_report(source, clock_skew_ms)
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
+        meta, records, totals = self._read()
         opening = OpeningCash.model_validate(_load(meta["opening"]))
         self._check_report_boundary(report, records, opening, totals["transfer_info"])
         difference = observed - totals["cash"]
@@ -1071,8 +1138,7 @@ class ExecutionCashBook:
                     raise ValueError
         except Exception:
             raise CashBookError("cash_book_position_report_invalid") from None
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
+        meta, records, totals = self._read()
         opening = OpeningCash.model_validate(_load(meta["opening"]))
         self._check_report_boundary(report, records, opening, totals["transfer_info"])
         state = totals["position_state"]
@@ -1134,19 +1200,16 @@ class ExecutionCashBook:
             validate_reports(report, orders, clock_skew(clock_skew_ms))
         except Exception:
             raise CashBookError("cash_book_reservation_report_invalid") from None
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
-            state = totals["position_state"]
-            if state is None:
-                raise CashBookError("cash_book_position_basis_required")
-            opening = OpeningCash.model_validate(_load(meta["opening"]))
-            self._check_report_boundary(report, records, opening, totals["transfer_info"])
-            boundary = max(
-                (r.execution.timestamp for r in records.values()), default=opening.cutoff
-            )
-            if any(o.response_at < boundary for r in orders for o in r.observations):
-                raise CashBookError("cash_book_reservation_report_before_postings")
-            comparison = compare_reservations(report, orders, records, state)
+        meta, records, totals = self._read()
+        state = totals["position_state"]
+        if state is None:
+            raise CashBookError("cash_book_position_basis_required")
+        opening = OpeningCash.model_validate(_load(meta["opening"]))
+        self._check_report_boundary(report, records, opening, totals["transfer_info"])
+        boundary = max((r.execution.timestamp for r in records.values()), default=opening.cutoff)
+        if any(o.response_at < boundary for r in orders for o in r.observations):
+            raise CashBookError("cash_book_reservation_report_before_postings")
+        comparison = compare_reservations(report, orders, records, state)
         return {
             "scope": self.scope,
             "head": _public_head(meta["head"], totals["transfer_info"]),
@@ -1216,29 +1279,23 @@ class ExecutionCashBook:
                 raise ValueError
         except Exception:
             raise CashBookError("cash_book_valuation_input_invalid") from None
-        with self._transaction() as conn:
-            meta, records, totals = self._verify(conn)
-            state = totals["position_state"]
-            if state is None:
-                raise CashBookError("cash_book_position_basis_required")
-            opening = OpeningCash.model_validate(_load(meta["opening"]))
-            self._check_report_boundary(report, records, opening, totals["transfer_info"])
-            boundary = max(
-                (r.execution.timestamp for r in records.values()), default=opening.cutoff
+        meta, records, totals = self._read()
+        state = totals["position_state"]
+        if state is None:
+            raise CashBookError("cash_book_position_basis_required")
+        opening = OpeningCash.model_validate(_load(meta["opening"]))
+        self._check_report_boundary(report, records, opening, totals["transfer_info"])
+        boundary = max((r.execution.timestamp for r in records.values()), default=opening.cutoff)
+        if totals["transfer_info"] is not None and totals["transfer_info"]["latest_at"] is not None:
+            boundary = max(boundary, totals["transfer_info"]["latest_at"])
+        if quote.observed_at < boundary:
+            raise CashBookError("cash_book_valuation_quote_before_postings")
+        try:
+            comparison = value_account(
+                state, Fraction(totals["cash"], SCALE), report, quote, policy
             )
-            if (
-                totals["transfer_info"] is not None
-                and totals["transfer_info"]["latest_at"] is not None
-            ):
-                boundary = max(boundary, totals["transfer_info"]["latest_at"])
-            if quote.observed_at < boundary:
-                raise CashBookError("cash_book_valuation_quote_before_postings")
-            try:
-                comparison = value_account(
-                    state, Fraction(totals["cash"], SCALE), report, quote, policy
-                )
-            except ValuationError:
-                raise CashBookError("cash_book_valuation_precision_capacity") from None
+        except ValuationError:
+            raise CashBookError("cash_book_valuation_precision_capacity") from None
         return {
             "scope": self.scope,
             "head": _public_head(meta["head"], totals["transfer_info"]),

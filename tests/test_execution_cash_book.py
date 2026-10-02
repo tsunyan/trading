@@ -377,6 +377,102 @@ os._exit(17)
     assert restarted.snapshot()["balance"] == "999998.00000000"
 
 
+def test_hot_journal_from_crash_during_commit_is_rolled_back_on_reopen(tmp_path):
+    book = create(tmp_path)
+    book.apply(batch())
+    before = book.snapshot()
+    # A one-page cache spills uncommitted pages into the database file, so the
+    # remaining rollback journal is hot: only a writable connection can undo it.
+    script = """
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('PRAGMA cache_size=1')
+conn.execute('BEGIN IMMEDIATE')
+conn.execute('UPDATE book SET bytes=bytes+1')
+for i in range(3000):
+    conn.execute('INSERT INTO proofs VALUES(?,?)', (100 + i, 'x' * 500))
+os._exit(17)
+"""
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(book.path)], capture_output=True, timeout=15
+    )
+    assert done.returncode == 17, done.stderr.decode()
+    assert book.path.with_name("execution-cash.sqlite-journal").exists()
+    reopened = ExecutionCashBook(book.path.parent, "synthetic")
+    assert reopened.snapshot() == before
+    assert not book.path.with_name("execution-cash.sqlite-journal").exists()
+
+
+def test_each_posting_stores_only_the_evidence_for_its_new_executions(tmp_path):
+    rows = [
+        execution(
+            executionId=1000 + i, orderId=5000 + i, rootOrderId=5000 + i, clientOrderId=f"C{i}"
+        )
+        for i in range(5)
+    ]
+    events = tuple(parse_event(raw(r), NOW) for r in rows)
+    reports = tuple(read_order(Clock(), [r]) for r in rows)
+    cumulative = create(tmp_path / "cumulative")
+    single = create(tmp_path / "single")
+    for k in range(1, len(rows) + 1):
+        # A monitor batch repeats every notice and order since connect.
+        result = cumulative.apply(ExecutionCashBatch(events=events[:k], reports=reports[:k]))
+        assert result["applied_execution_ids"] == (1000 + k - 1,)
+        assert len(result["already_applied_execution_ids"]) == k - 1
+        single.apply(ExecutionCashBatch(events=events[k - 1 : k], reports=reports[k - 1 : k]))
+
+    def proofs(book):
+        with sqlite3.connect(book.path) as conn:
+            return conn.execute("SELECT id,body FROM proofs ORDER BY id").fetchall()
+
+    assert proofs(cumulative) == proofs(single)
+    reopened = ExecutionCashBook(cumulative.path.parent, "synthetic")
+    repeated = reopened.apply(ExecutionCashBatch(events=events, reports=reports))
+    assert repeated["applied_execution_ids"] == ()
+    assert reopened.snapshot()["proofs"] == len(rows)
+
+
+def test_busy_write_is_retried_once_without_duplicate(tmp_path, monkeypatch):
+    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0.05)
+    book = create(tmp_path)
+    reader = sqlite3.connect(book.path)
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        reader.rollback()
+
+    book._wait = wait
+    try:
+        # A diagnostic reader's shared lock makes the writer's COMMIT busy.
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM executions").fetchone()
+        assert book.apply(batch())["applied_execution_ids"] == (501,)
+    finally:
+        reader.close()
+    assert waits == [0.05]
+    assert book.snapshot()["executions"] == book.snapshot()["proofs"] == 1
+
+
+def test_busy_exhaustion_is_not_treated_as_corruption(tmp_path, monkeypatch):
+    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0.05)
+    book = create(tmp_path)
+    before = book.snapshot()
+    waits = []
+    book._wait = waits.append
+    with sqlite3.connect(book.path) as lock:
+        lock.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(CashBookError, match="cash_book_busy"):
+            book.apply(batch())
+        with pytest.raises(CashBookError, match="cash_book_busy"):
+            book.snapshot()
+        lock.rollback()
+    assert waits == [0.05, 0.05] * 2
+    assert not book._failed
+    assert book.snapshot() == before
+    assert book.apply(batch())["applied_execution_ids"] == (501,)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
