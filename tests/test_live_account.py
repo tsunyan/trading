@@ -378,3 +378,40 @@ def test_cli_requires_confirmations_and_hides_values(setup, capsys):
     err = capsys.readouterr().err
     assert "account_confirmations_required" in err and "Traceback" not in err
     assert values[3].reads == []
+
+
+@pytest.mark.parametrize("state", ["RECONCILING", "UNKNOWN", "SUBMITTING"])
+def test_own_unreconciled_order_is_refused_without_halting(state):
+    from test_account_guard import NOW
+
+    order = intent()
+    row = {**working_row(order, NOW), "state": state}
+    with pytest.raises(LiveAccountError, match="local_order_reconciliation_required") as raised:
+        snapshot_from_report(report(NOW, orders=(active(order, NOW),)), account_id="a", rows=[row])
+    assert not isinstance(raised.value, AccountDiscrepancy)
+
+
+def test_refresh_right_after_acceptance_asks_for_order_reconciliation_first(setup):
+    _, live, _, order, _ = setup
+    clock = setup[0][0]
+    with __import__("test_private_order").client(
+        live, lambda request: response(live[0], request)
+    ) as sender:
+        sender.submit(order.client_id, quote=quote(clock.wall))
+    wire = {
+        "rootOrderId": 101,
+        "orderId": 201,
+        "clientOrderId": order.client_id,
+        "symbol": "USD_JPY",
+        "side": order.side,
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": order.effect,
+        "size": str(order.units),
+        "price": str(order.price),
+        "status": "ORDERED",
+        "timestamp": (clock.wall - timedelta(seconds=1)).isoformat(),
+    }
+    with pytest.raises(LiveAccountError, match="local_order_reconciliation_required"):
+        run(setup, [], orders=[wire])
+    assert not live[3].snapshot()["halted"]

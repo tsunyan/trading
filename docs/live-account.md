@@ -31,10 +31,13 @@ uv run python -m trading.live_account --directory runs/live-orders --read-contro
 - 残高・時価評価総額・拘束証拠金・余力: 最後の資産取得の`balance`・`equity`・`margin`・`availableAmount`
 - 未決済スワップ: 資産の`totalSwap`。建玉ごとの`totalSwap`の合計と一致しなければ拒否します。
 - 建玉: 建玉ID・売買・数量・建値（`price`）
-- 有効注文: 台帳でWORKING/PARTIALかつ受付証拠がある注文だけを認めます。親注文ID・注文ID・
+- 有効注文: 台帳でWORKING/PARTIAL/CANCEL_PENDINGかつ受付証拠がある注文だけを認めます。親注文ID・注文ID・
   銘柄・売買・新規/決済・指値・数量・価格が台帳の注文意図と受付証拠に一致しなければ拒否します。
   有効注文の数量は注文全体の数量で未約定数量ではないため、残数量は台帳の約定証拠から求めます。
 
+送信済みでまだGET照合していない自分の注文（SUBMITTING・UNKNOWN・RECONCILING）が有効注文に
+あれば、台帳を停止せず`local_order_reconciliation_required`で拒否します。先に
+[受付済み注文のGET照合](live-order-sync.md)（結果不明なら[GET照合](order-recovery.md)）を行います。
 台帳が説明できない有効注文（手動注文、別アプリの注文、内容の違う注文）を見つけた場合は、
 口座照合へ渡さずに台帳を停止します。外部操作を止めていなかったか、台帳の状態が壊れています。
 

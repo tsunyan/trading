@@ -22,6 +22,9 @@ ACCOUNT_CONFIRMATIONS = frozenset(
 )
 
 
+AWAITING_RECONCILIATION = frozenset({"SUBMITTING", "UNKNOWN", "RECONCILING"})
+
+
 class LiveAccountError(ValueError):
     """Fixed local reasons only; account values are never echoed."""
 
@@ -49,7 +52,14 @@ def snapshot_from_report(report, *, account_id, rows):
     working = []
     for active in report.active_orders:
         row = known.get(active.client_id)
-        if row is None or row["state"] not in {"WORKING", "PARTIAL"} or not row["evidence_json"]:
+        if row is not None and row["state"] in AWAITING_RECONCILIATION:
+            # Our own sent order, not yet reconciled from its GET evidence: not a discrepancy.
+            raise LiveAccountError("local_order_reconciliation_required")
+        if (
+            row is None
+            or row["state"] not in {"WORKING", "PARTIAL", "CANCEL_PENDING"}
+            or not row["evidence_json"]
+        ):
             raise AccountDiscrepancy("unexplained_active_order")
         intent = OrderIntent.model_validate_json(row["intent_json"])
         evidence = OrderEvidence.model_validate_json(row["evidence_json"])
