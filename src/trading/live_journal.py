@@ -240,7 +240,6 @@ class LiveOrderJournal(OrderJournal):
                 or len(gate) != 1
                 or gate[0]["id"] != 1
                 or AccountPolicy.model_validate_json(gate[0]["policy_json"]) != state.policy
-                or state.implementation_sha256 != implementation_sha256()
             ):
                 raise ValueError
             post = self.posts.snapshot()
@@ -296,6 +295,30 @@ class LiveOrderJournal(OrderJournal):
         )
         return updated
 
+    @staticmethod
+    def _current_implementation():
+        try:
+            return implementation_sha256()
+        except (OSError, ImportError):
+            raise LiveOrderError("live_implementation_unavailable") from None
+
+    def _activation_state(self, state):
+        candidate = state.model_copy(
+            update={"implementation_sha256": self._current_implementation()}
+        )
+        return candidate.model_copy(update={"configuration_sha256": _configuration(candidate)})
+
+    def activation_context(self):
+        """Read current approval fingerprints. Never renew approval or rewrite saved state."""
+        with self._transaction() as conn:
+            state = self._activation_state(self._live_state(conn))
+            return {
+                "account_id": state.policy.account_id,
+                "configuration_sha256": state.configuration_sha256,
+                "implementation_sha256": state.implementation_sha256,
+                "revision": state.revision,
+            }
+
     def activate(self, approval, *, expected_revision, confirmations, now=None):
         approval = LiveApproval.model_validate(approval.model_dump())
         now = self._clock(now if now is not None else self.clock())
@@ -303,14 +326,15 @@ class LiveOrderJournal(OrderJournal):
             raise LiveOrderError("explicit_live_acceptance_confirmations_required")
         with self._mutation(), self._transaction() as conn:
             state = self._live_state(conn)
+            candidate = self._activation_state(state)
             if (
                 state.phase == "STOPPED"
                 or state.revision != expected_revision
                 or self.posts.snapshot()["blocked"]
                 or self.posts.reads.status()["blocked"]
                 or approval.account_id != state.policy.account_id
-                or approval.configuration_sha256 != state.configuration_sha256
-                or approval.implementation_sha256 != state.implementation_sha256
+                or approval.configuration_sha256 != candidate.configuration_sha256
+                or approval.implementation_sha256 != candidate.implementation_sha256
                 or not approval.accepted_at <= now < approval.expires_at
             ):
                 raise LiveOrderError("live_activation_refused")
@@ -319,15 +343,30 @@ class LiveOrderJournal(OrderJournal):
                 for row in conn.execute("SELECT state FROM orders")
             ):
                 raise LiveOrderError("live_activation_refused")
-            self._write_live(conn, state, phase="ENABLED", approval=approval)
+            self._write_live(
+                conn,
+                state,
+                implementation_sha256=candidate.implementation_sha256,
+                configuration_sha256=candidate.configuration_sha256,
+                phase="ENABLED",
+                approval=approval,
+            )
             self._event(
-                conn, None, "LIVE_ACTIVATED", {"approval": approval.model_dump(mode="json")}
+                conn,
+                None,
+                "LIVE_ACTIVATED",
+                {
+                    "approval": approval.model_dump(mode="json"),
+                    "previous_implementation_sha256": state.implementation_sha256,
+                    "previous_configuration_sha256": state.configuration_sha256,
+                },
             )
 
     def _authorize(self, conn, now):
         state = self._live_state(conn)
         if (
             state.phase != "ENABLED"
+            or state.implementation_sha256 != self._current_implementation()
             or state.approval is None
             or not state.approval.accepted_at <= now < state.approval.expires_at
             or self.posts.reads.status()["blocked"]
@@ -451,8 +490,14 @@ class LiveOrderJournal(OrderJournal):
             state = self._live_state(conn)
             now = self._clock(self.clock())
         result["live_control"] = state.model_dump(mode="json")
+        try:
+            implementation_matches = state.implementation_sha256 == self._current_implementation()
+        except LiveOrderError:
+            implementation_matches = False
+        result["implementation_matches"] = implementation_matches
         result["live_enabled"] = (
-            state.phase == "ENABLED"
+            implementation_matches
+            and state.phase == "ENABLED"
             and state.approval is not None
             and state.approval.accepted_at <= now < state.approval.expires_at
             and not result["halted"]

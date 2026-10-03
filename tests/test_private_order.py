@@ -72,7 +72,7 @@ def setup(tmp_path):
 
 
 def approval(journal, clock):
-    state = journal.snapshot()["live_control"]
+    state = journal.activation_context()
     return LiveApproval(
         account_id="fixture-account",
         configuration_sha256=state["configuration_sha256"],
@@ -196,8 +196,8 @@ def test_token_recovery_preserves_live_binding_and_does_not_enable_orders(setup,
         fresh.request(order.client_id)
 
 
-@pytest.mark.parametrize("damage", ["table", "row", "digest", "policy", "mode", "code"])
-def test_binding_policy_mode_and_code_damage_refuses_reopen(setup, damage, monkeypatch):
+@pytest.mark.parametrize("damage", ["table", "row", "digest", "policy", "mode"])
+def test_binding_policy_and_mode_damage_refuses_reopen(setup, damage):
     clock, _, posts, journal = setup
     if damage in {"table", "row"}:
         with sqlite3.connect(posts.path) as conn:
@@ -206,8 +206,6 @@ def test_binding_policy_mode_and_code_damage_refuses_reopen(setup, damage, monke
                 if damage == "table"
                 else "DELETE FROM execution_binding"
             )
-    elif damage == "code":
-        monkeypatch.setattr("trading.live_journal.implementation_sha256", lambda: "b" * 64)
     else:
         with sqlite3.connect(journal.path) as conn:
             conn.execute(
@@ -244,6 +242,132 @@ def test_activation_requires_matching_current_explicit_acceptance(setup, damage)
     with pytest.raises(LiveOrderError):
         journal.activate(accepted, **kwargs)
     assert not journal.snapshot()["live_enabled"]
+
+
+def test_code_update_preserves_read_and_requires_new_explicit_approval(setup, monkeypatch):
+    clock, reads, posts, journal = setup
+    order = ready(setup)
+    saved = journal.snapshot()
+    old_approval = approval(journal, clock)
+    before = journal.path.read_bytes()
+    monkeypatch.setattr("trading.live_journal.implementation_sha256", lambda: "b" * 64)
+    reopened = LiveOrderJournal(journal.path.parent, posts, clock=lambda: clock.now)
+    current = reopened.snapshot()
+    context = reopened.activation_context()
+    assert current["live_control"] == saved["live_control"]
+    assert current["orders"] == saved["orders"]
+    assert not current["implementation_matches"] and not current["live_enabled"]
+    assert context["implementation_sha256"] == "b" * 64
+    assert context["configuration_sha256"] != old_approval.configuration_sha256
+    assert journal.path.read_bytes() == before
+    with pytest.raises(LiveOrderError, match="not_enabled"):
+        journal.request(order.client_id)  # Existing objects are fenced too.
+    with pytest.raises(LiveOrderError, match="activation_refused"):
+        reopened.activate(
+            old_approval,
+            expected_revision=context["revision"],
+            confirmations=CONFIRMATIONS,
+            now=clock.now,
+        )
+    enable(reopened, clock)
+    activated = reopened.snapshot()
+    assert activated["live_enabled"] and activated["implementation_matches"]
+    assert activated["live_control"]["instance"] == saved["live_control"]["instance"]
+    assert activated["live_control"]["revision"] == context["revision"] + 1
+    assert activated["live_control"]["configuration_sha256"] == context["configuration_sha256"]
+    with client(
+        (clock, reads, posts, reopened), lambda request: response(clock, request)
+    ) as sender:
+        sender.submit(order.client_id, quote=quote(clock.now))
+    assert reopened.snapshot()["orders"][0]["state"] == "RECONCILING"
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_code_update_allows_pending_order_reconciliation_and_retains_nonreplay(
+    setup, monkeypatch, unknown
+):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+    with client(setup, lambda request: response(clock, request)) as sender:
+        sender.submit(order.client_id, quote=quote(clock.now))
+    if unknown:
+        journal.unknown(order.client_id)
+    saved = journal.snapshot()
+    monkeypatch.setattr("trading.live_journal.implementation_sha256", lambda: "b" * 64)
+    reopened = LiveOrderJournal(journal.path.parent, posts, clock=lambda: clock.now)
+    assert reopened.snapshot()["orders"] == saved["orders"]
+    with pytest.raises(LiveOrderError, match="activation_refused"):
+        enable(reopened, clock)  # New approval does not bypass unsettled orders.
+    assert (
+        reopened.reconcile(
+            fixture_evidence(
+                order, 101, 201, "EXECUTED", [fill(timestamp=clock.now.isoformat())], clock.now
+            )
+        )
+        == "FILLED"
+    )
+    assert reopened.snapshot()["orders"][0]["evidence"]["executions"][0]["execution_id"] == 301
+    enable(reopened, clock)
+    with pytest.raises(LiveOrderError, match="already_claimed"):
+        reopened.request(order.client_id)
+    reopened.halt()
+    with pytest.raises(LiveOrderError, match="activation_refused"):
+        enable(reopened, clock)
+
+
+def test_response_receipt_is_saved_when_code_changes_after_dispatch(setup, monkeypatch):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+
+    def handler(request):
+        monkeypatch.setattr("trading.live_journal.implementation_sha256", lambda: "b" * 64)
+        return response(clock, request)
+
+    with client(setup, handler) as sender:
+        receipt = sender.submit(order.client_id, quote=quote(clock.now))
+    saved = journal.snapshot()
+    assert saved["orders"][0]["submission_receipt"]["payload_sha256"] == receipt.payload_sha256
+    assert saved["orders"][0]["state"] == "RECONCILING"
+    assert posts.snapshot()["phase"] == "READY" and not saved["live_enabled"]
+
+
+def test_code_change_at_last_dispatch_check_sends_no_http_and_still_records_stop(
+    setup, monkeypatch
+):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+    original = journal.validate_dispatch
+
+    def changed(*args):
+        monkeypatch.setattr("trading.live_journal.implementation_sha256", lambda: "b" * 64)
+        return original(*args)
+
+    monkeypatch.setattr(journal, "validate_dispatch", changed)
+    with client(setup, lambda request: pytest.fail("code change dispatched HTTP")) as sender:
+        with pytest.raises(OrderTransportError):
+            sender.submit(order.client_id, quote=quote(clock.now))
+    saved = journal.snapshot()
+    assert saved["halted"] and saved["live_control"]["phase"] == "STOPPED"
+    assert saved["orders"][0]["state"] == "UNKNOWN"
+    assert posts.snapshot()["phase"] == "STOPPED"
+
+
+def test_unavailable_code_fingerprint_does_not_prevent_diagnostics_or_emergency_stop(
+    setup, monkeypatch
+):
+    clock, _, posts, journal = setup
+    ready(setup)
+
+    def unavailable():
+        raise OSError("synthetic missing source file")
+
+    monkeypatch.setattr("trading.live_journal.implementation_sha256", unavailable)
+    reopened = LiveOrderJournal(journal.path.parent, posts, clock=lambda: clock.now)
+    assert not reopened.snapshot()["live_enabled"]
+    with pytest.raises(LiveOrderError, match="implementation_unavailable"):
+        reopened.activation_context()
+    reopened.halt()
+    assert reopened.snapshot()["halted"]
 
 
 def test_disabled_and_unproved_accounts_never_post(setup):
