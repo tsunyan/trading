@@ -150,6 +150,18 @@ class JournaledEventCapture:
             self._deliver("END", expected_head=view["head"])
             return self._journal.inspect()["head"]
 
+    @property
+    def journal(self):
+        return self._journal
+
+    def assert_rollover_ready(self, cash_book):
+        with self._lock:
+            self._check_cash_book(cash_book)
+            view = self._ready()
+            if view["unacknowledged_records"]:
+                raise JournalError("capture_delivery_unresolved")
+            self._monitor.assert_rollover_ready(self._monitor_session, cash_book)
+
     def check_live(self):
         """Cheap fence for each receive-loop iteration; status() stays the full audit.
 

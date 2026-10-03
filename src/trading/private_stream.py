@@ -135,26 +135,7 @@ class PrivateStreamReceiver:
             if not self._running or self._closed:
                 raise StreamError("private_stream_not_running")
             try:
-                self._tokens.maintain()
-                now = self._now()
-                if self._pong is not None:
-                    if now - self._ping_at >= 15:
-                        raise StreamError("private_stream_pong_expired")
-                    if self._pong.is_set():
-                        self._capture.heartbeat()
-                        self._pong = None
-                if self._pong is None and now - self._ping_at >= 30:
-                    self._pong = self._socket.ping(ack_on_close=False)
-                    self._ping_at = now
-                # Check journal ownership, storage health, and monitor liveness
-                # even on an otherwise quiet connection. check_live() verifies the
-                # whole journal only when its head changed; status() always would.
-                try:
-                    current = self._capture.check_live()
-                except JournalError:
-                    raise StreamError("private_stream_capture_invalid") from None
-                if current["phase"] == "DISCONNECTED":
-                    raise StreamError("private_stream_capture_invalid")
+                self._service(record_heartbeat=True)
                 try:
                     payload = self._socket.recv(timeout=1, decode=False)
                 except TimeoutError:
@@ -178,6 +159,73 @@ class PrivateStreamReceiver:
                 if not isinstance(error, Exception):
                     raise
                 raise StreamError(self._reason) from None
+
+    def _service(self, *, record_heartbeat):
+        self._tokens.maintain()
+        now = self._now()
+        if self._pong is not None:
+            if now - self._ping_at >= 15:
+                raise StreamError("private_stream_pong_expired")
+            if self._pong.is_set():
+                if record_heartbeat:
+                    self._capture.heartbeat()
+                self._pong = None
+        if self._pong is None and now - self._ping_at >= 30:
+            self._pong = self._socket.ping(ack_on_close=False)
+            self._ping_at = now
+        try:
+            current = self._capture.check_live()
+        except JournalError:
+            raise StreamError("private_stream_capture_invalid") from None
+        if current["phase"] == "DISCONNECTED":
+            raise StreamError("private_stream_capture_invalid")
+
+    def maintenance(self, *, record_heartbeat=True):
+        """Service tokens/pong without dequeuing data; bounded backpressure remains.
+
+        If heartbeat recording is paused, monitor liveness is not advanced by a
+        pong. This is only a short final-collection pause, never an unlimited lease.
+        """
+        if type(record_heartbeat) is not bool:
+            raise StreamError("invalid_stream_maintenance_option")
+        with self._lock:
+            if not self._running or self._closed:
+                raise StreamError("private_stream_not_running")
+            try:
+                self._service(record_heartbeat=record_heartbeat)
+            except BaseException as error:
+                self._reason = (
+                    str(error)
+                    if isinstance(error, StreamError)
+                    else "private_stream_receive_failed"
+                )
+                self._shutdown()
+                if not isinstance(error, Exception):
+                    raise
+                raise StreamError(self._reason) from None
+
+    @property
+    def journal(self):
+        return self._capture.journal
+
+    @property
+    def limiter(self):
+        return self._tokens.limiter
+
+    def rollover_ready(self, cash_book):
+        with self._lock:
+            if not self._running or self._closed:
+                raise StreamError("private_stream_not_running")
+            try:
+                self._capture.assert_rollover_ready(cash_book)
+            except SyncError as error:
+                if str(error) in {
+                    "rollover_collection_in_progress",
+                    "rollover_execution_not_booked",
+                }:
+                    return False
+                raise
+            return True
 
     def resync(
         self,
@@ -214,7 +262,21 @@ class PrivateStreamReceiver:
                 valuation_book=valuation_book,
                 incremental_cash=incremental_cash,
             )
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, SyncError) and str(error) in {
+                "stream_changed_during_collection",
+                "capture_changed_during_collection",
+                "resync_already_running",
+            }:
+                with self._lock:
+                    # A normal arriving event invalidates the attempt, not the
+                    # connection. Storage/delivery/posting failures still close it.
+                    if self._running and not self._closed:
+                        try:
+                            if self._capture.check_live()["phase"] != "DISCONNECTED":
+                                raise error
+                        except JournalError:
+                            pass
             if cash_book is not None or reservation_book is not None or valuation_book is not None:
                 with self._lock:
                     self._reason = (

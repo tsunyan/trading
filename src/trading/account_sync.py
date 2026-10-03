@@ -271,6 +271,7 @@ class AccountSyncMonitor:
                 "epoch": self._epoch,
                 "revision": self._revision,
                 "received_sequence": self._sequence,
+                "max_session_events": self._capacity,
                 "resync_required": not self._observed,
                 "history_gap_observed": self._gap,
                 "pending_positions": len(self._positions),
@@ -580,6 +581,13 @@ class AccountSyncMonitor:
                     quote = ValuationQuote.model_validate(
                         collected_quote.model_dump(warnings=False)
                     )
+            except SyncError as error:
+                # A normal event can invalidate the lookup before order reads,
+                # as well as after the final collection. Preserve that fence so
+                # the supervisor can retry without closing a healthy receiver.
+                if str(error) == "stream_changed_during_collection":
+                    raise
+                raise SyncError("sync_collection_failed") from None
             except Exception:
                 raise SyncError("sync_collection_failed") from None
             with self._lock:
