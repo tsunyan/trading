@@ -83,7 +83,8 @@ TLS検証は有効、環境のproxy/cert上書き・redirect・HTTP transportの
 uv run pytest tests/test_private_order.py tests/test_order_receipts.py tests/test_order_journal.py tests/test_account_guard.py tests/test_post_control.py -q
 ```
 
-新規の55試験で、固定ホスト・本文署名・両claim、3種類の受付、新規停止後の成行/指値決済、
+57試験で、固定ホスト・本文署名・両claim、3種類の受付、新規停止後の成行/指値決済、
 待機中の口座・気配期限切れ、許可・設定・コード・保存物の不一致、HTTP/応答/後片付けの障害を合成検証しました。
 実プロセスは注文claim後、HTTP応答後の保存前、受付commit後、POST完了commit前で終了させ、
 一度だけの模擬HTTPと未完了記録の保持を確認しました。実口座への注文結果の証拠ではありません。
+トークン限定の復旧後も、実口座台帳の紐付け・注文状態・許可期限・明示停止が変わらないことを確認しました。

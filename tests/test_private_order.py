@@ -162,6 +162,40 @@ def test_create_is_disabled_separate_and_permanently_bound(setup, tmp_path):
     assert offline.snapshot()["orders"] == [] and reads.scope == "synthetic"
 
 
+@pytest.mark.parametrize("halted", [False, True])
+def test_token_recovery_preserves_live_binding_and_does_not_enable_orders(setup, halted):
+    from trading.post_control import TOKEN_CONFIRMATIONS, TOKEN_QUIET_SECONDS
+
+    clock, reads, posts, journal = setup
+    order = ready(setup)
+    if halted:
+        journal.halt()
+    before = journal.snapshot()
+    binding = posts.execution_binding()
+    with pytest.raises(RuntimeError), posts.token_slot("POST"):
+        raise RuntimeError("synthetic")
+    saved = posts.snapshot()
+    clock.advance(TOKEN_QUIET_SECONDS)
+    posts.recover_token(
+        expected_revision=saved["revision"],
+        expected_reason=saved["reason"],
+        expected_claim=saved["claim"],
+        confirmations=TOKEN_CONFIRMATIONS,
+    )
+    fresh_posts = PersistentPostLimiter(posts.path.parent, reads, **clock.post_args())
+    fresh = LiveOrderJournal(journal.path.parent, fresh_posts, clock=lambda: clock.now)
+    assert fresh_posts.execution_binding() == binding
+    state = fresh.snapshot()
+    assert state["live_control"] == before["live_control"]
+    assert state["orders"] == before["orders"]
+    assert state["halted"] == halted
+    # The old approval has expired during the token quiet period; recovery
+    # neither renews it nor clears an explicit live stop.
+    assert not state["live_enabled"]
+    with pytest.raises(LiveOrderError, match="not_enabled"):
+        fresh.request(order.client_id)
+
+
 @pytest.mark.parametrize("damage", ["table", "row", "digest", "policy", "mode", "code"])
 def test_binding_policy_mode_and_code_damage_refuses_reopen(setup, damage, monkeypatch):
     clock, _, posts, journal = setup

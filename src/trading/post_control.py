@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from trading.broker_contracts import Contract
-from trading.private_stream_token import PrivateStreamLimiter, StreamError
+from trading.private_stream_token import PrivateStreamLimiter, StreamBusyError, StreamError
 from trading.read_control import PersistentReadLimiter
 from trading.storage_init import new_storage_directory
 
@@ -24,11 +24,27 @@ CREATE TABLE control (id INTEGER PRIMARY KEY CHECK(id=1),body TEXT NOT NULL,dige
 CREATE TABLE events (revision INTEGER PRIMARY KEY,kind TEXT NOT NULL,wall_ns INTEGER NOT NULL,
                      digest TEXT NOT NULL);
 """
-REASONS = {"created", "completed", "operator_stop", "operation_unknown", "clock_invalid"}
+REASONS = {
+    "created",
+    "completed",
+    "operator_stop",
+    "operation_unknown",
+    "clock_invalid",
+    "token_failed",
+    "token_recovered",
+}
+TOKEN_OPERATIONS = {"token_acquire", "token_renew", "token_delete"}
+# 60-minute broker expiry plus bounded pacing, request duration and clock skew.
+TOKEN_QUIET_SECONDS = 3660
+TOKEN_CONFIRMATIONS = frozenset({"token-only", "old-clients-closed", "expiry-waited"})
 
 
 class PostControlError(StreamError):
     """Fixed local codes only; no request, response or credential objects."""
+
+
+class PostBusyError(PostControlError, StreamBusyError):
+    pass
 
 
 class PostState(Contract):
@@ -41,7 +57,18 @@ class PostState(Contract):
     owner_inode: str = Field(pattern=r"^[1-9][0-9]*$")
     phase: Literal["READY", "IN_FLIGHT", "STOPPED"] = "READY"
     claim: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
-    operation: Literal["private_stream", "order", "close_order", "cancel"] | None = None
+    operation: (
+        Literal[
+            "private_stream",
+            "token_acquire",
+            "token_renew",
+            "token_delete",
+            "order",
+            "close_order",
+            "cancel",
+        ]
+        | None
+    ) = None
     request_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     wall_ns: int = Field(strict=True, ge=0, lt=2**63)
     revision: int = Field(default=0, strict=True, ge=0)
@@ -59,7 +86,10 @@ class PostState(Contract):
             raise ValueError("missing_post_claim")
         if self.operation in {"order", "close_order", "cancel"} and self.request_sha256 is None:
             raise ValueError("missing_post_request_digest")
-        if self.operation in {None, "private_stream"} and self.request_sha256 is not None:
+        if (
+            self.operation not in {"order", "close_order", "cancel"}
+            and self.request_sha256 is not None
+        ):
             raise ValueError("unexpected_post_request_digest")
         return self
 
@@ -88,11 +118,13 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         self.lock_path = self.path.parent / "post-owner.lock"
         self.reads, self._wall = reads, wall_ns
         self._instance = None
+        self._generation = None
         self._failed = False
         self._active_claim = None
         self._active_thread = None
         with self._transaction() as conn:
             state = self._state(conn)
+            self._generation = self._epoch(conn)
         self._instance = state.instance
         self._binding(state)
 
@@ -156,7 +188,14 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             self._failed = True
             raise PostControlError("post_control_storage_failed") from None
 
+    def _epoch(self, conn):
+        return conn.execute(
+            "SELECT COALESCE(MAX(revision),-1) FROM events WHERE kind='TOKEN_RECOVERED'"
+        ).fetchone()[0]
+
     def _state(self, conn):
+        if self._generation is not None and self._generation != self._epoch(conn):
+            raise PostControlError("new_post_control_required")
         try:
             rows = conn.execute("SELECT id,body,digest FROM control LIMIT 2").fetchall()
             if len(rows) != 1 or rows[0][0] != 1:
@@ -204,7 +243,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             raise PostControlError("post_owner_file_changed")
 
     @contextmanager
-    def _ownership(self):
+    def _ownership(self, *, wait_seconds=0):
         with self._transaction() as conn:
             state = self._state(conn)
         try:
@@ -214,19 +253,31 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             raise PostControlError("post_owner_unavailable") from None
         with handle:
             self._verify_owner(state, handle)
-            try:
-                if os.name == "nt":
-                    import msvcrt
+            started = self.check() if wait_seconds else None
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
 
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                elif os.name == "posix":
-                    import fcntl
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    elif os.name == "posix":
+                        import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                else:
-                    raise PostControlError("post_owner_platform_unsupported")
-            except OSError:
-                raise PostControlError("post_owner_busy") from None
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        raise PostControlError("post_owner_platform_unsupported")
+                    break
+                except OSError:
+                    if not wait_seconds:
+                        raise PostBusyError("post_owner_busy") from None
+                    elapsed = self.check() - started
+                    if elapsed >= wait_seconds - 1e-9:
+                        raise PostBusyError("post_owner_busy") from None
+                    self._sleep(min(0.05, wait_seconds - elapsed))
+                    # An injected/nonadvancing wait must not spin indefinitely.
+                    if self.check() - started <= elapsed:
+                        self.stop("clock_invalid")
+                        raise PostControlError("post_control_clock_invalid") from None
             try:
                 self._verify_owner(state, handle)
                 handle.seek(0)
@@ -262,14 +313,71 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         return updated
 
     def stop(self, reason="operator_stop"):
-        if reason not in {"operator_stop", "operation_unknown", "clock_invalid"}:
+        if reason not in {"operator_stop", "operation_unknown", "clock_invalid", "token_failed"}:
             raise PostControlError("invalid_post_stop_reason")
         self._stopped = True
         with self._transaction() as conn:
             state = self._state(conn)
-            if state.phase == "STOPPED" and reason != "clock_invalid":
-                return
+            if state.phase == "STOPPED":
+                if state.reason == "clock_invalid" or reason not in {
+                    "operator_stop",
+                    "clock_invalid",
+                }:
+                    return
+                if state.reason == reason:
+                    return
             self._write(conn, state, "STOPPED", phase="STOPPED", reason=reason)
+
+    def fail_token(self, error=None):
+        if not isinstance(error, StreamBusyError):
+            self.stop(
+                "clock_invalid" if str(error) == "stream_token_clock_invalid" else "token_failed"
+            )
+
+    def recover_token(self, *, expected_revision, expected_reason, expected_claim, confirmations):
+        """Only expired token uncertainty; never resolve trade or legacy claims."""
+        if frozenset(confirmations) != TOKEN_CONFIRMATIONS:
+            raise PostControlError("explicit_token_recovery_confirmations_required")
+        with self._ownership():
+            with self._transaction() as conn:
+                state = self._state(conn)
+                self._binding(state)
+                self._execution_binding(conn)
+                now = self._now(state)
+                if (
+                    state.revision != expected_revision
+                    or state.reason != expected_reason
+                    or state.claim != expected_claim
+                ):
+                    raise PostControlError("post_recovery_checkpoint_changed")
+                eligible = (
+                    state.claim is not None
+                    and state.operation in TOKEN_OPERATIONS
+                    and state.phase in {"IN_FLIGHT", "STOPPED"}
+                    and state.reason not in {"operator_stop", "clock_invalid"}
+                ) or (
+                    state.phase == "STOPPED"
+                    and state.claim is None
+                    and state.reason == "token_failed"
+                )
+                if not eligible:
+                    raise PostControlError("post_token_recovery_refused")
+                if now < state.wall_ns + TOKEN_QUIET_SECONDS * 1_000_000_000:
+                    raise PostControlError("post_token_expiry_wait_required")
+                self._write(
+                    conn,
+                    state,
+                    "TOKEN_RECOVERED",
+                    phase="READY",
+                    claim=None,
+                    operation=None,
+                    request_sha256=None,
+                    reason="token_recovered",
+                    wall_ns=now,
+                )
+        # Even this operator handle cannot send after recovery. Reopen it and
+        # create fresh token clients; other old handles fail the epoch check.
+        self._stopped = True
 
     def check(self):
         try:
@@ -410,7 +518,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
                 self._write(conn, state, "EXECUTION_BOUND", wall_ns=self._now(state))
 
     @contextmanager
-    def operation(self, kind, *, request_sha256=None):
+    def operation(self, kind, *, request_sha256=None, _wait_seconds=0):
         # Validate metadata before acquiring ownership or consuming a claim.
         PostState(
             instance="0" * 32,
@@ -425,7 +533,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             operation=kind,
             request_sha256=request_sha256,
         )
-        with self._ownership() as handle:
+        with self._ownership(wait_seconds=_wait_seconds) as handle:
             self.check()
             with self._transaction() as conn:
                 state = self._state(conn)
@@ -498,15 +606,27 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         with self.operation("private_stream"):
             yield
 
+    @contextmanager
+    def token_slot(self, method):
+        kinds = {"POST": "token_acquire", "PUT": "token_renew", "DELETE": "token_delete"}
+        if method not in kinds:
+            raise PostControlError("invalid_token_method")
+        with self.operation(kinds[method], _wait_seconds=3):
+            yield
+
 
 def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("init", "status", "stop"))
+    parser.add_argument("command", choices=("init", "status", "stop", "recover-token"))
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
+    parser.add_argument("--expected-revision", type=int)
+    parser.add_argument("--expected-reason")
+    parser.add_argument("--expected-claim")
+    parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         reads = PersistentReadLimiter(args.read_control_directory, args.scope)
@@ -517,6 +637,14 @@ def main(argv=None):
         )
         if args.command == "stop":
             control.stop()
+        if args.command == "recover-token":
+            control.recover_token(
+                expected_revision=args.expected_revision,
+                expected_reason=args.expected_reason,
+                expected_claim=args.expected_claim,
+                confirmations=args.confirm,
+            )
+            control = PersistentPostLimiter(args.directory, reads)
         print(json.dumps(control.snapshot(), ensure_ascii=False))
     except (ValueError, OSError, sqlite3.Error):
         parser.exit(2, "private_post_control_failed\n")
