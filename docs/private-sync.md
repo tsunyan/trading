@@ -4,7 +4,7 @@
 口座Reader、Private受信・継続同期を組み合わせます。起動・正常終了・認証失敗・通知と約定計上・
 応答しないREST処理・復旧を合成通信で検証しています。実キー・実口座での受入は未実施です。
 
-`init`・`status`・`recover`・`init-orders`・`register-order`はキーを読み込まず、業者へ通信しません。
+`init`・`status`・`recover`・`init-orders`・`register-order`・`register-live-orders`はキーを読み込まず、業者へ通信しません。
 `run`は明示指定したWindows資格情報を読み、GET口座取得とWebSocket用のトークン操作・購読を行います。
 `reconcile-stopped`は保存済み約定について既知注文のGET照合・計上を行います。
 注文送信や戦略判断はありません。[独立監視とWindows障害通知](private-operations.md)を利用できます。
@@ -124,6 +124,12 @@ uv run python -m trading.private_sync init-orders --directory runs/private-sync 
 OS所有権が使用中なら拒否します。元の既知注文だけを種として保存し、固定設定のハッシュと停止状態は
 維持します。カタログ作成後、manifest保存前に中断した場合は同じカタログを検査して移行を完了します。
 新形式で紐付け済みのカタログが欠落した場合、旧環境として作り直すことはありません。
+
+同じGET・POST制御に専用発注台帳が紐付いている場合は、[発注台帳からの注文登録](live-order-catalog.md)を
+同期開始前と各注文取得前に自動使用します。保存済み受付・照合から業者IDと元の注文意図を検査し、
+稼働中に追加された注文も追跡します。`register-live-orders`で通信なしの登録もできます。
+取得後に受付・過去約定との一致も検査し、矛盾や同期失敗では紐付いた発注台帳を停止します。
+発注台帳の状態・口座リスク証拠は自動更新せず、停止解除や発注許可へ変換しません。
 
 ## 実行と終了
 

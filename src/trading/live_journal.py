@@ -32,8 +32,9 @@ from trading.broker_contracts import (
     order_request,
     validate_evidence,
 )
+from trading.known_orders import KnownOrder
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
-from trading.order_receipts import CancellationReceipt
+from trading.order_receipts import CancellationReceipt, SubmissionReceipt
 from trading.post_control import PersistentPostLimiter
 from trading.storage_init import new_storage_directory
 
@@ -794,6 +795,162 @@ class LiveOrderJournal(OrderJournal):
     def reconcile(self, evidence):
         with self._mutation():
             return super().reconcile(evidence)
+
+    def catalog_orders(self):
+        """Export positively identified orders for reads; never infer execution completeness."""
+        with self._transaction() as conn:
+            state = self._live_state(conn)
+            orders, unidentified, identities, roots = [], [], set(), set()
+            history = {}
+            for event in conn.execute(
+                "SELECT id,client_id,kind,payload_json FROM events "
+                "WHERE kind IN ('PREPARED','SUBMITTING','SUBMISSION_ACK','RECONCILED') ORDER BY id"
+            ):
+                history.setdefault(event["client_id"], {}).setdefault(event["kind"], []).append(
+                    event
+                )
+            for row in conn.execute("SELECT * FROM orders ORDER BY client_id"):
+                client_id = row["client_id"]
+                intent = OrderIntent.model_validate_json(row["intent_json"])
+                plan = order_request(intent, state.limits)
+                events = history.get(client_id, {})
+                prepared, submitted = events.get("PREPARED", []), events.get("SUBMITTING", [])
+                acknowledgments = events.get("SUBMISSION_ACK", [])
+                if len(acknowledgments) > 1:
+                    raise LiveOrderError("live_catalog_order_integrity_failed")
+                receipt = (
+                    SubmissionReceipt.model_validate_json(acknowledgments[0]["payload_json"])
+                    if acknowledgments
+                    else None
+                )
+                evidence = (
+                    OrderEvidence.model_validate_json(row["evidence_json"])
+                    if row["evidence_json"] is not None
+                    else None
+                )
+                if (
+                    intent.client_id != client_id
+                    or len(prepared) != 1
+                    or json.loads(prepared[0]["payload_json"])
+                    != {"path": plan.path, "body": json.loads(plan.body)}
+                ):
+                    raise LiveOrderError("live_catalog_order_integrity_failed")
+                if row["state"] in {"PREPARED", "ABANDONED"}:
+                    if submitted or receipt is not None or evidence is not None:
+                        raise LiveOrderError("live_catalog_order_integrity_failed")
+                    continue
+                if row["state"] not in {
+                    "SUBMITTING",
+                    "RECONCILING",
+                    "UNKNOWN",
+                    "WORKING",
+                    "PARTIAL",
+                    "CANCEL_PENDING",
+                    "FILLED",
+                    "CANCELED",
+                    "EXPIRED",
+                } or (
+                    row["state"] not in {"SUBMITTING", "RECONCILING", "UNKNOWN"}
+                    and evidence is None
+                ):
+                    raise LiveOrderError("live_catalog_order_integrity_failed")
+                if (
+                    len(submitted) != 1
+                    or json.loads(submitted[0]["payload_json"]) != {}
+                    or submitted[0]["id"] <= prepared[0]["id"]
+                ):
+                    raise LiveOrderError("live_catalog_order_integrity_failed")
+                if receipt is not None:
+                    if receipt.intent != intent or acknowledgments[0]["id"] <= submitted[0]["id"]:
+                        raise LiveOrderError("live_catalog_order_integrity_failed")
+                if evidence is not None:
+                    validate_evidence(evidence)
+                    reconciled = events.get("RECONCILED", [])
+                    saved = reconciled[-1] if reconciled else None
+                    if (
+                        evidence.intent != intent
+                        or saved is None
+                        or saved["id"] <= submitted[0]["id"]
+                        or json.loads(saved["payload_json"])["evidence"]
+                        != evidence.model_dump(mode="json")
+                    ):
+                        raise LiveOrderError("live_catalog_order_integrity_failed")
+                    if receipt is not None:
+                        self._check_receipt_evidence(receipt, evidence)
+                identified = receipt if receipt is not None else evidence
+                if identified is None:
+                    if row["state"] not in {"SUBMITTING", "UNKNOWN"}:
+                        raise LiveOrderError("live_catalog_order_integrity_failed")
+                    unidentified.append(client_id)
+                    continue
+                if identified.order_id in identities or identified.root_order_id in roots:
+                    raise LiveOrderError("live_catalog_broker_identity_reused")
+                identities.add(identified.order_id)
+                roots.add(identified.root_order_id)
+                orders.append(
+                    {
+                        "order": KnownOrder(order_id=identified.order_id, intent=intent).model_dump(
+                            mode="json"
+                        ),
+                        "source_ref": f"live/{state.instance}/"
+                        + self._checkpoint(identified.model_dump(mode="json")),
+                    }
+                )
+            return {
+                "instance": state.instance,
+                "read_instance": state.read_instance,
+                "post_instance": state.post_instance,
+                "scope": state.scope,
+                "orders": orders,
+                "unidentified_client_ids": unidentified,
+                "complete": False,
+                "live_enabled": False,
+            }
+
+    def verify_catalog_evidence(self, reports):
+        """Check read reports against saved live receipts/history without changing lifecycle."""
+        with self._transaction() as conn:
+            for raw in reports:
+                report = OrderReadReport.model_validate(raw.model_dump())
+                evidence = report.evidence
+                validate_evidence(evidence)
+                row = conn.execute(
+                    "SELECT * FROM orders WHERE client_id=?", (evidence.intent.client_id,)
+                ).fetchone()
+                if row is None:
+                    continue  # An independently declared external order remains a catalog input.
+                if OrderIntent.model_validate_json(row["intent_json"]) != evidence.intent:
+                    raise LiveOrderError("live_catalog_read_intent_mismatch")
+                receipt = self._receipt(conn, evidence.intent.client_id)
+                if receipt is not None:
+                    self._check_receipt_evidence(receipt, evidence)
+                previous = (
+                    OrderEvidence.model_validate_json(row["evidence_json"])
+                    if row["evidence_json"] is not None
+                    else None
+                )
+                if previous is None and receipt is None:
+                    raise LiveOrderError("live_catalog_read_identity_required")
+                if previous is not None:
+                    old = {e.execution_id: e for e in previous.executions}
+                    new = {e.execution_id: e for e in evidence.executions}
+                    if (
+                        (previous.root_order_id, previous.order_id)
+                        != (evidence.root_order_id, evidence.order_id)
+                        or evidence.observed_at < previous.observed_at
+                        or any(new.get(key) != value for key, value in old.items())
+                        or previous.status in {"EXECUTED", "CANCELED", "EXPIRED"}
+                        and evidence.status != previous.status
+                        or previous.executions_complete
+                        and previous.status in {"EXECUTED", "CANCELED", "EXPIRED"}
+                        and evidence.executions != previous.executions
+                        or evidence.observed_at == previous.observed_at
+                        and evidence.model_copy(
+                            update={"executions_complete": previous.executions_complete}
+                        )
+                        != previous
+                    ):
+                        raise LiveOrderError("live_catalog_read_history_mismatch")
 
     def order_recovery_context(self, client_id):
         """Local checkpoint for GET investigation; never infer an absent order."""

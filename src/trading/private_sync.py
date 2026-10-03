@@ -21,6 +21,7 @@ from trading.event_capture import JournaledEventCapture
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
+from trading.live_order_catalog import LiveOrderCatalogSource
 from trading.post_control import PersistentPostLimiter
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
@@ -113,7 +114,7 @@ def load_plan(path):
 class _ReaderOwner:
     """One REST worker; deferred close never blocks its caller on a hung callback."""
 
-    def __init__(self, client, plan, *, clock, monotonic, order_lookup=None):
+    def __init__(self, client, plan, *, clock, monotonic, order_lookup=None, order_verify=None):
         self.client, self.plan = client, plan
         self.clock, self.monotonic = clock, monotonic
         self._lock = threading.Lock()
@@ -122,6 +123,7 @@ class _ReaderOwner:
         self._deadline = None
         self._orders = {o.order_id: o.intent for o in plan.known_orders}
         self._lookup = order_lookup
+        self._verify = order_verify
 
     def get(self, request):
         if self._deadline is None or self.monotonic() >= self._deadline:
@@ -153,9 +155,14 @@ class _ReaderOwner:
         if any(identity not in orders for identity in ids):
             raise PrivateSyncError("sync_order_intent_missing")
         reader = AccountReader(self, clock=self.clock)
-        return self._call(
+        reports = self._call(
             lambda: tuple(reader.collect_order(orders[identity], identity) for identity in ids)
         )
+        if self._verify is not None:
+            self._verify(reports)
+            if self.monotonic() >= self._deadline:
+                raise PrivateSyncError("sync_collection_deadline")
+        return reports
 
     def reservations(self):
         """Discover active IDs, then read declared intents before the final account."""
@@ -395,6 +402,29 @@ class PrivateSyncWorkspace:
             intent_confirmed=intent_confirmed,
         )
 
+    def _order_lookup(self, reads, posts):
+        if posts is not None and posts.execution_binding() is not None:
+            if self.catalog is None or not self._catalog_bound:
+                raise PrivateSyncError("sync_live_catalog_required")
+            source = LiveOrderCatalogSource(posts, self.catalog, clock=self.clock)
+            return source.lookup, source.verify_reports, source.halt
+        return (self.catalog.lookup if self.catalog is not None else None), None, None
+
+    def register_live_orders(self, *, expected_plan_sha256, expected_catalog_head):
+        """Local refresh from the permanently bound execution journal; no new declarations."""
+        self._check_plan(expected_plan_sha256)
+        if self.catalog is None or not self._catalog_bound:
+            raise PrivateSyncError("sync_live_catalog_required")
+        reads = self._reads()
+        posts = self._posts(reads)
+        if posts is None:
+            raise PrivateSyncError("sync_live_binding_required")
+        if expected_catalog_head is None:
+            raise PrivateSyncError("sync_catalog_checkpoint_required")
+        return LiveOrderCatalogSource(posts, self.catalog, clock=self.clock).refresh(
+            expected_head=expected_catalog_head
+        )
+
     def status(self):
         self._check_manifest()
         catalog = self.catalog.snapshot() if self.catalog is not None else None
@@ -478,14 +508,15 @@ class PrivateSyncWorkspace:
             ids = tuple(sorted({event.execution_order_id for event in events}))
             if len(ids) > 1000:
                 raise PrivateSyncError("sync_reconciliation_capacity")
-            # Unknown mappings are refused before credential access or GETs.
-            if self.catalog is not None:
-                self.catalog.lookup(ids)
-            elif any(i not in {o.order_id for o in self.plan.known_orders} for i in ids):
-                raise PrivateSyncError("sync_order_intent_missing")
             reads = self._reads(**(read_clocks or {}))
             if reads.status()["blocked"]:
                 raise PrivateSyncError("sync_dependencies_blocked")
+            lookup, verify, stop_live = self._order_lookup(reads, self._posts(reads))
+            # Verified live identities are refreshed before credential access or GETs.
+            if lookup is not None:
+                lookup(ids)
+            elif any(i not in {o.order_id for o in self.plan.known_orders} for i in ids):
+                raise PrivateSyncError("sync_order_intent_missing")
             booking = None
             if events:
                 vault = vault if vault is not None else CredentialVault()
@@ -504,7 +535,8 @@ class PrivateSyncWorkspace:
                     self.plan,
                     clock=self.clock,
                     monotonic=self.monotonic,
-                    order_lookup=self.catalog.lookup if self.catalog is not None else None,
+                    order_lookup=lookup,
+                    order_verify=verify,
                 )
                 try:
                     deadline = self.monotonic() + self.plan.collection_limit_seconds
@@ -530,8 +562,17 @@ class PrivateSyncWorkspace:
                         if self.monotonic() >= deadline:
                             raise PrivateSyncError("sync_collection_deadline")
                         booking = self.book.apply(batch)
+                except BaseException:
+                    if stop_live is not None:
+                        stop_live()
+                    raise
                 finally:
-                    owner.close()
+                    try:
+                        owner.close()
+                    except BaseException:
+                        if stop_live is not None:
+                            stop_live()
+                        raise
             return {
                 **self.status(),
                 "reconciled_notice_count": len(events),
@@ -573,12 +614,17 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("sync_dependencies_blocked")
         if limiter is None:
             limiter = PrivateStreamLimiter(monotonic=self.monotonic, sleep=stream_sleep)
+        lookup, verify, stop_live = self._order_lookup(
+            reads, limiter if isinstance(limiter, PersistentPostLimiter) else None
+        )
         owner = None
 
         def factory(journal, shared):
             nonlocal owner
             if stop_event.is_set():
                 raise PrivateSyncError("sync_start_cancelled")
+            if lookup is not None:
+                lookup(())  # Check/export the bound source before native credential access.
             credentials = vault.load(reads, self.plan.credential_reference)
             if stop_event.is_set():
                 raise PrivateSyncError("sync_start_cancelled")
@@ -597,7 +643,8 @@ class PrivateSyncWorkspace:
                     self.plan,
                     clock=self.clock,
                     monotonic=self.monotonic,
-                    order_lookup=self.catalog.lookup if self.catalog is not None else None,
+                    order_lookup=lookup,
+                    order_verify=verify,
                 )
             capture = JournaledEventCapture(
                 journal, clock=self.clock, monotonic_ns=lambda: int(self.monotonic() * 1e9)
@@ -647,7 +694,18 @@ class PrivateSyncWorkspace:
             finally:
                 self.journal = runner.journal
                 if owner is not None:
-                    owner.close()
+                    try:
+                        owner.close()
+                    except BaseException:
+                        if stop_live is not None:
+                            stop_live()
+                        raise
+                if stop_live is not None:
+                    try:
+                        if self.control.snapshot()["phase"] == "STOPPED":
+                            stop_live()
+                    except (ValueError, OSError):
+                        stop_live()
         return self.status()
 
 
@@ -668,6 +726,7 @@ def main(argv=None):
             "recover",
             "init-orders",
             "register-order",
+            "register-live-orders",
             "reconcile-stopped",
             "confirm-read-binding",
         ),
@@ -723,6 +782,11 @@ def main(argv=None):
                     expected_catalog_head=args.expected_catalog_head,
                     source_ref=args.source_ref,
                     intent_confirmed=args.intent_confirmed,
+                )
+            elif args.command == "register-live-orders":
+                result = workspace.register_live_orders(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_catalog_head=args.expected_catalog_head,
                 )
             elif args.command == "reconcile-stopped":
                 result = workspace.reconcile_stopped(
