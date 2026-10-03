@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -28,10 +29,10 @@ from trading.post_control import PersistentPostLimiter, PostBusyError
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClient
-from trading.private_supervisor import PrivateStreamSupervisor, SupervisorPolicy
+from trading.private_supervisor import PrivateStreamSupervisor, SupervisorError, SupervisorPolicy
 from trading.read_control import PersistentReadLimiter
 from trading.segmented_journal import SegmentedEventJournal
-from trading.stream_control import StreamControl
+from trading.stream_control import StreamControl, StreamControlError
 from trading.wire_validation import unique_object
 
 MAX_PLAN_BYTES = 262_144
@@ -851,8 +852,12 @@ def main(argv=None):
             else:
                 result = workspace.status()
         print(json.dumps({"ok": True, **result}, default=str))
-    except Exception:
-        parser.exit(2, "Private sync failed; inspect local control state.\n")
+    except Exception as error:
+        # These types carry fixed local codes only; anything else stays generic.
+        reason = str(error)
+        known = isinstance(error, (PrivateSyncError, StreamControlError, SupervisorError))
+        suffix = f" reason={reason}" if known and re.fullmatch(r"[a-z0-9_]{1,64}", reason) else ""
+        parser.exit(2, f"Private sync failed; inspect local control state.{suffix}\n")
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

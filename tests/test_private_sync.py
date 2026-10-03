@@ -2,6 +2,7 @@
 
 import ctypes
 import json
+import re
 import socket
 import sqlite3
 import threading
@@ -814,3 +815,30 @@ def test_cli_status_and_explicit_recovery_are_local_and_keep_fresh_start_require
     result = json.loads(capsys.readouterr().out)
     assert result["control"]["phase"] == "READY" and result["control"]["generation"] == 2
     assert result["live_enabled"] is False and backend.reads == []
+
+
+def test_cli_failure_shows_only_fixed_local_reason_codes(setup, capsys):
+    _, _, _, _, _, workspace = setup
+    with pytest.raises(SystemExit) as result:
+        main(
+            [
+                "run",
+                "--directory",
+                str(workspace.directory),
+                "--expected-plan-sha256",
+                "f" * 64,
+                "--expected-revision",
+                "0",
+                "--expected-head",
+                workspace.journal.head(),
+                "--duration-seconds",
+                "60",
+                "--read-only-confirmed",
+            ]
+        )
+    assert result.value.code == 2
+    err = capsys.readouterr().err
+    assert "Private sync failed" in err and " reason=" in err
+    assert re.fullmatch(
+        r"Private sync failed; inspect local control state\. reason=[a-z0-9_]+\n", err
+    )
