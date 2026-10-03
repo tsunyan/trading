@@ -1041,6 +1041,101 @@ class ExecutionCashBook:
             **_transfer_result(totals["transfer_info"], totals["transfers"]),
         }
 
+    def match_booked_events(self, source: tuple[AccountEvent, ...]):
+        """Check notices against durable booking proof, never fresh REST evidence.
+
+        Only fully filled orders with a saved EXECUTED report may be omitted from
+        subsequent collection. Partial orders remain eligible for fresh retrieval.
+        A conflicting known execution persists a stop, as apply() does.
+        """
+        if not isinstance(source, tuple) or len(source) > 2000:
+            raise CashBookError("cash_book_lookup_capacity")
+        try:
+            body = _json(source)
+            if len(body.encode()) > MAX_PROOF:
+                raise CashBookError("cash_book_lookup_capacity")
+            events = tuple(AccountEvent.model_validate(item) for item in _load(body))
+            if any(e.channel != "executionEvents" or e.execution is None for e in events):
+                raise ValueError
+            if len({e.entity_id for e in events}) != len(events):
+                raise ValueError
+        except CashBookError:
+            raise
+        except Exception:
+            raise CashBookError("cash_book_input_invalid") from None
+        conflict, result = self._retry_busy(lambda: self._match_booked_events(events))
+        if conflict:
+            raise CashBookError("cash_book_identity_conflict")
+        return result
+
+    def _match_booked_events(self, events):
+        conflict = False
+        with self._transaction(write=True) as conn:
+            meta, records, totals = self._verify(conn)
+            if meta["halted"]:
+                raise CashBookError("cash_book_halted")
+            proof_by_execution, last_order_proof = {}, {}
+            for identity, proof_id in conn.execute(
+                "SELECT execution_id,proof_id FROM executions ORDER BY sequence"
+            ):
+                proof_by_execution[identity] = proof_id
+                last_order_proof[records[identity].order_id] = proof_id
+            proofs = {}
+
+            def proof(proof_id):
+                if proof_id not in proofs:
+                    stored = conn.execute(
+                        "SELECT body FROM proofs WHERE id=?", (proof_id,)
+                    ).fetchone()
+                    proofs[proof_id] = ExecutionCashBatch.model_validate(_load(stored[0]))
+                return proofs[proof_id]
+
+            matched = []
+            for event in events:
+                if event.entity_id not in records:
+                    continue
+                original = next(
+                    e
+                    for e in proof(proof_by_execution[event.entity_id]).events
+                    if e.entity_id == event.entity_id
+                )
+                # Different JSON spellings may have the same normalized values;
+                # the payload digest alone is not a financial identity conflict.
+                if event.model_dump(exclude={"payload_sha256"}) != original.model_dump(
+                    exclude={"payload_sha256"}
+                ):
+                    conflict = True
+                else:
+                    matched.append(event.entity_id)
+            if conflict:
+                conn.execute(
+                    "UPDATE book SET halted=1,reason='cash_book_identity_conflict' WHERE id=1"
+                )
+            units = {}
+            for record in records.values():
+                units[record.order_id] = units.get(record.order_id, 0) + record.execution.units
+            complete = []
+            requested = {e.execution_order_id for e in events if e.entity_id in matched}
+            for order_id in sorted(requested):
+                latest = next(
+                    r
+                    for r in proof(last_order_proof[order_id]).reports
+                    if r.evidence.order_id == order_id
+                ).evidence
+                if latest.status == "EXECUTED" and units[order_id] == latest.intent.units:
+                    complete.append(order_id)
+            result = {
+                "instance": meta["instance"],
+                "scope": self.scope,
+                "head": _public_head(meta["head"], totals["transfer_info"]),
+                "booked_execution_ids": tuple(sorted(matched)),
+                "fully_booked_order_ids": tuple(complete),
+                "historical_evidence_only": True,
+                "complete": False,
+                "live_enabled": False,
+            }
+        return conflict, result
+
     @staticmethod
     def _account_report(source: AccountReadReport, clock_skew_ms):
         try:

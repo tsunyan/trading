@@ -260,8 +260,13 @@ class JournaledEventCapture:
         collect_quote=None,
         valuation_policy=None,
         valuation_book=None,
+        incremental_cash=None,
     ):
         with self._lock:
+            if incremental_cash is None:
+                incremental_cash = cash_book is not None
+            if type(incremental_cash) is not bool or (incremental_cash and cash_book is None):
+                raise SyncError("incremental_cash_requires_explicit_book")
             if cash_book is not None:
                 self._check_cash_book(cash_book)
                 if collect_orders is None:
@@ -294,12 +299,15 @@ class JournaledEventCapture:
             collect_reservations=collect_reservations,
             collect_quote=collect_quote,
             valuation_policy=valuation_policy,
+            cash_book_for_lookup=cash_book if incremental_cash else None,
         )
         with self._lock:
             view = self._ready()
             current = self._monitor.status()
             if session != self._session or current["revision"] != result.revision:
                 raise SyncError("capture_changed_during_collection")
+            if incremental_cash and cash_book.snapshot()["head"] != result.booked_cash_head:
+                raise SyncError("cash_book_changed_during_collection")
             execution_cash = None
             reconciliation = result.execution_reconciliation
             if (

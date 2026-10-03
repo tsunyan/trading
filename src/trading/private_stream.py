@@ -190,6 +190,7 @@ class PrivateStreamReceiver:
         collect_quote=None,
         valuation_policy=None,
         valuation_book=None,
+        incremental_cash=None,
     ):
         with self._lock:
             if not self._running or self._closed:
@@ -211,6 +212,7 @@ class PrivateStreamReceiver:
                 collect_quote=collect_quote,
                 valuation_policy=valuation_policy,
                 valuation_book=valuation_book,
+                incremental_cash=incremental_cash,
             )
         except BaseException:
             if cash_book is not None or reservation_book is not None or valuation_book is not None:
