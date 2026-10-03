@@ -1,0 +1,10 @@
+{
+  "interval_seconds": 300,
+  "cycle_timeout_seconds": 240,
+  "attempt_timeout_seconds": 180,
+  "max_attempts": 3,
+  "backoff_seconds": 5,
+  "max_backoff_seconds": 30,
+  "failure_alert_threshold": 3,
+  "stale_after_seconds": 900
+}
