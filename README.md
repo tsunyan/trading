@@ -5,6 +5,8 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 
 採用方針と根拠は [docs/architecture.md](docs/architecture.md)、現在の不足機能と実装順は
 [docs/roadmap.md](docs/roadmap.md) を参照してください。
+USD/JPYの実用化に向けた進行中の作業は [docs/fx-practical-plan.md](docs/fx-practical-plan.md)、
+定期観測・watchdog・Windows通知の使い方は [docs/paper-operations.md](docs/paper-operations.md) を参照してください。
 
 ## 実装済みの範囲
 
@@ -42,6 +44,9 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 開始残高・履歴完全性・全口座会計の確認は残り、発注許可には変換しません。
 [同期モニターからの現金計上](docs/execution-cash-sync.md)では、明示指定した台帳へ照合済み約定を渡します。
 通知の到着・古い取得・世代引継ぎを拒否し、計上後の途中終了でも再実行による二重計上を防ぎます。
+台帳の明示指定時は完全計上済み注文の再取得を省き、部分約定・新しい通知は取得を継続します。
+[履歴を保存した区間切替](docs/segmented-journal.md)では、同じDB内に旧区間を保存し、
+未確認ACK・未計上約定を拒否して明示的な接続更新ができます。自動切替の運用ランナーは未実装です。
 [約定からの建玉会計](docs/execution-positions.md)では、開始建玉を宣言した台帳で数量・取得価格・決済損益を検証します。
 部分決済と再起動に対応し、RESTとの差を補正せず表示します。
 [建玉拘束数量の照合](docs/position-reservations.md)では、決済割当から計上済み約定を引き、RESTの拘束数量と比較します。
