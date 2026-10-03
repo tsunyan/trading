@@ -32,6 +32,7 @@ from trading.private_sync import (
     main,
 )
 from trading.read_control import PersistentReadLimiter
+from trading.segmented_journal import SegmentedEventJournal
 from trading.stream_control import StreamControl, StreamControlError
 
 KEY, SECRET = "synthetic-sync-key", "synthetic-sync-secret"
@@ -46,7 +47,7 @@ def no_native_or_network(monkeypatch):
     monkeypatch.setattr(socket, "socket", forbidden)
 
 
-def make_setup(tmp_path, **plan_options):
+def make_setup(tmp_path, *, legacy_catalog=False, **plan_options):
     clock = Clock()
     read_clocks = {
         "wall_ns": lambda: int(clock.wall.timestamp() * 1e9),
@@ -57,7 +58,7 @@ def make_setup(tmp_path, **plan_options):
     backend = MemoryBackend()
     vault = CredentialVault(backend)
     reference = vault.save(reads, SecretStr(KEY), SecretStr(SECRET), read_only_confirmed=True)
-    ExecutionCashBook.create(
+    book = ExecutionCashBook.create(
         tmp_path / "cash",
         "synthetic",
         OpeningCash(balance="1000000", cutoff=clock.wall - timedelta(seconds=1)),
@@ -70,9 +71,26 @@ def make_setup(tmp_path, **plan_options):
         credential_reference=reference,
         **plan_options,
     )
-    workspace = PrivateSyncWorkspace.create(
-        tmp_path / "sync", plan, clock=lambda: clock.wall, monotonic=lambda: clock.mono
-    )
+    if legacy_catalog:
+        directory = tmp_path / "sync"
+        directory.mkdir()
+        journal = SegmentedEventJournal.create(directory / "journal", plan.scope)
+        control = StreamControl.create(directory / "control", journal, book)
+        instance = control.snapshot()["instance"]
+        manifest = {
+            "plan": plan.model_dump(mode="json"),
+            "sha256": private_sync._digest(plan),
+            "control_instance": instance,
+        }
+        (directory / "sync-plan.json").write_text(private_sync._canonical(manifest))
+        reads.bind_stream(instance)
+        workspace = PrivateSyncWorkspace(
+            directory, clock=lambda: clock.wall, monotonic=lambda: clock.mono
+        )
+    else:
+        workspace = PrivateSyncWorkspace.create(
+            tmp_path / "sync", plan, clock=lambda: clock.wall, monotonic=lambda: clock.mono
+        )
     return clock, read_clocks, reads, backend, vault, workspace
 
 
@@ -202,14 +220,14 @@ def test_read_auth_failure_persists_both_stops_and_never_resumes(setup):
     assert len(backend.reads) == count
 
 
-def test_notified_known_order_is_really_read_and_booked_once(tmp_path, monkeypatch):
+def test_order_registered_during_capture_is_really_read_and_booked_once(tmp_path, monkeypatch):
     known = KnownOrder(
         order_id=201,
         intent=OrderIntent(
             client_id="DemoOpen", side="BUY", effect="OPEN", units=1000, kind="LIMIT", price="150"
         ),
     )
-    clock, read_clocks, _, _, vault, workspace = make_setup(tmp_path, known_orders=(known,))
+    clock, read_clocks, _, _, vault, workspace = make_setup(tmp_path)
     row = execution(
         executionSize="1000",
         orderExecutedSize="1000",
@@ -272,8 +290,20 @@ def test_notified_known_order_is_really_read_and_booked_once(tmp_path, monkeypat
         return sock
 
     original_step = PrivateStreamSupervisor.step
+    registered = []
 
     def step(runner):
+        if not registered:
+            assert workspace.control.snapshot()["phase"] == "RUNNING"
+            registered.append(
+                workspace.register_order(
+                    known,
+                    expected_plan_sha256=workspace.plan_sha256,
+                    expected_catalog_head=workspace.catalog.snapshot()["head"],
+                    source_ref="broker-export-reviewed",
+                    intent_confirmed=True,
+                )
+            )
         result = original_step(runner)
         release.set()  # First receive completes before the first REST response.
         if runner.control.snapshot()["sync_successes"]:
@@ -298,6 +328,7 @@ def test_notified_known_order_is_really_read_and_booked_once(tmp_path, monkeypat
     assert result["control"]["phase"] == "READY" and result["control"]["sync_retries"] == 1
     assert requests.count("/private/v1/orders") == 2
     assert requests.count("/private/v1/executions") == 2
+    assert workspace.plan.known_orders == () and registered[0]["records"] == 1
 
 
 def test_unknown_order_is_rejected_before_order_get_and_total_budget_covers_orders(setup):
@@ -550,6 +581,116 @@ def test_alternate_directory_cannot_bypass_persistent_stream_stop(setup):
     assert not other.exists() and backend.reads == []
     assert reads.stream_binding() == workspace.control.snapshot()["instance"]
     assert workspace.control.snapshot()["phase"] == "STOPPED"
+
+
+def test_cli_register_order_is_local_preserves_plan_and_stop_and_reopens(setup, tmp_path, capsys):
+    _, _, _, backend, _, workspace = setup
+    known = KnownOrder(
+        order_id=201,
+        intent=OrderIntent(
+            client_id="Added", side="BUY", effect="OPEN", units=1000, kind="LIMIT", price="150"
+        ),
+    )
+    path = tmp_path / "known.json"
+    path.write_text(known.model_dump_json(), encoding="utf-8")
+    with workspace.control.ownership():
+        state = workspace.control.begin(
+            workspace.journal, expected_revision=0, expected_head=workspace.journal.head()
+        )
+        workspace.control.finish(state["owner"], workspace.journal, reason="stream_failed")
+    before = workspace.control.snapshot()
+    plan_bytes = (workspace.directory / "sync-plan.json").read_bytes()
+    main(
+        [
+            "register-order",
+            "--directory",
+            str(workspace.directory),
+            "--order-file",
+            str(path),
+            "--expected-plan-sha256",
+            workspace.plan_sha256,
+            "--expected-catalog-head",
+            workspace.catalog.snapshot()["head"],
+            "--source-ref",
+            "broker-export-reviewed",
+            "--intent-confirmed",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["registered_order_id"] == 201
+    reopened = PrivateSyncWorkspace(workspace.directory)
+    assert reopened.status()["known_order_count"] == 1 and backend.reads == []
+    assert workspace.control.snapshot() == before
+    assert (workspace.directory / "sync-plan.json").read_bytes() == plan_bytes
+
+
+def test_legacy_catalog_requires_explicit_idle_initialization_and_expected_checkpoint(tmp_path):
+    _, _, _, backend, _, workspace = make_setup(tmp_path, legacy_catalog=True)
+    legacy = PrivateSyncWorkspace(workspace.directory)
+    assert legacy.status()["catalog"] is None
+    with workspace.control.ownership(), pytest.raises(StreamControlError, match="owner_busy"):
+        legacy.initialize_catalog(
+            expected_plan_sha256=legacy.plan_sha256,
+            expected_revision=0,
+            expected_head=legacy.journal.head(),
+        )
+    with pytest.raises(PrivateSyncError, match="checkpoint_changed"):
+        legacy.initialize_catalog(
+            expected_plan_sha256=legacy.plan_sha256,
+            expected_revision=1,
+            expected_head=legacy.journal.head(),
+        )
+    legacy.initialize_catalog(
+        expected_plan_sha256=legacy.plan_sha256,
+        expected_revision=0,
+        expected_head=legacy.journal.head(),
+    )
+    assert legacy.catalog.snapshot()["records"] == 0 and backend.reads == []
+
+
+def test_missing_bound_catalog_is_not_treated_as_a_legacy_workspace(setup):
+    _, _, _, backend, _, workspace = setup
+    workspace.catalog.path.unlink()
+    workspace.catalog.path.parent.rmdir()
+    with pytest.raises(PrivateSyncError, match="workspace_invalid"):
+        PrivateSyncWorkspace(workspace.directory)
+    assert backend.reads == []
+
+
+@pytest.mark.parametrize("stage", ["before", "after"])
+def test_interrupted_catalog_manifest_binding_is_explicit_and_never_recreates_data(
+    tmp_path, monkeypatch, stage
+):
+    _, _, _, backend, _, legacy = make_setup(tmp_path, legacy_catalog=True)
+    original = private_sync.os.replace
+
+    def interrupted(source, target):
+        if stage == "after":
+            original(source, target)
+        raise OSError("synthetic rename failure")
+
+    checks = dict(
+        expected_plan_sha256=legacy.plan_sha256,
+        expected_revision=0,
+        expected_head=legacy.journal.head(),
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(private_sync.os, "replace", interrupted)
+        with pytest.raises(OSError):
+            legacy.initialize_catalog(**checks)
+    instance = legacy.catalog.snapshot()["instance"]
+    fresh = PrivateSyncWorkspace(legacy.directory)
+    assert fresh.catalog.snapshot()["instance"] == instance
+    if stage == "before":
+        assert not fresh.status()["catalog_bound"]
+        with pytest.raises(PrivateSyncError, match="initialization_required"):
+            fresh.run(threading.Event(), **options(fresh))
+        fresh.initialize_catalog(**checks)
+    else:
+        assert fresh.status()["catalog_bound"]
+        with pytest.raises(PrivateSyncError, match="manifest_changed"):
+            legacy.run(threading.Event(), **options(legacy))
+    assert fresh.status()["catalog_bound"] and backend.reads == []
 
 
 def test_cli_errors_do_not_echo_unknown_arguments_or_configuration_values(setup, capsys):

@@ -7,6 +7,7 @@ import os
 import signal
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -14,10 +15,11 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from trading.account_reader import AccountReader
-from trading.broker_contracts import Contract, OrderIntent
+from trading.broker_contracts import Contract
 from trading.credential_store import CredentialVault
 from trading.event_capture import JournaledEventCapture
 from trading.execution_cash_book import ExecutionCashBook
+from trading.known_orders import KnownOrder, KnownOrderCatalog
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClient
@@ -32,11 +34,6 @@ MAX_PLAN_BYTES = 262_144
 
 class PrivateSyncError(ValueError):
     """Fixed reason codes only, including untrusted configuration failures."""
-
-
-class KnownOrder(Contract):
-    order_id: int = Field(strict=True, gt=0)
-    intent: OrderIntent
 
 
 class SyncPlan(Contract):
@@ -71,6 +68,18 @@ def _digest(plan):
     return hashlib.sha256(_canonical(plan.model_dump(mode="json")).encode()).hexdigest()
 
 
+def _catalog_manifest(plan, control_instance, catalog_instance):
+    manifest = {
+        "version": 2,
+        "plan": plan.model_dump(mode="json"),
+        "sha256": _digest(plan),
+        "control_instance": control_instance,
+        "catalog_instance": catalog_instance,
+    }
+    manifest["manifest_sha256"] = hashlib.sha256(_canonical(manifest).encode()).hexdigest()
+    return manifest
+
+
 def _read_json(path):
     try:
         with Path(path).open("rb") as source:
@@ -102,7 +111,7 @@ def load_plan(path):
 class _ReaderOwner:
     """One REST worker; deferred close never blocks its caller on a hung callback."""
 
-    def __init__(self, client, plan, *, clock, monotonic):
+    def __init__(self, client, plan, *, clock, monotonic, order_lookup=None):
         self.client, self.plan = client, plan
         self.clock, self.monotonic = clock, monotonic
         self._lock = threading.Lock()
@@ -110,6 +119,7 @@ class _ReaderOwner:
         self._closing = False
         self._deadline = None
         self._orders = {o.order_id: o.intent for o in plan.known_orders}
+        self._lookup = order_lookup
 
     def get(self, request):
         if self._deadline is None or self.monotonic() >= self._deadline:
@@ -135,13 +145,12 @@ class _ReaderOwner:
 
     def orders(self, ids):
         # Validate every requested ID before the first order HTTP request.
-        if any(identity not in self._orders for identity in ids):
+        orders = self._lookup(ids) if self._lookup is not None else self._orders
+        if any(identity not in orders for identity in ids):
             raise PrivateSyncError("sync_order_intent_missing")
         reader = AccountReader(self, clock=self.clock)
         return self._call(
-            lambda: tuple(
-                reader.collect_order(self._orders[identity], identity) for identity in ids
-            )
+            lambda: tuple(reader.collect_order(orders[identity], identity) for identity in ids)
         )
 
     def account(self):
@@ -172,8 +181,24 @@ class PrivateSyncWorkspace:
         self.clock, self.monotonic = clock, monotonic
         try:
             manifest = _read_json(self.directory / "sync-plan.json")
-            if set(manifest) != {"plan", "sha256", "control_instance"}:
+            base = {"plan", "sha256", "control_instance"}
+            self._catalog_bound = set(manifest) != base
+            if self._catalog_bound:
+                if (
+                    set(manifest) != base | {"version", "catalog_instance", "manifest_sha256"}
+                    or type(manifest["version"]) is not int
+                    or manifest["version"] != 2
+                    or manifest["manifest_sha256"]
+                    != hashlib.sha256(
+                        _canonical(
+                            {k: v for k, v in manifest.items() if k != "manifest_sha256"}
+                        ).encode()
+                    ).hexdigest()
+                ):
+                    raise ValueError
+            elif set(manifest) != base:
                 raise ValueError
+            self._manifest_hash = hashlib.sha256(_canonical(manifest).encode()).hexdigest()
             self.plan = SyncPlan.model_validate(manifest["plan"])
             if (
                 _digest(self.plan) != manifest["sha256"]
@@ -188,6 +213,12 @@ class PrivateSyncWorkspace:
             if self.control.snapshot()["instance"] != manifest["control_instance"]:
                 raise ValueError
             self.control.check_binding(self.journal, self.book)
+            self.catalog = self._catalog() if (self.directory / "catalog").exists() else None
+            if self._catalog_bound and (
+                self.catalog is None
+                or self.catalog.snapshot()["instance"] != manifest["catalog_instance"]
+            ):
+                raise ValueError
         except Exception:
             raise PrivateSyncError("sync_workspace_invalid") from None
 
@@ -217,11 +248,17 @@ class PrivateSyncWorkspace:
             directory / "journal", plan.scope, max_records=plan.max_records
         )
         control = StreamControl.create(directory / "control", journal, book)
-        manifest = {
-            "plan": plan.model_dump(mode="json"),
-            "sha256": _digest(plan),
-            "control_instance": control.snapshot()["instance"],
-        }
+        catalog = KnownOrderCatalog.create(
+            directory / "catalog",
+            plan.scope,
+            control.snapshot()["instance"],
+            _digest(plan),
+            plan.known_orders,
+            clock=clocks.get("clock"),
+        )
+        manifest = _catalog_manifest(
+            plan, control.snapshot()["instance"], catalog.snapshot()["instance"]
+        )
         body = _canonical(manifest).encode()
         if len(body) > MAX_PLAN_BYTES:
             raise PrivateSyncError("sync_plan_too_large")
@@ -240,21 +277,106 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("sync_supervisor_binding_mismatch")
         return reads
 
+    def _catalog(self):
+        return KnownOrderCatalog(
+            self.directory / "catalog",
+            self.plan.scope,
+            self.control.snapshot()["instance"],
+            self.plan_sha256,
+            self.plan.known_orders,
+            clock=self.clock,
+        )
+
+    def initialize_catalog(self, *, expected_plan_sha256, expected_revision, expected_head):
+        self._check_plan(expected_plan_sha256)
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise PrivateSyncError("invalid_sync_revision")
+        self._reads()
+        with self.control.ownership():
+            state = self.control.snapshot()
+            if state["revision"] != expected_revision or self.journal.head() != expected_head:
+                raise PrivateSyncError("sync_checkpoint_changed")
+            if self._catalog_bound:
+                raise PrivateSyncError("sync_catalog_already_initialized")
+            if self.catalog is None:
+                self.catalog = KnownOrderCatalog.create(
+                    self.directory / "catalog",
+                    self.plan.scope,
+                    state["instance"],
+                    self.plan_sha256,
+                    self.plan.known_orders,
+                    clock=self.clock,
+                )
+            view = self.catalog.snapshot()
+            if view["records"] != len(self.plan.known_orders):
+                raise PrivateSyncError("sync_unbound_catalog_requires_review")
+            current = _read_json(self.directory / "sync-plan.json")
+            if hashlib.sha256(_canonical(current).encode()).hexdigest() != self._manifest_hash:
+                raise PrivateSyncError("sync_manifest_changed")
+            manifest = _catalog_manifest(self.plan, state["instance"], view["instance"])
+            body = _canonical(manifest).encode()
+            if len(body) > MAX_PLAN_BYTES:
+                raise PrivateSyncError("sync_plan_too_large")
+            temporary = self.directory / ("sync-plan-" + uuid.uuid4().hex + ".tmp")
+            try:
+                with temporary.open("xb") as output:
+                    output.write(body)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, self.directory / "sync-plan.json")
+            finally:
+                temporary.unlink(missing_ok=True)
+            self._manifest_hash = hashlib.sha256(_canonical(manifest).encode()).hexdigest()
+            self._catalog_bound = True
+        return self.status()
+
+    def register_order(
+        self,
+        order,
+        *,
+        expected_plan_sha256,
+        expected_catalog_head,
+        source_ref,
+        intent_confirmed=False,
+    ):
+        self._check_plan(expected_plan_sha256)
+        self._reads()
+        if self.catalog is None or not self._catalog_bound:
+            raise PrivateSyncError("sync_catalog_initialization_required")
+        return self.catalog.register(
+            order,
+            source_ref=source_ref,
+            expected_head=expected_catalog_head,
+            intent_confirmed=intent_confirmed,
+        )
+
     def status(self):
+        self._check_manifest()
+        catalog = self.catalog.snapshot() if self.catalog is not None else None
         return {
             "plan_sha256": self.plan_sha256,
             "control": self.control.snapshot(),
             "journal": self.journal.inspect(),
             "reads": self._reads().status(),
             "cash": self.book.snapshot(),
-            "known_order_count": len(self.plan.known_orders),
+            "catalog": catalog,
+            "catalog_bound": self._catalog_bound,
+            "known_order_count": catalog["records"]
+            if catalog is not None
+            else len(self.plan.known_orders),
             "complete": False,
             "live_enabled": False,
         }
 
     def _check_plan(self, expected):
+        self._check_manifest()
         if expected != self.plan_sha256 or _digest(self.plan) != self.plan_sha256:
             raise PrivateSyncError("sync_plan_changed")
+
+    def _check_manifest(self):
+        current = _read_json(self.directory / "sync-plan.json")
+        if hashlib.sha256(_canonical(current).encode()).hexdigest() != self._manifest_hash:
+            raise PrivateSyncError("sync_manifest_changed")
 
     def recover(self, *, expected_plan_sha256, **checks):
         self._check_plan(expected_plan_sha256)
@@ -283,6 +405,8 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("sync_read_permission_confirmation_required")
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 604_800:
             raise PrivateSyncError("sync_duration_invalid")
+        if self.catalog is not None and not self._catalog_bound:
+            raise PrivateSyncError("sync_catalog_initialization_required")
         if stop_event.is_set():
             return self.status()
         reads = self._reads(**(read_clocks or {}))
@@ -309,7 +433,13 @@ class PrivateSyncWorkspace:
                     monotonic=self.monotonic,
                     timeout_seconds=self.plan.read_timeout_seconds,
                 )
-                owner = _ReaderOwner(client, self.plan, clock=self.clock, monotonic=self.monotonic)
+                owner = _ReaderOwner(
+                    client,
+                    self.plan,
+                    clock=self.clock,
+                    monotonic=self.monotonic,
+                    order_lookup=self.catalog.lookup if self.catalog is not None else None,
+                )
             capture = JournaledEventCapture(
                 journal, clock=self.clock, monotonic_ns=lambda: int(self.monotonic() * 1e9)
             )
@@ -363,7 +493,9 @@ class SyncParser(argparse.ArgumentParser):
 
 def main(argv=None):
     parser = SyncParser(description=__doc__)
-    parser.add_argument("command", choices=("init", "status", "run", "recover"))
+    parser.add_argument(
+        "command", choices=("init", "status", "run", "recover", "init-orders", "register-order")
+    )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--expected-plan-sha256")
@@ -373,6 +505,10 @@ def main(argv=None):
     parser.add_argument("--duration-seconds", type=int)
     parser.add_argument("--read-only-confirmed", action="store_true")
     parser.add_argument("--acknowledge-token-uncertainty", action="store_true")
+    parser.add_argument("--order-file", type=Path)
+    parser.add_argument("--source-ref")
+    parser.add_argument("--intent-confirmed", action="store_true")
+    parser.add_argument("--expected-catalog-head")
     args = parser.parse_args(argv)
     stop_event = threading.Event()
     previous = {}
@@ -386,7 +522,25 @@ def main(argv=None):
             if args.plan is not None:
                 raise PrivateSyncError("saved_sync_plan_required")
             workspace = PrivateSyncWorkspace(args.directory)
-            if args.command == "run":
+            if args.command == "init-orders":
+                result = workspace.initialize_catalog(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_revision=args.expected_revision,
+                    expected_head=args.expected_head,
+                )
+            elif args.command == "register-order":
+                try:
+                    order = KnownOrder.model_validate(_read_json(args.order_file))
+                except Exception:
+                    raise PrivateSyncError("invalid_known_order_file") from None
+                result = workspace.register_order(
+                    order,
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_catalog_head=args.expected_catalog_head,
+                    source_ref=args.source_ref,
+                    intent_confirmed=args.intent_confirmed,
+                )
+            elif args.command == "run":
                 if threading.current_thread() is threading.main_thread():
                     for sig in (signal.SIGINT, signal.SIGTERM):
                         previous[sig] = signal.signal(sig, lambda *_: stop_event.set())
