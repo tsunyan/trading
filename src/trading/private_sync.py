@@ -21,6 +21,7 @@ from trading.event_capture import JournaledEventCapture
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
+from trading.post_control import PersistentPostLimiter
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClient
@@ -370,11 +371,14 @@ class PrivateSyncWorkspace:
     def status(self):
         self._check_manifest()
         catalog = self.catalog.snapshot() if self.catalog is not None else None
+        reads = self._reads()
+        posts = self._posts(reads)
         return {
             "plan_sha256": self.plan_sha256,
             "control": self.control.snapshot(),
             "journal": self.journal.inspect(),
-            "reads": self._reads().status(),
+            "reads": reads.status(),
+            "posts": posts.snapshot() if posts is not None else None,
             "cash": self.book.snapshot(),
             "catalog": catalog,
             "catalog_bound": self._catalog_bound,
@@ -384,6 +388,18 @@ class PrivateSyncWorkspace:
             "complete": False,
             "live_enabled": False,
         }
+
+    def _posts(self, reads, *, sleep=time.sleep):
+        binding = reads.post_binding()
+        if binding is None:
+            return None
+        return PersistentPostLimiter(
+            Path(binding["path"]),
+            reads,
+            wall_ns=lambda: int(self.clock().timestamp() * 1e9),
+            monotonic=self.monotonic,
+            sleep=sleep,
+        )
 
     def _check_plan(self, expected):
         self._check_manifest()
@@ -525,7 +541,11 @@ class PrivateSyncWorkspace:
         if reads.status()["blocked"]:
             raise PrivateSyncError("sync_dependencies_blocked")
         vault = vault if vault is not None else CredentialVault()
-        limiter = PrivateStreamLimiter(monotonic=self.monotonic, sleep=stream_sleep)
+        limiter = self._posts(reads, sleep=stream_sleep)
+        if limiter is not None and limiter.snapshot()["blocked"]:
+            raise PrivateSyncError("sync_dependencies_blocked")
+        if limiter is None:
+            limiter = PrivateStreamLimiter(monotonic=self.monotonic, sleep=stream_sleep)
         owner = None
 
         def factory(journal, shared):

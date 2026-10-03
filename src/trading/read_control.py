@@ -356,6 +356,72 @@ class PersistentReadLimiter(AccountReadLimiter):
             "live_orders_enabled": False,
         }
 
+    def post_binding(self):
+        """Read one permanent POST domain; never create or repair it implicitly."""
+        with self._transaction() as conn:
+            self._state(conn)
+            return self._post_binding(conn)
+
+    def _post_binding(self, conn):
+        receipts = conn.execute(
+            "SELECT token FROM events WHERE kind='POST_BOUND' LIMIT 2"
+        ).fetchall()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_binding'"
+        ).fetchone()
+        if present is None:
+            if receipts:
+                self._failed = True
+                raise PrivateReadError("post_binding_integrity_failed")
+            return None
+        rows = conn.execute("SELECT id,instance,path FROM post_binding LIMIT 2").fetchall()
+        if (
+            len(rows) != 1
+            or rows[0][0] != 1
+            or not isinstance(rows[0][1], str)
+            or not re.fullmatch(r"[a-f0-9]{32}", rows[0][1])
+            or not isinstance(rows[0][2], str)
+            or not Path(rows[0][2]).is_absolute()
+            or str(Path(rows[0][2]).resolve()) != rows[0][2]
+            or len(receipts) != 1
+            or receipts[0]["token"]
+            != hashlib.sha256((rows[0][1] + ":" + rows[0][2]).encode()).hexdigest()
+        ):
+            self._failed = True
+            raise PrivateReadError("post_binding_integrity_failed")
+        return {"instance": rows[0][1], "path": rows[0][2]}
+
+    def bind_post(self, instance, path):
+        """One POST domain per GET control, without rebinding after stop or deletion."""
+        if (
+            not isinstance(instance, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", instance)
+            or not isinstance(path, Path)
+            or not path.is_absolute()
+        ):
+            raise PrivateReadError("invalid_post_binding")
+        expected = {"instance": instance, "path": str(path.resolve())}
+        with self._transaction() as conn:
+            state = self._state(conn)
+            if state["stopped"] or state["in_flight"]:
+                raise PrivateReadError("post_binding_control_blocked")
+            current = self._post_binding(conn)
+            if current is not None:
+                if current != expected:
+                    raise PrivateReadError("post_control_already_bound")
+                return
+            conn.execute(
+                "CREATE TABLE post_binding (id INTEGER PRIMARY KEY CHECK(id=1),"
+                "instance TEXT NOT NULL,path TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO post_binding VALUES(1,?,?)", (instance, expected["path"]))
+            self._event(
+                conn,
+                state["last_wall_ns"],
+                "POST_BOUND",
+                hashlib.sha256((instance + ":" + expected["path"]).encode()).hexdigest(),
+            )
+
     def _claim(self):
         token = uuid.uuid4().hex
         error = None
