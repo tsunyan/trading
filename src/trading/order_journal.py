@@ -26,6 +26,7 @@ from trading.broker_contracts import (
     parse_evidence,
     validate_evidence,
 )
+from trading.order_receipts import SubmissionReceipt, parse_submission_receipt
 from trading.order_states import TERMINAL
 
 SCHEMA = """
@@ -304,6 +305,105 @@ class OrderJournal:
             conn.execute("UPDATE orders SET state='ABANDONED' WHERE client_id=?", (client_id,))
             self._event(conn, client_id, "ABANDONED", {})
 
+    @staticmethod
+    def _receipt(conn, client_id):
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='SUBMISSION_ACK' LIMIT 2",
+            (client_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise OrderBlocked("submission_receipt_conflict")
+        receipt = SubmissionReceipt.model_validate_json(rows[0][0])
+        if receipt.intent.client_id != client_id:
+            raise OrderBlocked("submission_receipt_conflict")
+        return receipt
+
+    @staticmethod
+    def _check_receipt_evidence(receipt, evidence):
+        if (
+            receipt.intent != evidence.intent
+            or (receipt.root_order_id, receipt.order_id)
+            != (evidence.root_order_id, evidence.order_id)
+            or evidence.observed_at < receipt.response_at
+            or (
+                receipt.broker_status in {"EXECUTED", "EXPIRED"}
+                and evidence.status != receipt.broker_status
+            )
+        ):
+            raise OrderBlocked("submission_receipt_evidence_mismatch")
+
+    def submission_response(self, client_id, payload, *, started_at, received_at, clock_skew_ms=0):
+        """Persist a POST receipt separately from fills. This offline method never sends."""
+        try:
+            with self._transaction() as conn:
+                intent = OrderIntent.model_validate_json(self._row(conn, client_id)["intent_json"])
+            receipt = parse_submission_receipt(
+                intent,
+                payload,
+                started_at=started_at,
+                received_at=received_at,
+                clock_skew_ms=clock_skew_ms,
+            )
+            return self.acknowledge_submission(receipt)
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            self._submission_failure(client_id)
+            raise OrderBlocked("submission_response_invalid") from None
+
+    def _submission_failure(self, client_id):
+        with self._transaction() as conn:
+            row = self._row(conn, client_id)
+            if row["state"] not in TERMINAL | {"PREPARED"}:
+                conn.execute("UPDATE orders SET state='UNKNOWN' WHERE client_id=?", (client_id,))
+            conn.execute("UPDATE metadata SET halted=1 WHERE id=1")
+            self._event(conn, client_id, "SUBMISSION_RESPONSE_INVALID", {})
+
+    def acknowledge_submission(self, receipt):
+        try:
+            receipt = SubmissionReceipt.model_validate(receipt.model_dump())
+            client_id = receipt.intent.client_id
+            with self._transaction() as conn:
+                row = self._row(conn, client_id)
+                if OrderIntent.model_validate_json(row["intent_json"]) != receipt.intent or row[
+                    "state"
+                ] in {"PREPARED", "ABANDONED"}:
+                    raise OrderBlocked("submission_receipt_unclaimed_or_mismatched")
+                previous = self._receipt(conn, client_id)
+                if previous is not None:
+                    if previous != receipt:
+                        raise OrderBlocked("submission_receipt_conflict")
+                    return row["state"]
+                if row["evidence_json"]:
+                    self._check_receipt_evidence(
+                        receipt, OrderEvidence.model_validate_json(row["evidence_json"])
+                    )
+                for other in conn.execute("SELECT client_id,evidence_json FROM orders"):
+                    if other["client_id"] == client_id:
+                        continue
+                    saved = self._receipt(conn, other["client_id"])
+                    evidence = (
+                        OrderEvidence.model_validate_json(other["evidence_json"])
+                        if other["evidence_json"]
+                        else None
+                    )
+                    if any(
+                        value is not None
+                        and (
+                            value.root_order_id == receipt.root_order_id
+                            or value.order_id == receipt.order_id
+                        )
+                        for value in (saved, evidence)
+                    ):
+                        raise OrderBlocked("submission_receipt_identity_reused")
+                state = "RECONCILING" if row["state"] in {"SUBMITTING", "UNKNOWN"} else row["state"]
+                conn.execute("UPDATE orders SET state=? WHERE client_id=?", (state, client_id))
+                self._event(conn, client_id, "SUBMISSION_ACK", receipt.model_dump(mode="json"))
+                return state
+        except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError):
+            self.halt()
+            raise OrderBlocked("submission_receipt_invalid") from None
+
     def reconcile(self, evidence: OrderEvidence) -> str:
         try:
             return self._reconcile(evidence)
@@ -342,6 +442,9 @@ class OrderJournal:
                 raise OrderBlocked("evidence belongs to a different intent")
             if row["state"] in {"PREPARED", "ABANDONED"}:
                 raise OrderBlocked("unexpected broker order for unsubmitted intent")
+            receipt = self._receipt(conn, client_id)
+            if receipt is not None:
+                self._check_receipt_evidence(receipt, evidence)
             previous = (
                 OrderEvidence.model_validate_json(row["evidence_json"])
                 if row["evidence_json"]
@@ -367,10 +470,18 @@ class OrderJournal:
                     raise OrderBlocked("terminal broker status changed")
             # Broker identifiers must never bind to a different local intent.
             for other in conn.execute(
-                "SELECT evidence_json FROM orders WHERE client_id!=? AND evidence_json IS NOT NULL",
+                "SELECT client_id,evidence_json FROM orders WHERE client_id!=?",
                 (client_id,),
             ):
-                item = OrderEvidence.model_validate_json(other[0])
+                other_receipt = self._receipt(conn, other["client_id"])
+                if other_receipt is not None and (
+                    other_receipt.root_order_id == evidence.root_order_id
+                    or other_receipt.order_id == evidence.order_id
+                ):
+                    raise OrderBlocked("broker ID already bound to another receipt")
+                if other["evidence_json"] is None:
+                    continue
+                item = OrderEvidence.model_validate_json(other["evidence_json"])
                 if (
                     item.order_id == evidence.order_id
                     or item.root_order_id == evidence.root_order_id
@@ -456,6 +567,7 @@ class OrderJournal:
             halted = bool(conn.execute("SELECT halted FROM metadata WHERE id=1").fetchone()[0])
             mode = conn.execute("SELECT mode FROM metadata WHERE id=1").fetchone()[0]
             gate = self._gate(conn)
+            receipts = {row["client_id"]: self._receipt(conn, row["client_id"]) for row in orders}
             account_guard = (
                 None
                 if gate is None
@@ -467,6 +579,8 @@ class OrderJournal:
                 }
             )
         for row in orders:
+            receipt = receipts[row["client_id"]]
+            row["submission_receipt"] = receipt.model_dump(mode="json") if receipt else None
             row["intent"] = json.loads(row.pop("intent_json"))
             row["evidence"] = json.loads(row.pop("evidence_json") or "null")
         for event in events:
