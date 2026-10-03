@@ -16,6 +16,16 @@ from trading.segmented_journal import SegmentedEventJournal
 from trading.stream_control import StreamControl
 
 RETRYABLE = frozenset({"stream_changed_during_collection", "capture_changed_during_collection"})
+TRANSIENT_MISMATCHES = frozenset(
+    {
+        "position_event_mismatch",
+        "order_event_mismatch",
+        "position_change_without_event",
+        "order_change_without_event",
+        "executed_order_still_active",
+        "execution_missing_from_rest",
+    }
+)
 SYNC_FAILURES = frozenset(
     {
         "private_stream_cash_sync_failed",
@@ -104,6 +114,7 @@ class PrivateStreamSupervisor:
         self._started = self._running = self._closed = False
         self._reason = "not_started"
         self._last_result = None
+        self._retry_reasons = ()
         self._receive_paused = False
         control.check_binding(journal, cash_book)
         if journal.capacity()["max_records"] < 6:
@@ -142,6 +153,7 @@ class PrivateStreamSupervisor:
         self._next_sync = self._connection_started
         self._last_result = None  # Never carry an old connection's REST proof.
         self._retries = 0
+        self._retry_reasons = ()
 
     def start(self, *, expected_revision, expected_head):
         with self._lock:
@@ -238,37 +250,39 @@ class PrivateStreamSupervisor:
             if current["epoch"] != result.epoch or current["revision"] != result.revision:
                 kind = "retry"  # A later notification/expiry invalidated this queued result.
         if kind == "retry":
-            self._retries += 1
-            self.control.update(self._owner, retry=True)
-            if self._retries > self.policy.max_sync_retries:
-                raise SupervisorError("sync_failed")
-            self._last_result = None
-            self._next_sync = now + self.policy.sync_retry_seconds
+            self._retry(now, ("collection_invalidated",))
         else:
-            if any(m != "balance_change_unverified" for m in result.mismatches):
+            if any(
+                m != "balance_change_unverified" and m.partition(":")[0] not in TRANSIENT_MISMATCHES
+                for m in result.mismatches
+            ):
                 raise SupervisorError("sync_failed")
             inventory = stream._capture.compare_account_inventory(
                 self.cash_book, expected_revision=result.revision
             )
-            if (
-                inventory["halted"]
-                or not inventory["balance"]["balance_match"]
-                or (
-                    inventory["positions"] is not None
-                    and not inventory["positions"]["position_match"]
-                )
-            ):
+            if inventory["halted"]:
                 raise SupervisorError("sync_failed")
+            pending = [m for m in result.mismatches if m != "balance_change_unverified"]
+            posted_ids = set(result.previously_booked_execution_ids)
+            if result.execution_cash is not None:
+                posted_ids.update(result.execution_cash["applied_execution_ids"])
+                posted_ids.update(result.execution_cash["already_applied_execution_ids"])
+            if set(result.unverified_execution_ids) - posted_ids:
+                pending.append("execution_evidence_pending")
+            if not inventory["balance"]["balance_match"]:
+                pending.append("balance_inventory_mismatch")
+            if inventory["positions"] is not None and not inventory["positions"]["position_match"]:
+                pending.append("position_inventory_mismatch")
             for diagnostic, match in (
                 (result.position_reservations, "reservation_match"),
                 (result.account_valuation, "diagnostics_match"),
             ):
                 if diagnostic is not None and (
-                    diagnostic["head"] != inventory["head"]
-                    or not diagnostic[match]
-                    or diagnostic.get("halted", False)
+                    diagnostic["head"] != inventory["head"] or diagnostic.get("halted", False)
                 ):
                     raise SupervisorError("sync_failed")
+                if diagnostic is not None and not diagnostic[match]:
+                    pending.append(match + "_pending")
             prior_head = (
                 result.execution_cash["head"]
                 if result.execution_cash is not None
@@ -276,10 +290,23 @@ class PrivateStreamSupervisor:
             )
             if prior_head is not None and prior_head != inventory["head"]:
                 raise SupervisorError("sync_failed")
+            if pending:
+                self._retry(now, tuple(pending))
+                return
             self._retries = 0
+            self._retry_reasons = ()
             self.control.update(self._owner, success=True)
             self._last_result = result.model_copy(update={"account_inventory": inventory})
             self._next_sync = now + self.policy.sync_interval_seconds
+
+    def _retry(self, now, reasons):
+        self._retries += 1
+        self._retry_reasons = reasons
+        self._last_result = None
+        self.control.update(self._owner, retry=True)
+        if self._retries > self.policy.max_sync_retries:
+            raise SupervisorError("sync_failed")
+        self._next_sync = now + self.policy.sync_retry_seconds
 
     def step(self):
         with self._lock:
@@ -455,6 +482,7 @@ class PrivateStreamSupervisor:
                 "owner_retained": self._lease is not None,
                 "receive_paused": self._receive_paused,
                 "consecutive_sync_retries": self._retries,
+                "pending_sync_reasons": self._retry_reasons,
                 "control": self.control.snapshot(),
                 "stream": self._receiver.status() if self._receiver is not None else None,
                 "complete": False,

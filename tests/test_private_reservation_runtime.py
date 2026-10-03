@@ -121,6 +121,10 @@ def run(values, get, monkeypatch):
         if runner.control.snapshot()["sync_successes"]:
             observed.append(runner._last_result)
             stop.set()
+        elif runner._worker is None and runner.status()["pending_sync_reasons"]:
+            # A fake socket timeout does not advance the test clock. Let a
+            # bounded lag retry reach its next scheduled collection.
+            clock.advance(runner.policy.sync_retry_seconds)
 
     monkeypatch.setattr(PrivateStreamSupervisor, "step", step)
     result = workspace.run(
@@ -164,7 +168,7 @@ def test_declared_position_runtime_collects_and_compares_current_reservations(
     assert get.assets_seen == 8  # Separate discovery and final repeated account observations.
 
 
-@pytest.mark.parametrize("kind", ["difference", "unknown", "late", "wrong_intent"])
+@pytest.mark.parametrize("kind", ["difference", "unknown", "wrong_intent"])
 def test_current_reservation_failure_persists_stop_without_booking_or_plan_change(
     tmp_path, monkeypatch, kind
 ):
@@ -178,12 +182,33 @@ def test_current_reservation_failure_persists_stop_without_booking_or_plan_chang
     assert workspace.control.snapshot()["sync_successes"] == 0
     assert workspace.book.snapshot() == before
     paths = [p for p, _ in get.calls]
-    if kind in {"unknown", "late"}:
+    if kind == "unknown":
         assert "/private/v1/orders" not in paths and "/private/v1/executions" not in paths
     if kind == "unknown":
         assert get.assets_seen == 4  # Unknown ID rejected after discovery, before final report.
-    elif kind in {"difference", "late"}:
-        assert get.assets_seen == 8
+    elif kind == "difference":
+        # REST pacing also consumes the observation's lifetime. It can expire
+        # before the retry count is exhausted; neither boundary grants success.
+        assert (
+            1
+            <= workspace.control.snapshot()["sync_retries"]
+            <= workspace.plan.supervisor.max_sync_retries + 1
+        )
+        assert 8 < get.assets_seen <= 8 * (workspace.plan.supervisor.max_sync_retries + 1)
+
+
+def test_known_order_appearing_after_discovery_is_recollected_before_success(tmp_path, monkeypatch):
+    values = make_setup(tmp_path, position_basis=basis(), known_orders=(known(),))
+    clock, _, _, _, _, workspace = values
+    before = workspace.book.snapshot()
+    source = Responses(clock, kind="late")
+    result, observed = run(values, source, monkeypatch)
+    assert result["control"]["phase"] == "READY"
+    assert result["control"]["sync_retries"] == 1
+    assert result["control"]["sync_successes"] == 1
+    assert observed[0].position_reservations["reservation_match"]
+    assert source.assets_seen == 16
+    assert workspace.book.snapshot() == before
 
 
 def test_discovery_orders_and_final_account_use_one_budget(tmp_path):

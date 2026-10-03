@@ -126,7 +126,10 @@ def test_equal_cash_with_position_difference_stops_without_reconnect(tmp_path, k
         else (OpeningPosition(position_id=401, side="BUY", units=400, average_price="150"),)
     )
     clock, _, _, control, runner, sockets, _, calls, _, _ = setup(
-        tmp_path, max_records=64, position_basis=basis
+        tmp_path,
+        max_records=64,
+        position_basis=basis,
+        policy=SupervisorPolicy(max_sync_retries=0),
     )
     runner._collect = lambda: account(now=clock.wall, units=None if kind == "missing" else 300)
     start(runner)
@@ -151,7 +154,10 @@ def test_supplied_diagnostic_mismatch_is_enforced_even_when_inventory_matches(
         positions=(OpeningPosition(position_id=401, side="BUY", units=400, average_price="150"),)
     )
     clock, _, book, control, runner, _, _, _, _, _ = setup(
-        tmp_path, max_records=64, position_basis=basis
+        tmp_path,
+        max_records=64,
+        position_basis=basis,
+        policy=SupervisorPolicy(max_sync_retries=0),
     )
     if kind == "reservation":
         runner._collect = lambda: account(
@@ -215,7 +221,10 @@ def test_result_invalidated_after_worker_finishes_is_retried_before_success(tmp_
 
 def test_position_failure_after_cash_commit_preserves_receipt(tmp_path):
     clock, _, book, control, runner, sockets, _, _, rows, _ = setup(
-        tmp_path, max_records=64, position_basis=PositionBasis(positions=())
+        tmp_path,
+        max_records=64,
+        position_basis=PositionBasis(positions=()),
+        policy=SupervisorPolicy(max_sync_retries=0),
     )
     start(runner)
     settle(runner)
@@ -570,7 +579,12 @@ def test_material_failures_never_automatically_reconnect_and_do_not_expose_error
             return httpx.Response(503, content=secret)
         return response(clock, request.method)
 
-    values = setup(tmp_path, max_records=64, handler=handler)
+    values = setup(
+        tmp_path,
+        max_records=64,
+        handler=handler,
+        policy=SupervisorPolicy(max_sync_retries=0),
+    )
     clock, journal, book, control, runner, sockets, _, calls, _, _ = values
     if kind == "balance":
         runner._collect = lambda: report(clock, units=None, orders=False, balance="1000001")
