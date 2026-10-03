@@ -28,6 +28,9 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 `--flatten`を付けると、手順4で戦略の代わりに全建玉の決済を提案します（[手仕舞い](live-signal.md)）。
 建玉がある間は`--valuation-tolerance`で[評価額の許容幅](live-account.md)を指定します。
 
+`--result-output`で結果をファイルに置き換え書込みし、`--notify`で提案・失敗をWindows通知します。
+毎時の定期実行は[運用サイクルの定期実行](live-tasks.md)を使います。
+
 ## 送信までの時間
 
 実行内容には手順2の気配が含まれます。送信時の口座リスク検査は気配と口座証拠の鮮度

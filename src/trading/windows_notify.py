@@ -86,6 +86,8 @@ LABELS = {
     "private_live_unavailable": "実発注の保存状態を確認できません",
     "private_live_stop_failed": "監視から実発注を停止できませんでした。台帳を確認してください",
     "private_condition_cleared": "実口座同期の監視で障害条件の解消を確認しました",
+    "live_cycle_proposal": "戦略が実発注の注文を提案しました（未送信）",
+    "live_cycle_failed": "実発注の運用サイクルが失敗しました（未送信）",
 }
 
 
@@ -97,13 +99,19 @@ def send_toast(alert, observer_id):
     SubElement(binding, "text").text = "Trading Lab"
     SubElement(binding, "text").text = LABELS.get(alert["kind"], "模擬観測の通知")
     private = alert["kind"].startswith("private_")
-    SubElement(binding, "text").text = (
-        f"同期 {observer_id[:12]} / 通知 {alert['id']}\n"
-        "private_operations status / alerts で詳細を確認してください。"
-        if private
-        else f"口座 {observer_id[:12]} / 通知 {alert['id']}\n"
-        "operations.sqlite または paper_runner status で詳細を確認してください。"
-    )
+    if alert["kind"].startswith("live_cycle_"):
+        SubElement(binding, "text").text = (
+            f"{alert['id']}\n"
+            "サイクル結果ファイルと live_setup status を確認してください。送信は手動です。"
+        )
+    else:
+        SubElement(binding, "text").text = (
+            f"同期 {observer_id[:12]} / 通知 {alert['id']}\n"
+            "private_operations status / alerts で詳細を確認してください。"
+            if private
+            else f"口座 {observer_id[:12]} / 通知 {alert['id']}\n"
+            "operations.sqlite または paper_runner status で詳細を確認してください。"
+        )
     environment = {
         **os.environ,
         "TRADINGLAB_TOAST_XML": base64.b64encode(tostring(toast, encoding="utf-8")).decode(),

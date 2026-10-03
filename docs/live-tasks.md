@@ -1,0 +1,46 @@
+# 運用サイクルの定期実行と通知
+
+2026-10-04。[運用サイクル](live-cycle.md)を毎時の足確定後に自動で実行し、注文の提案や失敗を
+Windows通知で知らせるタスク計画と登録スクリプトを追加しました。タスクは注文を準備も送信もしません。
+通知を見た運用者が、サイクルを`--prepare`付きで実行し、表示されたSHA-256で送信します。
+
+```powershell
+.\scripts\install-live-cycle.ps1 -Directory runs\live-orders -ReadControlDirectory runs\account-read-control -Scope <scope> -CredentialReference <read_only_reference> -Config configs\fx.toml -Units 1000 -MaxSlippage 0.02 -QuoteOutput runs\live-orders\quote.json -ResultOutput runs\live-orders\cycle.json -ValuationTolerance 0.05 -Confirm complete-account,account-identity,external-writers-paused,complete-history -PlanOnly
+```
+
+`-PlanOnly`を外すと、現在のユーザーのタスクとして登録します。登録はこのコマンドを運用者が
+実行した場合だけで、ほかのコマンドがタスクを作ることはありません。
+
+## タスクの内容
+
+- 実行: 毎時1分（次の正時の1分から1時間ごと）。前回の実行中は重ねて起動しません。上限は5分です。
+- コマンド: `live_cycle`を`--prepare`・`--flatten`なしで、`--notify`と`--result-output`付きで実行します。
+- 確認項目: 計画の作成時に4つの確認をすべて要求し、タスクのコマンドに含めます。
+  外部操作の停止や口座本人性の確認を、タスクを登録している間ずっと維持する宣言になります。
+  これを満たさなくなったらタスクを無効にしてください。
+- 対象: 同期・監視を登録した台帳だけを計画できます。タスク名は台帳の識別子から作り、
+  同じ名前の別のタスクや別ユーザーのタスクは上書きしません。
+- 鍵: 読取専用キーの参照だけを使います。発注用キーは使いません。
+
+## 通知と結果ファイル
+
+戦略が新規・決済を提案した場合は「戦略が実発注の注文を提案しました（未送信）」、
+失敗した場合は「実発注の運用サイクルが失敗しました（未送信）」を通知します。見送りでは通知しません。
+通知の失敗はサイクルの結果を変えません。
+
+各回の結果は`-ResultOutput`のファイルに置き換え書込みします。成功時はサイクルの出力に`ok: true`、
+失敗時は`ok: false`と固定理由コードを保存し、通知の成否を`notified`に記録します。
+タスクはpythonw.exeで実行するため、画面への出力は残りません。
+
+## 提案を受け取った後
+
+提案は手順2の気配で作られています。送信時の鮮度（既定60秒）を過ぎているため、通知を見たら
+`live_cycle --prepare`を改めて実行し、表示された実行内容を確認して`order_runtime submit`で送信します。
+
+## 検証
+
+`tests/test_live_tasks.py`で、登録済み台帳からの計画（`--prepare`なし、通知・確認・許容幅を含む、
+空白を含む設定パス）、確認不足・不正な参照・数量・小数の拒否、未登録台帳の拒否、
+提案だけを通知して結果を書き出すこと、失敗時の通知・結果・終了コード（通知の失敗を含む）、
+登録スクリプトの`-PlanOnly`の往復を検証します。タスクの登録と実際の通知は行いません。
+追加11試験を含む全2380テストのうち2378件が563.49秒で合格しました。残る2件はPC全体のコミット可能メモリ不足で子プロセスのnumpy（OpenBLAS）が起動できなかったもので、`OPENBLAS_NUM_THREADS=1`で関連24試験を再実行して合格しました。

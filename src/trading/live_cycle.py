@@ -7,6 +7,8 @@ context. Sending stays a separate `order_runtime submit` with that context's SHA
 
 import argparse
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from trading.live_signal import (
     recent_bars,
     write_intent,
 )
+from trading.windows_notify import send_toast
 
 CYCLE_CONFIRMATIONS = ACCOUNT_CONFIRMATIONS | HISTORY_CONFIRMATIONS
 
@@ -140,7 +143,30 @@ class LiveCycle:
         return result
 
 
-def main(argv=None):
+def notify(kind, reference, *, send=None):
+    """Best effort desktop notice; a failed toast never changes the cycle outcome."""
+    try:
+        (send or send_toast)({"kind": kind, "id": reference}, "live-cycle")
+        return True
+    except Exception:
+        return False
+
+
+def write_result(result, path):
+    path = Path(path)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".cycle-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as output:
+            output.write(json.dumps(result, default=str, ensure_ascii=False).encode())
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def main(argv=None, *, send=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--directory", type=Path, required=True)
@@ -151,11 +177,14 @@ def main(argv=None):
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--intent-output", type=Path)
+    parser.add_argument("--result-output", type=Path)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--flatten", action="store_true")
+    parser.add_argument("--notify", action="store_true")
     parser.add_argument("--valuation-tolerance")
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
+    finished = lambda: datetime.now(UTC).isoformat()  # noqa: E731
     try:
         cycle = LiveCycle(args.directory, args.read_control_directory, args.scope)
         result = cycle.run(
@@ -170,7 +199,7 @@ def main(argv=None):
             quote_output=args.quote_output,
             intent_output=args.intent_output,
         )
-        print(json.dumps({**result, "finished_at": datetime.now(UTC).isoformat()}, default=str))
+        result = {**result, "ok": True, "finished_at": finished()}
     except Exception as error:
         fixed = (
             LiveCycleError,
@@ -180,7 +209,22 @@ def main(argv=None):
             LiveQuoteError,
         )
         reason = str(error) if isinstance(error, fixed) else type(error).__name__
-        parser.exit(2, f"live_cycle_failed: {reason}\n")
+        result = {"ok": False, "reason": reason, "orders_sent": False, "finished_at": finished()}
+    if args.notify:
+        decision = result.get("decision") or {}
+        if not result["ok"]:
+            result["notified"] = notify("live_cycle_failed", result["reason"][:16], send=send)
+        elif decision.get("action") in {"open", "close"}:
+            reference = (decision.get("intent") or {}).get("client_id", "proposal")
+            result["notified"] = notify("live_cycle_proposal", reference[-16:], send=send)
+    if args.result_output is not None:
+        try:
+            write_result(result, args.result_output)
+        except OSError:
+            result["result_written"] = False
+    if not result["ok"]:
+        parser.exit(2, f"live_cycle_failed: {result['reason']}\n")
+    print(json.dumps(result, default=str))
 
 
 if __name__ == "__main__":
