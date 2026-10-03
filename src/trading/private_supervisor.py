@@ -16,6 +16,13 @@ from trading.segmented_journal import SegmentedEventJournal
 from trading.stream_control import StreamControl
 
 RETRYABLE = frozenset({"stream_changed_during_collection", "capture_changed_during_collection"})
+SYNC_FAILURES = frozenset(
+    {
+        "private_stream_cash_sync_failed",
+        "private_stream_reservation_sync_failed",
+        "private_stream_valuation_sync_failed",
+    }
+)
 # step() may record a completed pong and then one data frame before returning.
 FRAME_AND_END_BYTES = 110_000 + 4 * 1024
 
@@ -334,6 +341,15 @@ class PrivateStreamSupervisor:
                 return self._receiver.step()
             except BaseException as error:
                 reason = str(error) if isinstance(error, SupervisorError) else failure
+                if reason == "stream_failed" and self._receiver is not None:
+                    # resync closes the capture before its worker queues the
+                    # outcome. Preserve that known failure while the worker is
+                    # still alive; a transport-only failure remains distinct.
+                    try:
+                        if self._receiver.status()["stream_reason"] in SYNC_FAILURES:
+                            reason = "sync_failed"
+                    except Exception:
+                        pass
                 self._abort(reason)
                 if not isinstance(error, Exception):
                     raise

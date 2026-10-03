@@ -232,6 +232,48 @@ def test_position_failure_after_cash_commit_preserves_receipt(tmp_path):
     assert Decimal(book.snapshot()["balance"]) == 999998
 
 
+def test_sync_failure_before_worker_returns_preserves_reason_and_owner(tmp_path, monkeypatch):
+    shutdown, release = threading.Event(), threading.Event()
+    original = PrivateStreamReceiver.resync
+
+    def paused_resync(stream, *args, **kwargs):
+        try:
+            return original(stream, *args, **kwargs)
+        finally:
+            shutdown.set()
+            assert release.wait(timeout=10), "test worker was not released"
+
+    def failed_collection():
+        raise ValueError("callback secret must not escape")
+
+    monkeypatch.setattr(PrivateStreamReceiver, "resync", paused_resync)
+    _, _, _, control, runner, sockets, receivers, _, _, _ = setup(
+        tmp_path, max_records=64, collect=failed_collection
+    )
+    try:
+        start(runner)
+        assert shutdown.wait(timeout=3)
+        assert receivers[0].status()["stream_reason"] == "private_stream_cash_sync_failed"
+        assert runner._results.empty() and runner._worker.is_alive()
+        with pytest.raises(SupervisorError, match="^sync_failed$"):
+            runner.step()
+        state = runner.status()
+        assert state["reason"] == state["control"]["reason"] == "sync_failed"
+        assert state["control"]["phase"] == "STOPPED" and sockets[0].closed
+        assert state["rest_worker_alive"] and state["owner_retained"]
+        with pytest.raises(StreamControlError, match="owner_busy"), control.ownership():
+            pytest.fail("worker ownership was released early")
+    finally:
+        release.set()
+        if runner._worker is not None:
+            runner._worker.join(timeout=3)
+        runner.close()
+    assert not runner.status()["owner_retained"]
+    assert control.snapshot()["reason"] == "sync_failed"
+    with control.ownership():
+        pass
+
+
 def fill(clock, index):
     return execution(
         orderId=201 + index,
