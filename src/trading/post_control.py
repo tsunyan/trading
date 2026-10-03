@@ -33,6 +33,7 @@ REASONS = {
     "clock_invalid",
     "token_failed",
     "token_recovered",
+    "execution_restarted",
 }
 TOKEN_OPERATIONS = {"token_acquire", "token_renew", "token_delete"}
 # 60-minute broker expiry plus bounded pacing, request duration and clock skew.
@@ -192,7 +193,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
     def _epoch(self, conn):
         return conn.execute(
             "SELECT COALESCE(MAX(revision),-1) FROM events "
-            "WHERE kind IN ('TOKEN_RECOVERED','TRADE_RESOLVED')"
+            "WHERE kind IN ('TOKEN_RECOVERED','TRADE_RESOLVED','EXECUTION_RESTARTED')"
         ).fetchone()[0]
 
     def _state(self, conn):
@@ -212,24 +213,30 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             if last != (state.revision, digest):
                 raise ValueError
             self._resolution_history(conn, state)
+            self._resolution_history(conn, state, restart=True)
             return state
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             self._failed = True
             raise PostControlError("post_control_integrity_failed") from None
 
-    def _resolution_history(self, conn, state):
+    def _resolution_history(self, conn, state, *, restart=False):
+        kind, table = (
+            ("EXECUTION_RESTARTED", "execution_restarts")
+            if restart
+            else ("TRADE_RESOLVED", "trade_resolutions")
+        )
         markers = conn.execute(
-            "SELECT revision,digest FROM events WHERE kind='TRADE_RESOLVED' ORDER BY revision"
+            "SELECT revision,digest FROM events WHERE kind=? ORDER BY revision", (kind,)
         ).fetchall()
         present = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_resolutions'"
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone()
         if not present and not markers:
             return []
         if not present:
             raise ValueError("missing_trade_resolution_history")
         rows = conn.execute(
-            "SELECT revision,body,digest FROM trade_resolutions ORDER BY revision"
+            f"SELECT revision,body,digest FROM {table} ORDER BY revision"
         ).fetchall()
         if len(rows) != len(markers):
             raise ValueError("invalid_trade_resolution_history")
@@ -242,12 +249,18 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             expected = before.model_copy(
                 update={
                     "revision": before.revision + 1,
-                    "phase": "STOPPED",
+                    "phase": "READY" if restart else "STOPPED",
                     "claim": None,
                     "operation": None,
                     "request_sha256": None,
                     "wall_ns": after.wall_ns,
-                    "reason": before.reason if before.phase == "STOPPED" else "operation_unknown",
+                    "reason": (
+                        "execution_restarted"
+                        if restart
+                        else before.reason
+                        if before.phase == "STOPPED"
+                        else "operation_unknown"
+                    ),
                 }
             )
             if (
@@ -262,9 +275,23 @@ class PersistentPostLimiter(PrivateStreamLimiter):
                     "SELECT digest FROM events WHERE revision=?", (before.revision,)
                 ).fetchone()
                 != (_encode(before)[1],)
-                or before.phase not in {"IN_FLIGHT", "STOPPED"}
-                or before.operation not in {"order", "close_order", "cancel"}
-                or before.claim is None
+                or (
+                    restart
+                    and (
+                        before.phase not in {"READY", "STOPPED"}
+                        or before.claim is not None
+                        or before.reason == "token_failed"
+                        or reference["client_id"] is not None
+                    )
+                )
+                or (
+                    not restart
+                    and (
+                        before.phase not in {"IN_FLIGHT", "STOPPED"}
+                        or before.operation not in {"order", "close_order", "cancel"}
+                        or before.claim is None
+                    )
+                )
                 or after.wall_ns < before.wall_ns
                 or set(reference)
                 != {"live_instance", "live_path", "client_id", "prepared_id", "prepared_sha256"}
@@ -273,10 +300,15 @@ class PersistentPostLimiter(PrivateStreamLimiter):
                 or any(c not in "0123456789abcdef" for c in reference["live_instance"])
                 or not isinstance(reference["live_path"], str)
                 or str(Path(reference["live_path"]).resolve()) != reference["live_path"]
-                or not isinstance(reference["client_id"], str)
-                or not 1 <= len(reference["client_id"]) <= 36
-                or not reference["client_id"].isascii()
-                or not reference["client_id"].isalnum()
+                or (
+                    not restart
+                    and (
+                        not isinstance(reference["client_id"], str)
+                        or not 1 <= len(reference["client_id"]) <= 36
+                        or not reference["client_id"].isascii()
+                        or not reference["client_id"].isalnum()
+                    )
+                )
                 or type(reference["prepared_id"]) is not int
                 or reference["prepared_id"] <= 0
                 or not isinstance(reference["prepared_sha256"], str)
@@ -292,6 +324,54 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         with self._transaction() as conn:
             state = self._state(conn)
             return self._resolution_history(conn, state)
+
+    def execution_restarts(self):
+        with self._transaction() as conn:
+            state = self._state(conn)
+            return self._resolution_history(conn, state, restart=True)
+
+    def _restart_execution(self, *, expected, reference, owner, validate):
+        """A live coordinator holds the OS owner, prior approval and live transaction."""
+        with self._transaction() as conn:
+            state = self._state(conn)
+            self._binding(state)
+            self._verify_owner(state, owner)
+            if (
+                state.model_dump() != expected
+                or state.phase not in {"READY", "STOPPED"}
+                or state.claim is not None
+                or state.reason == "token_failed"
+                or self._execution_binding(conn)
+                != {"instance": reference["live_instance"], "path": reference["live_path"]}
+            ):
+                raise PostControlError("post_execution_restart_refused")
+            validate()
+            updated = self._write(
+                conn,
+                state,
+                "EXECUTION_RESTARTED",
+                phase="READY",
+                reason="execution_restarted",
+                wall_ns=self._now(state),
+            )
+            item = {
+                "post_before": state.model_dump(),
+                "post_after": updated.model_dump(),
+                "reference": reference,
+            }
+            body = json.dumps(item, sort_keys=True, separators=(",", ":"))
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS execution_restarts (revision INTEGER PRIMARY KEY,"
+                "body TEXT NOT NULL,digest TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO execution_restarts VALUES(?,?,?)",
+                (updated.revision, body, hashlib.sha256(body.encode()).hexdigest()),
+            )
+            self._resolution_history(conn, updated, restart=True)
+            validate()
+        self._stopped = True
+        return updated.model_dump()
 
     def _resolve_trade(self, *, expected, reference, owner, validate):
         """Journal coordinator holds the OS owner and a validated live transaction.

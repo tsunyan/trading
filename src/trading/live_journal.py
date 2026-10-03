@@ -71,6 +71,9 @@ RESOLUTION_CONFIRMATIONS = frozenset(
         "preserve-stops",
     }
 )
+RESTART_CONFIRMATIONS = CONFIRMATIONS | frozenset(
+    {"restart-orders", "stop-cause-reviewed", "old-clients-closed", "preserve-loss-stop"}
+)
 CODE_FILES = (
     "live_journal.py",
     "private_order.py",
@@ -206,6 +209,19 @@ class OrderResolutionApproval(Contract):
             or {e.kind for e in self.evidence} != EVIDENCE_KINDS
         ):
             raise ValueError("invalid_order_resolution_approval")
+        return self
+
+
+class LiveRestartApproval(Contract):
+    checkpoint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approval: LiveApproval
+    stop_review_reference: str = Field(min_length=1, max_length=256)
+    stop_review_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def printable(self):
+        if any(ord(c) < 32 or ord(c) == 127 for c in self.stop_review_reference):
+            raise ValueError("invalid_stop_review_reference")
         return self
 
 
@@ -358,6 +374,31 @@ class LiveOrderJournal(OrderJournal):
                     or json.loads(prepared["payload_json"])["post"] != resolved["post_before"]
                 ):
                     raise ValueError
+            restarts = self.posts.execution_restarts()
+            for restarted in restarts:
+                reference = restarted["reference"]
+                prepared = conn.execute(
+                    "SELECT client_id,kind,payload_json FROM events WHERE id=?",
+                    (reference["prepared_id"],),
+                ).fetchone()
+                if (
+                    reference["live_instance"] != state.instance
+                    or reference["live_path"] != str(self.path.parent)
+                    or prepared is None
+                    or prepared["client_id"] is not None
+                    or prepared["kind"] != "LIVE_RESTART_PREPARED"
+                    or self._checkpoint(json.loads(prepared["payload_json"]))
+                    != reference["prepared_sha256"]
+                    or json.loads(prepared["payload_json"])["post"] != restarted["post_before"]
+                ):
+                    raise ValueError
+            if state.phase == "ENABLED" and restarts:
+                reference = restarts[-1]["reference"]
+                completed = conn.execute(
+                    "SELECT payload_json FROM events WHERE kind='LIVE_RESTARTED'"
+                ).fetchall()
+                if sum(json.loads(r[0]) == reference for r in completed) != 1:
+                    raise ValueError
             return state
         except (ValueError, TypeError, KeyError, OSError):
             raise LiveOrderError("live_journal_integrity_or_binding_failed") from None
@@ -457,6 +498,203 @@ class LiveOrderJournal(OrderJournal):
                     "previous_configuration_sha256": state.configuration_sha256,
                 },
             )
+
+    def _restart_context(self, conn, now, *, event_id=None):
+        state = self._live_state(conn)
+        post = {
+            k: v
+            for k, v in self.posts.snapshot().items()
+            if k not in {"blocked", "live_enabled", "complete"}
+        }
+        if (
+            state.phase != "STOPPED"
+            or not conn.execute("SELECT halted FROM metadata").fetchone()[0]
+            or post["phase"] not in {"READY", "STOPPED"}
+            or post["claim"] is not None
+            or post["reason"] == "token_failed"
+            or self.posts.reads.status()["blocked"]
+        ):
+            raise LiveOrderError("live_restart_dependencies_refused")
+        rows = [dict(r) for r in conn.execute("SELECT * FROM orders ORDER BY client_id")]
+        if any(
+            r["state"]
+            not in {"PREPARED", "ABANDONED", "FILLED", "CANCELED", "EXPIRED", "WORKING", "PARTIAL"}
+            for r in rows
+        ):
+            raise LiveOrderError("live_restart_unresolved_order")
+        for row in rows:
+            intent = OrderIntent.model_validate_json(row["intent_json"])
+            plan = order_request(intent, state.limits)
+            if row["state"] in {"PREPARED", "ABANDONED"}:
+                self._unclaimed(conn, row["client_id"], plan)
+                continue
+            evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+            validate_evidence(evidence)
+            filled = sum(e.units for e in evidence.executions)
+            expected_state = (
+                "FILLED"
+                if evidence.status == "EXECUTED" and filled == intent.units
+                else evidence.status
+                if evidence.status in {"CANCELED", "EXPIRED"}
+                else "PARTIAL"
+                if evidence.status in {"WAITING", "ORDERED", "MODIFYING"} and filled
+                else "WORKING"
+                if evidence.status in {"WAITING", "ORDERED", "MODIFYING"}
+                else None
+            )
+            saved = conn.execute(
+                "SELECT payload_json FROM events WHERE client_id=? AND kind='RECONCILED' "
+                "ORDER BY id DESC LIMIT 1",
+                (row["client_id"],),
+            ).fetchone()
+            prepared = conn.execute(
+                "SELECT payload_json FROM events WHERE client_id=? AND kind='PREPARED'",
+                (row["client_id"],),
+            ).fetchall()
+            if (
+                not evidence.executions_complete
+                or evidence.intent != intent
+                or row["state"] != expected_state
+                or len(prepared) != 1
+                or json.loads(prepared[0][0]) != {"path": plan.path, "body": json.loads(plan.body)}
+                or conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE client_id=? AND kind='SUBMITTING'",
+                    (row["client_id"],),
+                ).fetchone()[0]
+                != 1
+                or saved is None
+                or json.loads(saved[0])
+                != {"state": row["state"], "evidence": evidence.model_dump(mode="json")}
+            ):
+                raise LiveOrderError("live_restart_complete_order_required")
+            receipt = self._receipt(conn, row["client_id"])
+            if receipt is not None:
+                self._check_receipt_evidence(receipt, evidence)
+        self._account_proof(conn)
+        proof = json.loads(self._gate(conn)["proof_json"])
+        snapshot = AccountSnapshot.model_validate(proof["snapshot"])
+        quote = AccountQuote.model_validate(proof["quote"])
+        if (
+            proof["revision"] != revision(rows)
+            or reconcile_account(state.policy, rows, snapshot, quote, now)
+            or int(snapshot.observed_at.timestamp() * 1_000_000_000) < post["wall_ns"]
+        ):
+            raise LiveOrderError("live_restart_complete_account_required")
+        candidate = self._activation_state(state)
+        context = {
+            "live": state.model_dump(mode="json"),
+            "post": post,
+            "orders_sha256": self._checkpoint(rows),
+            "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
+            "account_id": state.policy.account_id,
+            "account_observed_at": snapshot.observed_at.isoformat(),
+            "configuration_sha256": candidate.configuration_sha256,
+            "implementation_sha256": candidate.implementation_sha256,
+            "confirmations": sorted(
+                RESTART_CONFIRMATIONS
+                | ({"clock-repaired"} if post["reason"] == "clock_invalid" else set())
+            ),
+            "event_id": conn.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
+            if event_id is None
+            else event_id,
+        }
+        return {**context, "checkpoint_sha256": self._checkpoint(context)}
+
+    def restart_context(self):
+        """Inspect the current stop and fresh full-account acceptance; never resume implicitly."""
+        with self._transaction() as conn:
+            return self._restart_context(conn, self._clock(self.clock()))
+
+    def restart(self, acceptance, *, confirmations):
+        acceptance = LiveRestartApproval.model_validate(acceptance.model_dump())
+        approval = acceptance.approval
+        with self._lock, self.posts._ownership() as owner:
+            with self._transaction() as conn:
+                now = self._clock(self.clock())
+                context = self._restart_context(conn, now)
+                previous = self._live_state(conn).approval
+                if (
+                    frozenset(confirmations) != frozenset(context["confirmations"])
+                    or acceptance.checkpoint_sha256 != context["checkpoint_sha256"]
+                    or approval.account_id != context["account_id"]
+                    or approval.configuration_sha256 != context["configuration_sha256"]
+                    or approval.implementation_sha256 != context["implementation_sha256"]
+                    or not approval.accepted_at <= now < approval.expires_at
+                    or approval.accepted_at < datetime.fromisoformat(context["account_observed_at"])
+                    or (previous is not None and approval.accepted_at <= previous.accepted_at)
+                ):
+                    raise LiveOrderError("explicit_live_restart_acceptance_required")
+                payload = {
+                    "context": context,
+                    "acceptance": acceptance.model_dump(mode="json"),
+                    "post": context["post"],
+                }
+                self._event(conn, None, "LIVE_RESTART_PREPARED", payload)
+                prepared_id = conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+            with self._transaction() as conn:
+                now = self._clock(self.clock())
+                prepared = conn.execute(
+                    "SELECT payload_json FROM events WHERE id=? AND kind='LIVE_RESTART_PREPARED'",
+                    (prepared_id,),
+                ).fetchone()
+                if (
+                    self._restart_context(conn, now, event_id=context["event_id"]) != context
+                    or conn.execute("SELECT MAX(id) FROM events").fetchone()[0] != prepared_id
+                    or prepared is None
+                    or json.loads(prepared[0]) != payload
+                ):
+                    raise LiveOrderError("live_restart_checkpoint_changed")
+                state = self._live_state(conn)
+                proof = json.loads(self._gate(conn)["proof_json"])
+                snapshot = AccountSnapshot.model_validate(proof["snapshot"])
+                quote = AccountQuote.model_validate(proof["quote"])
+
+                def validate_commit():
+                    stamp = self._clock(self.clock())
+                    if (
+                        not approval.accepted_at <= stamp < approval.expires_at
+                        or self._current_implementation() != context["implementation_sha256"]
+                        or not fresh(
+                            snapshot.observed_at, stamp, state.policy.max_snapshot_age_seconds
+                        )
+                        or not fresh(quote.observed_at, stamp, state.policy.max_quote_age_seconds)
+                        or self.posts.reads.status()["blocked"]
+                    ):
+                        raise LiveOrderError("live_restart_checkpoint_changed")
+
+                validate_commit()
+                self._write_live(
+                    conn,
+                    state,
+                    phase="ENABLED",
+                    approval=approval,
+                    configuration_sha256=approval.configuration_sha256,
+                    implementation_sha256=approval.implementation_sha256,
+                )
+                conn.execute("UPDATE metadata SET halted=0 WHERE id=1")
+                reference = {
+                    "live_instance": state.instance,
+                    "live_path": str(self.path.parent),
+                    "client_id": None,
+                    "prepared_id": prepared_id,
+                    "prepared_sha256": self._checkpoint(payload),
+                }
+                self._event(conn, None, "LIVE_RESTARTED", reference)
+                updated = self.posts._restart_execution(
+                    expected=context["post"],
+                    reference=reference,
+                    owner=owner,
+                    validate=validate_commit,
+                )
+                # A failed final live commit must leave trading stopped even if
+                # POST's prior commit already succeeded. Recheck before committing it.
+                validate_commit()
+            return {
+                "live_restarted": True,
+                "post_revision": updated["revision"],
+                "new_clients_required": True,
+                "complete": False,
+            }
 
     def _authorize(self, conn, now):
         state = self._live_state(conn)
