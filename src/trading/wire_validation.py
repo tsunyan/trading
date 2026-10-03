@@ -2,11 +2,34 @@
 
 import re
 from datetime import timedelta
-from decimal import Decimal
+from decimal import (
+    MAX_EMAX,
+    MAX_PREC,
+    MIN_EMIN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
 
 from pydantic import AwareDatetime, TypeAdapter
 
 _TIME = TypeAdapter(AwareDatetime)
+
+
+def exact_decimal():
+    """Sums of finite wire decimals that never round, whatever the caller's context."""
+    return localcontext(
+        Context(
+            prec=MAX_PREC,
+            Emax=MAX_EMAX,
+            Emin=MIN_EMIN,
+            traps=[InvalidOperation, DivisionByZero, Overflow, Inexact],
+        )
+    )
 
 
 def unique_object(pairs):

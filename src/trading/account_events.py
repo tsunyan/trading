@@ -260,7 +260,8 @@ def parse_event(payload: bytes, received_at: datetime, *, clock_skew_ms: int = 0
                         position_id=_id(row, "positionId"),
                         units=size,
                         price=_number(row, "executionPrice", positive=True),
-                        fee=-_number(row, "fee"),
+                        # copy_negate never rounds; unary minus uses the caller's context.
+                        fee=_number(row, "fee").copy_negate(),
                         loss_gain=_number(row, "lossGain"),
                         settled_swap=_number(row, "settledSwap"),
                         timestamp=stamp,

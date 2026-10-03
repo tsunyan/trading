@@ -9,6 +9,7 @@ from typing import Literal
 from trading.account_events import AccountEvent
 from trading.account_reader import OrderReadReport
 from trading.broker_contracts import Contract, validate_evidence
+from trading.wire_validation import exact_decimal
 
 
 class ExecutionReconciliation(Contract):
@@ -109,20 +110,24 @@ def reconcile_executions(
         rest = rest_fills.get(identity)
         if rest is None:
             problems.append(f"execution_missing_from_rest:{identity}")
-        elif rest != fill:
+            continue
+        with exact_decimal():
+            amount = fill.loss_gain - fill.fee + fill.settled_swap
+        if rest != fill:
             problems.append(f"execution_fields_mismatch:{identity}")
-        elif fill.fee < 0 or event.execution_amount != (
-            fill.loss_gain - fill.fee + fill.settled_swap
-        ):
+        elif fill.fee < 0 or event.execution_amount != amount:
             problems.append(f"execution_amount_mismatch:{identity}")
         elif not fill.units <= event.execution_cumulative_units <= rest_units:
             problems.append(f"execution_cumulative_size_mismatch:{identity}")
         else:
             matched.append(identity)
     fills = [notices[i].execution for i in matched]
-    loss = sum((f.loss_gain for f in fills), Decimal(0))
-    fee = sum((f.fee for f in fills), Decimal(0))
-    swap = sum((f.settled_swap for f in fills), Decimal(0))
+    # The caller's Decimal context must not round a match or its totals.
+    with exact_decimal():
+        loss = sum((f.loss_gain for f in fills), Decimal(0))
+        fee = sum((f.fee for f in fills), Decimal(0))
+        swap = sum((f.settled_swap for f in fills), Decimal(0))
+        cash = loss - fee + swap
     return ExecutionReconciliation(
         matched_execution_ids=tuple(matched),
         unverified_execution_ids=tuple(sorted(notices.keys() - set(matched))),
@@ -131,6 +136,6 @@ def reconcile_executions(
         matched_loss_gain=loss,
         matched_fee_debit=fee,
         matched_settled_swap=swap,
-        matched_cash_amount=loss - fee + swap,
+        matched_cash_amount=cash,
         reports=tuple(normalized),
     )

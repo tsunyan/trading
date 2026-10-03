@@ -5,7 +5,7 @@ import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 from test_account_events import NOW, execution, raw
@@ -213,6 +213,27 @@ def test_closing_pnl_swap_and_fee_remain_separate():
     assert result.matched_fee_debit == Decimal("2.5")
     assert result.matched_cash_amount == Decimal("99.375")
     assert not result.accounting_applied
+
+
+def test_low_precision_caller_context_cannot_round_fees_or_reject_a_match():
+    row = execution(
+        settleType="CLOSE",
+        side="SELL",
+        lossGain="100.12345678",
+        settledSwap="1.75",
+        fee="-2.12345678",
+        amount="99.75",
+    )
+    with localcontext() as context:
+        context.prec = 6
+        event = parse_event(raw(row), NOW)
+        rest = read_order(Clock(), [row])
+        result = reconcile_executions((event,), (rest,))
+    assert event.execution.fee == rest.evidence.executions[0].fee == Decimal("2.12345678")
+    assert result.matched_execution_ids == (501,) and not result.mismatches
+    assert result.matched_loss_gain == Decimal("100.12345678")
+    assert result.matched_fee_debit == Decimal("2.12345678")
+    assert result.matched_cash_amount == Decimal("99.75")
 
 
 def test_multiple_fills_deduplicate_and_expose_rest_only_history():
