@@ -348,6 +348,94 @@ def test_regular_rest_and_clean_restart_require_new_baselines_and_fence_old_owne
     assert [method for method, _ in calls] == ["POST", "DELETE", "POST", "DELETE"]
 
 
+@pytest.mark.parametrize("elapsed", [0, 24])
+def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elapsed, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    state, calls = {}, []
+
+    def collect():
+        calls.append("collect")
+        entered.set()
+        assert release.wait(10)
+        return report(state["clock"], units=None, orders=False, balance="1000000")
+
+    clock, _, _, control, runner, sockets, _, _, _, _ = setup(
+        tmp_path,
+        max_records=64,
+        collect=collect,
+        policy=SupervisorPolicy(join_timeout_seconds=0.01),
+    )
+    state["clock"] = clock
+    start(runner)
+    assert entered.wait(3)
+    clock.advance(elapsed)
+    original = runner._worker.join
+    waits = []
+
+    def join(timeout=None):
+        waits.append(timeout)
+        return original(timeout=timeout)
+
+    monkeypatch.setattr(runner._worker, "join", join)
+    # The initial case reproduces a legitimate three-second REST collection,
+    # longer than the old two-second normal-shutdown budget.
+    timer = threading.Timer(3 if not elapsed else 0.05, release.set)
+    timer.start()
+    try:
+        runner.close()
+    finally:
+        release.set()
+        timer.join()
+    assert waits[0] == pytest.approx(35 - elapsed)
+    assert calls == ["collect"]  # Shutdown must not launch another collection.
+    assert control.snapshot()["phase"] == "READY"
+    assert control.snapshot()["sync_successes"] == 1
+    assert sockets[0].closed and not runner.status()["owner_retained"]
+
+
+def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    state = {}
+
+    def collect():
+        entered.set()
+        assert release.wait(10)
+        return report(state["clock"], units=None, orders=False, balance="1000000")
+
+    clock, journal, book, control, runner, _, _, _, _, _ = setup(
+        tmp_path,
+        max_records=64,
+        collect=collect,
+        policy=SupervisorPolicy(sync_timeout_seconds=1, join_timeout_seconds=0),
+    )
+    state["clock"] = clock
+    start(runner)
+    assert entered.wait(3)
+    try:
+        with pytest.raises(SupervisorError, match="worker_not_joined"):
+            runner.close()
+        assert runner.status()["owner_retained"]
+        saved = control.snapshot()
+        assert saved["phase"] == "STOPPED"
+        peer = StreamControl(control.path.parent, wall_ns=control._wall)
+        with pytest.raises(StreamControlError, match="owner_busy"):
+            peer.recover(
+                journal,
+                book,
+                expected_revision=saved["revision"],
+                expected_reason=saved["reason"],
+                expected_head=journal.head(),
+                acknowledge_token_uncertainty=True,
+                at=clock.wall,
+            )
+    finally:
+        release.set()
+        runner._worker.join(timeout=3)
+        runner.close()
+    assert not runner.status()["owner_retained"]
+    assert control.snapshot()["phase"] == "STOPPED"
+
+
 @pytest.mark.parametrize("max_records", [8, 9])
 def test_many_fills_cross_capacity_in_multiple_connections_without_double_booking(
     tmp_path, max_records

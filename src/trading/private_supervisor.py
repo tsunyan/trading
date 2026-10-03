@@ -411,7 +411,13 @@ class PrivateStreamSupervisor:
                 return
             try:
                 if self._worker is not None:
-                    self._worker.join(timeout=self.policy.join_timeout_seconds)
+                    # Normal shutdown honors the collection's original deadline.
+                    # join_timeout only bounds cleanup after a known failure.
+                    remaining = max(
+                        0.0,
+                        self._worker_started + self.policy.sync_timeout_seconds - self._now(),
+                    )
+                    self._worker.join(timeout=remaining)
                     if self._worker.is_alive():
                         raise SupervisorError("worker_not_joined")
                     self._drain(self._now())
