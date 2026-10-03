@@ -88,6 +88,8 @@ RESOLUTION_CONFIRMATIONS = frozenset(
         "preserve-stops",
     }
 )
+# A still-active accepted order is confirmed as such, never as a terminal one.
+ACTIVE_RESOLUTION_CONFIRMATIONS = (RESOLUTION_CONFIRMATIONS - {"terminal-order"}) | {"active-order"}
 RESTART_CONFIRMATIONS = CONFIRMATIONS | frozenset(
     {"restart-orders", "stop-cause-reviewed", "old-clients-closed", "preserve-loss-stop"}
 )
@@ -1274,7 +1276,14 @@ class LiveOrderJournal(OrderJournal):
             or not conn.execute("SELECT halted FROM metadata").fetchone()[0]
         ):
             raise LiveOrderError("order_resolution_stop_required")
-        if row["state"] not in {"FILLED", "CANCELED", "EXPIRED"} or not row["evidence_json"]:
+        terminal = row["state"] in {"FILLED", "CANCELED", "EXPIRED"}
+        # An accepted, still-active order resolves only a submission claim. A cancel
+        # attempt whose order is still active is not known to have failed or succeeded.
+        active = row["state"] in {"WORKING", "PARTIAL"} and recovery["post_operation"] in {
+            "order",
+            "close_order",
+        }
+        if not (terminal or active) or not row["evidence_json"]:
             raise LiveOrderError("order_resolution_terminal_evidence_required")
         evidence = OrderEvidence.model_validate_json(row["evidence_json"])
         validate_evidence(evidence)
@@ -1283,13 +1292,20 @@ class LiveOrderJournal(OrderJournal):
             "ORDER BY id DESC LIMIT 1",
             (client_id,),
         ).fetchone()
-        if (
-            not evidence.executions_complete
-            or evidence.status not in {"EXECUTED", "CANCELED", "EXPIRED"}
-            or row["state"]
-            != {"EXECUTED": "FILLED", "CANCELED": "CANCELED", "EXPIRED": "EXPIRED"}.get(
+        filled = sum(e.units for e in evidence.executions)
+        expected = (
+            {"EXECUTED": "FILLED", "CANCELED": "CANCELED", "EXPIRED": "EXPIRED"}.get(
                 evidence.status
             )
+            if terminal
+            else ("PARTIAL" if filled else "WORKING")
+            if evidence.status in {"WAITING", "ORDERED", "MODIFYING"}
+            else None
+        )
+        if (
+            not evidence.executions_complete
+            or row["state"] != expected
+            or (not terminal and filled >= evidence.intent.units)
             or evidence.intent != OrderIntent.model_validate_json(row["intent_json"])
             or (
                 evidence.status == "EXECUTED"
@@ -1318,7 +1334,8 @@ class LiveOrderJournal(OrderJournal):
             "account_id": state.policy.account_id,
             "implementation_sha256": self._current_implementation(),
             "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
-            "terminal_state": row["state"],
+            "terminal_state": row["state"] if terminal else None,
+            "active_state": None if terminal else row["state"],
             "evidence_sha256": _hash(evidence.model_dump_json()),
         }
         return {**context, "checkpoint_sha256": self._checkpoint(context)}
@@ -1330,12 +1347,19 @@ class LiveOrderJournal(OrderJournal):
 
     def resolve_order_claim(self, client_id, approval, *, confirmations):
         approval = OrderResolutionApproval.model_validate(approval.model_dump())
-        if frozenset(confirmations) != RESOLUTION_CONFIRMATIONS:
+        confirmations = frozenset(confirmations)
+        if confirmations not in {RESOLUTION_CONFIRMATIONS, ACTIVE_RESOLUTION_CONFIRMATIONS}:
             raise LiveOrderError("explicit_order_resolution_confirmations_required")
         with self._lock, self.posts._ownership() as owner:
             with self._transaction() as conn:
                 now = self._clock(self.clock())
                 context = self._resolution_context(conn, client_id, now)
+                if confirmations != (
+                    ACTIVE_RESOLUTION_CONFIRMATIONS
+                    if context["active_state"]
+                    else RESOLUTION_CONFIRMATIONS
+                ):
+                    raise LiveOrderError("explicit_order_resolution_confirmations_required")
                 if (
                     context["checkpoint_sha256"] != approval.checkpoint_sha256
                     or context["account_id"] != approval.account_id
