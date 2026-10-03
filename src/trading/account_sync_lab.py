@@ -8,10 +8,11 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field
 
-from trading.account_read_lab import Transcript, demo_transcript
+from trading.account_read_lab import ReplayTransport, Transcript, demo_transcript
 from trading.account_read_lab import replay as replay_account
+from trading.account_reader import AccountReader
 from trading.account_sync import AccountSyncMonitor, SyncError
-from trading.broker_contracts import Contract
+from trading.broker_contracts import Contract, OrderIntent, Units
 from trading.wire_validation import unique_object
 
 
@@ -27,10 +28,17 @@ class EventStep(Contract):
     payload: str = Field(max_length=16_384)
 
 
+class OrderReadInput(Contract):
+    intent: OrderIntent
+    order_id: Units
+    transcript: Transcript
+
+
 class ReadStep(Contract):
     kind: Literal["resync"]
     at: AwareDatetime
     transcript: Transcript
+    order_reads: tuple[OrderReadInput, ...] | None = Field(default=None, max_length=1000)
 
 
 class SyncTranscript(Contract):
@@ -80,7 +88,24 @@ def replay(transcript: SyncTranscript):
                     now = report.observations[-1].received_at
                     return report
 
-                assessment = monitor.resync(session, collect).model_dump(mode="json")
+                def collect_orders(order_ids, inputs=step.order_reads):
+                    nonlocal now
+                    reports = []
+                    for item in inputs:
+                        transport = ReplayTransport(item.transcript)
+                        reader = AccountReader(transport, clock=lambda t=transport: t.now)
+                        result = reader.collect_order(item.intent, item.order_id)
+                        if transport.index != len(item.transcript.exchanges):
+                            raise ValueError("unused_order_replay_exchanges")
+                        now = result.observations[-1].received_at
+                        reports.append(result)
+                    return tuple(reports)
+
+                assessment = monitor.resync(
+                    session,
+                    collect,
+                    collect_orders=collect_orders if step.order_reads is not None else None,
+                ).model_dump(mode="json")
         except SyncError as exc:
             error = str(exc)
         results.append(
@@ -146,17 +171,109 @@ def demo_transcript_events(now: datetime) -> SyncTranscript:
     )
 
 
+def demo_execution_transcript(now: datetime) -> SyncTranscript:
+    """Matching partial fill, duplicate delivery, changed REST fee, corrected read."""
+    account = demo_transcript(now)
+    order = account.exchanges[3].response["data"]["list"][0]
+    payload = {
+        "channel": "executionEvents",
+        "msgType": "ER",
+        "rootOrderId": 201,
+        "orderId": 201,
+        "clientOrderId": "DemoOpen",
+        "symbol": "USD_JPY",
+        "settleType": "OPEN",
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "side": "BUY",
+        "executionId": 501,
+        "positionId": 401,
+        "executionPrice": "150",
+        "executionSize": "400",
+        "orderPrice": "150",
+        "orderSize": "1000",
+        "orderExecutedSize": "400",
+        "lossGain": "0",
+        "settledSwap": "0",
+        "fee": "-2",
+        "amount": "-2",
+        "orderTimestamp": now.isoformat(),
+        "executionTimestamp": now.isoformat(),
+    }
+
+    def reading(fee):
+        fill = {
+            "executionId": 501,
+            "positionId": 401,
+            "orderId": 201,
+            "clientOrderId": "DemoOpen",
+            "symbol": "USD_JPY",
+            "side": "BUY",
+            "settleType": "OPEN",
+            "size": "400",
+            "price": "150",
+            "fee": fee,
+            "amount": fee,
+            "lossGain": "0",
+            "settledSwap": "0",
+            "timestamp": now.isoformat(),
+        }
+        exchanges = tuple(
+            {
+                "method": "GET",
+                "path": path,
+                "query": (("orderId", "201"),),
+                "received_at": now,
+                "response": {"status": 0, "data": {"list": [row]}, "responsetime": now.isoformat()},
+            }
+            for path, row in (("/v1/orders", order), ("/v1/executions", fill)) * 2
+        )
+        return ReadStep(
+            kind="resync",
+            at=now,
+            transcript=account,
+            order_reads=(
+                OrderReadInput(
+                    intent=OrderIntent(
+                        client_id="DemoOpen",
+                        side="BUY",
+                        effect="OPEN",
+                        kind="LIMIT",
+                        price="150",
+                        units=1000,
+                    ),
+                    order_id=201,
+                    transcript=Transcript(started_at=now, exchanges=exchanges),
+                ),
+            ),
+        )
+
+    return SyncTranscript(
+        steps=(
+            ControlStep(kind="connect", at=now),
+            EventStep(kind="event", at=now, sequence=1, payload=json.dumps(payload)),
+            reading("-2"),
+            EventStep(kind="event", at=now, sequence=2, payload=json.dumps(payload)),
+            reading("-2"),
+            reading("-3"),
+            reading("-2"),
+        )
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     demo = commands.add_parser("demo")
     demo.add_argument("--directory", type=Path, required=True)
+    demo.add_argument("--executions", action="store_true", help="include known-order fill checks")
     replay_command = commands.add_parser("replay")
     replay_command.add_argument("--input", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "demo":
-            transcript = demo_transcript_events(datetime.now(UTC))
+            factory = demo_execution_transcript if args.executions else demo_transcript_events
+            transcript = factory(datetime.now(UTC))
             result = replay(transcript)
             args.directory.mkdir(parents=True, exist_ok=False)
             (args.directory / "transcript.json").write_text(

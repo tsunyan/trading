@@ -14,6 +14,8 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from trading.wire_validation import exact_decimal
+
 Units = Annotated[int, Field(strict=True, gt=0)]
 Money = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 ClientId = Annotated[str, Field(pattern=r"^[A-Za-z0-9]{1,36}$")]
@@ -227,14 +229,13 @@ def _paid_fee(fill: dict) -> Decimal:
     if fee > 0:
         raise BrokerResponseError("unexpected fee credit")
     if "amount" in fill:
-        total = (
-            _decimal(fill.get("lossGain"), "lossGain")
-            + fee
-            + _decimal(fill.get("settledSwap"), "settledSwap")
-        )
+        loss_gain = _decimal(fill.get("lossGain"), "lossGain")
+        swap = _decimal(fill.get("settledSwap"), "settledSwap")
+        with exact_decimal():
+            total = loss_gain + fee + swap
         if _decimal(fill["amount"], "amount") != total:
             raise BrokerResponseError("execution amount does not reconcile")
-    return -fee
+    return fee.copy_negate()
 
 
 class Execution(Contract):

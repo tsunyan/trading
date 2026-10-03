@@ -320,6 +320,30 @@ def test_diagnostic_reader_during_capture_does_not_poison_delivery(setup, monkey
     assert status["journal_unacknowledged_records"] == ()
 
 
+def test_busy_status_read_reports_unknown_state_without_stopping_capture(setup, monkeypatch):
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    _, journal, capture = setup
+    journal._wait = lambda seconds: None
+    with sqlite3.connect(journal.path) as lock:
+        lock.execute("BEGIN EXCLUSIVE")
+        # Before start: a diagnostic status() must not consume the new object.
+        status = capture.status()
+        assert not status["capture_failed"]
+        assert "journal_busy_state_unknown" in status["blockers"]
+        lock.rollback()
+    begin(journal, capture)
+    with sqlite3.connect(journal.path) as lock:
+        lock.execute("BEGIN EXCLUSIVE")
+        status = capture.status()
+        assert not status["capture_failed"] and status["journal_epoch"] is None
+        assert "journal_busy_state_unknown" in status["blockers"]
+        lock.rollback()
+    capture.ingest(1, frame())
+    status = capture.status()
+    assert not status["capture_failed"] and status["journal_epoch"] == 1
+    assert "journal_busy_state_unknown" not in status["blockers"]
+
+
 def test_transient_busy_during_delivery_is_retried(setup, monkeypatch):
     monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
     _, journal, capture = setup

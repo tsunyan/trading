@@ -227,15 +227,24 @@ def test_clock_reversal_is_durably_closed(journal, clock):
     assert journal.replay()["outcomes"][-1]["kind"] == "FAULT"
 
 
-def test_capacity_does_not_prune_or_ack_silently(tmp_path):
+def test_capacity_keeps_room_for_ack_and_never_prunes(tmp_path):
     journal = EventJournal.create(tmp_path / "journal", "synthetic", max_records=4)
     session = start(journal)
     journal.acknowledge(session, event(journal, session))
-    pending = event(journal, session, 2)
-    with pytest.raises(JournalError, match="capacity"):
-        journal.acknowledge(session, pending)
+    # A record without room for its ACK would leave a delivery outcome unknown.
+    for kind in ("EVENT", "HEARTBEAT"):
+        with pytest.raises(JournalError, match="journal_capacity_exceeded"):
+            if kind == "EVENT":
+                event(journal, session, 2)
+            else:
+                journal.record(session, kind, at=NOW, monotonic_ns=0)
+    assert journal.inspect()["records"] == 3
+    assert journal.inspect()["unacknowledged_records"] == ()
+    journal.record(session, "END", at=NOW, monotonic_ns=0)  # END needs no ACK.
     assert journal.inspect()["records"] == 4
-    assert journal.inspect()["unacknowledged_records"] == (pending,)
+    with pytest.raises(JournalError, match="journal_capacity_exceeded"):
+        start(journal)
+    assert journal.inspect()["records"] == 4
 
 
 def test_sql_failure_rolls_back_capture_and_head(journal):
@@ -353,6 +362,32 @@ def test_read_only_verification_never_blocks_a_writer_commit(journal, monkeypatc
     assert written == [2]
     assert not writer._failed and not reader._failed
     assert reader.inspect()["unacknowledged_records"] == (2,)
+
+
+def test_hot_journal_from_crash_during_commit_is_rolled_back_on_reopen(journal):
+    session = start(journal)
+    event(journal, session)
+    before = journal.inspect()
+    # A one-page cache spills uncommitted pages into the database file, so the
+    # remaining rollback journal is hot: only a writable connection can undo it.
+    script = """
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('PRAGMA cache_size=1')
+conn.execute('BEGIN IMMEDIATE')
+conn.execute('UPDATE journal SET bytes=bytes+1')
+for i in range(3000):
+    conn.execute('INSERT INTO records VALUES(?,?,?)', (100 + i, 'x' * 500, 'y'))
+os._exit(17)
+"""
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(journal.path)], capture_output=True, timeout=15
+    )
+    assert done.returncode == 17, done.stderr.decode()
+    assert journal.path.with_name("event-journal.sqlite-journal").exists()
+    reopened = EventJournal(journal.path.parent, "synthetic")
+    assert reopened.inspect() == before
+    assert not journal.path.with_name("event-journal.sqlite-journal").exists()
 
 
 def test_busy_write_is_retried_once_without_duplicate(journal, monkeypatch):
