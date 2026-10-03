@@ -4,7 +4,7 @@ import hashlib
 import re
 import sqlite3
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from pydantic import AwareDatetime, Field
@@ -363,6 +363,50 @@ class SegmentedEventJournal(EventJournal):
                 }
 
         return self._retry_busy(attempt)
+
+    def _recovery_events(self, conn, expected_head):
+        meta, entries, state = self._verify(conn)
+        if expected_head != meta["head"]:
+            raise JournalError("journal_head_changed")
+        self._audit(conn, meta)
+        if state["unacknowledged"]:
+            raise JournalError("capture_delivery_unresolved")
+        if entries and not state["active"] and entries[-1].kind != "END":
+            raise JournalError("recovery_fault_requires_review")
+        events, skew = [], 0
+        for entry in entries:
+            if entry.kind == "BEGIN":
+                skew = entry.clock_skew_ms or 0
+            elif entry.kind == "EVENT":
+                event = parse_event(entry.payload.encode(), entry.at, clock_skew_ms=skew)
+                if event.channel == "executionEvents":
+                    events.append(event)
+                    if len(events) > 2000:
+                        raise JournalError("recovery_execution_capacity")
+        return tuple(events)
+
+    def recovery_events(self, *, expected_head):
+        """Read bounded current-segment notices, preserving every duplicate variant.
+
+        The caller must hold StreamControl OS ownership and check its stopped state.
+        This does not retire a session, acknowledge delivery or repair history gaps.
+        """
+
+        def attempt():
+            with self._transaction() as conn:
+                return self._recovery_events(conn, expected_head)
+
+        return self._retry_busy(attempt)
+
+    @contextmanager
+    def guard_recovery_events(self, *, expected_head):
+        """Fence journal changes through a separate, idempotent cash transaction.
+
+        StreamControl ownership is also required. Cash and journal do not commit
+        atomically; no journal write or stop clearance is performed here.
+        """
+        with self._transaction(write=True) as conn:
+            yield self._recovery_events(conn, expected_head)
 
     def retire_for_recovery(self, *, expected_head, cash_book, at, monotonic_ns):
         """Explicit orphan retirement ONLY under the supervisor's checked OS ownership.

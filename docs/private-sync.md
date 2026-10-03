@@ -4,8 +4,9 @@
 口座Reader、Private受信・継続同期を組み合わせます。起動・正常終了・認証失敗・通知と約定計上・
 応答しないREST処理・復旧を合成通信で検証しています。実キー・実口座での受入は未実施です。
 
-`init`・`status`・`recover`・`init-orders`・`register-order`はキーを読み込まず、業者へ通信しません。`run`だけが明示指定した
-Windows資格情報を読み、GET口座取得とWebSocket用のトークン操作・購読を行います。
+`init`・`status`・`recover`・`init-orders`・`register-order`はキーを読み込まず、業者へ通信しません。
+`run`は明示指定したWindows資格情報を読み、GET口座取得とWebSocket用のトークン操作・購読を行います。
+`reconcile-stopped`は保存済み約定について既知注文のGET照合・計上を行います。
 注文送信や戦略判断はありません。Windowsのタスク登録・障害通知への接続は次の工程です。
 
 ## 事前に用意するもの
@@ -128,9 +129,34 @@ HTTPクライアントも処理終了後に閉じ、終了待機中のワーカ�
 非daemonワーカーが残る場合、プロセス終了自体はその終了を待ちます。
 
 不明な注文IDは注文HTTP取得の前に拒否し、推測した意図で計上しません。
-後から確認した注文は追記登録できます。未知注文で停止した後、保存済みの未計上約定を
-REST証拠と照合して計上する運用手順は残っています。登録だけでは停止を解除しません。
+後から確認した注文は追記登録できます。未知注文で停止した後は、次の照合・計上手順を
+使います。登録だけでは停止を解除しません。
 CLIの引数・設定・通信例外の生の内容はエラーへ再表示しません。
+
+## 停止中の約定照合・計上
+
+同期プロセスを終了し、`status`の設定ハッシュ・revision・末尾・停止理由を確認します。
+未知注文があれば資料と照合して先に登録します。GET制御が停止・claim不明の場合は、
+[GET復旧](read-recovery.md)・[claim解消](read-orphan.md)を別に確認してください。
+
+```powershell
+uv run python -m trading.private_sync reconcile-stopped --directory runs/private-sync --expected-plan-sha256 <plan_sha256> --expected-revision <revision> --expected-head <head> --expected-reason <reason> --read-only-confirmed
+```
+
+STOPPEDまたは旧所有者不在のRUNNINGだけを受理します。OS所有権をネットワーク操作と計上が終わるまで
+保持し、稼働中・応答しない旧処理が所有していれば拒否します。現在区間に保存した約定通知を取得し、
+各注文の`orders`・`executions`を2回ずつGETします。通常の取得と同じ通信待機・全体取得予算を使います。
+RESTから見つけただけの約定は追加計上しません。重複通知は受信時刻が異なっていても各内容を照合し、
+一致したexecution IDを一度だけ計上します。上限は重複を含む2,000通知・1,000注文です。
+
+設定・制御状態・ジャーナル末尾が取得中に変わった場合、計上を拒否します。計上中はジャーナル変更を
+トランザクションで防ぎます。現金台帳とは別DBのため両者のcommitは一体ではありませんが、計上commit直後に
+終了した場合も保存済み証拠を使って再実行でき、二重計上しません。
+ACK不明・FAULT/REJECTEDで終了した区間・停止した現金台帳は自動解消しません。
+約定通知がなければキーの読込・GET・計上は行いません。
+
+成功後も同期状態・ジャーナルは維持し、`recovery_required=true`を返します。
+接続間に失った履歴や口座全体の一致を証明する処理ではありません。
 
 ## 復旧
 
@@ -142,11 +168,14 @@ uv run python -m trading.private_sync recover --directory runs/private-sync --ex
 トークン不明の扱いを確認した場合にのみ最後のフラグを使います。
 GET制御の停止・claim不明はこのコマンドでは解除しません。[GET復旧](read-recovery.md)・
 [claim解消](read-orphan.md)を別に確認し、その後に新しい読取クライアントで開始します。
+未計上約定は上の手順で一致を確認して計上した後に復旧します。
 ACK不明・未計上約定・FAULT区間の強制解除はありません。
 
 口座の全履歴、外部操作、業者の丸め・証拠金式、接続間の履歴欠損は引き続き未確認です。
 CLI成功も`complete=false`、`live_enabled=false`で、実注文や戦略の昇格へ変換しません。
 実Windowsストア・実REST/WebSocketの受入、全口座照合、Windows通知、実発注は残工程です。
 
-検証: `uv run pytest tests/test_private_sync.py tests/test_known_orders.py -q`。ネイティブ資格情報APIと実ソケットを禁止し、
+検証: `uv run pytest tests/test_private_sync.py tests/test_known_orders.py tests/test_stopped_reconciliation.py -q`。ネイティブ資格情報APIと実ソケットを禁止し、
 境界だけを合成通信へ置き換えて、実際のGETクライアント・Reader・TokenClient・Supervisorを通します。
+停止中の照合は23件で、重複通知・内容矛盾・末尾競合・応答しないGET・計上commit前後の
+実プロセス終了と、再実行による二重計上防止を検証しています。

@@ -46,6 +46,12 @@ ACK不明の記録を拒否します。部分約定注文は、受信した約�
 自動判断と定期REST取得を組み合わせる場合は[Supervisor](private-supervisor.md)を使います。
 クラッシュした旧区間の終了は、OS所有者不在と計上証拠を確認する[明示復旧](stream-control.md)に限定します。
 
+停止中の現在区間の約定は、[読取CLIの明示照合](private-sync.md)から計上できます。
+`recovery_events(expected_head=...)`は全保存履歴を監査し、ACK既知の現在区間から
+重複を保持した最大2,000約定通知を返します。`guard_recovery_events`は同じ末尾を確認して、
+別DBの現金計上中のジャーナル変更を防ぎます。呼出側でStreamControlのOS所有権と停止状態の
+確認が必要です。これらのAPIはACK・END・区間切替・停止解除を実行しません。
+
 ## 監査と履歴再生
 
 ```python

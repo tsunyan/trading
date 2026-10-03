@@ -18,7 +18,8 @@ from trading.account_reader import AccountReader
 from trading.broker_contracts import Contract
 from trading.credential_store import CredentialVault
 from trading.event_capture import JournaledEventCapture
-from trading.execution_cash_book import ExecutionCashBook
+from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
+from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
@@ -143,7 +144,9 @@ class _ReaderOwner:
             if close:
                 self.client.close()
 
-    def orders(self, ids):
+    def orders(self, ids, *, standalone=False):
+        if standalone:
+            self._deadline = self.monotonic() + self.plan.collection_limit_seconds
         # Validate every requested ID before the first order HTTP request.
         orders = self._lookup(ids) if self._lookup is not None else self._orders
         if any(identity not in orders for identity in ids):
@@ -384,6 +387,101 @@ class PrivateSyncWorkspace:
         self.journal = self.control.recover(self.journal, self.book, **checks)
         return self.status()
 
+    def reconcile_stopped(
+        self,
+        *,
+        expected_plan_sha256,
+        expected_revision,
+        expected_head,
+        expected_reason,
+        read_only_confirmed=False,
+        vault=None,
+        read_transport=None,
+        read_clocks=None,
+    ):
+        """Explicit GET proof and idempotent booking; keep the stopped state intact."""
+        self._check_plan(expected_plan_sha256)
+        if read_only_confirmed is not True:
+            raise PrivateSyncError("sync_read_permission_confirmation_required")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise PrivateSyncError("invalid_sync_revision")
+        if self.catalog is not None and not self._catalog_bound:
+            raise PrivateSyncError("sync_catalog_initialization_required")
+        with self.control.ownership():
+            self._check_plan(expected_plan_sha256)
+            self.control.check_binding(self.journal, self.book)
+            before = self.control.snapshot()
+            if before["phase"] == "READY":
+                raise PrivateSyncError("sync_reconciliation_stop_required")
+            if before["revision"] != expected_revision or before["reason"] != expected_reason:
+                raise PrivateSyncError("sync_checkpoint_changed")
+            events = self.journal.recovery_events(expected_head=expected_head)
+            if self.book.snapshot()["halted"]:
+                raise PrivateSyncError("sync_dependencies_blocked")
+            ids = tuple(sorted({event.execution_order_id for event in events}))
+            if len(ids) > 1000:
+                raise PrivateSyncError("sync_reconciliation_capacity")
+            # Unknown mappings are refused before credential access or GETs.
+            if self.catalog is not None:
+                self.catalog.lookup(ids)
+            elif any(i not in {o.order_id for o in self.plan.known_orders} for i in ids):
+                raise PrivateSyncError("sync_order_intent_missing")
+            reads = self._reads(**(read_clocks or {}))
+            if reads.status()["blocked"]:
+                raise PrivateSyncError("sync_dependencies_blocked")
+            booking = None
+            if events:
+                vault = vault if vault is not None else CredentialVault()
+                credentials = vault.load(reads, self.plan.credential_reference)
+                client = PrivateReadClient(
+                    credentials.api_key,
+                    credentials.secret,
+                    limiter=reads,
+                    transport=read_transport,
+                    clock=self.clock,
+                    monotonic=self.monotonic,
+                    timeout_seconds=self.plan.read_timeout_seconds,
+                )
+                owner = _ReaderOwner(
+                    client,
+                    self.plan,
+                    clock=self.clock,
+                    monotonic=self.monotonic,
+                    order_lookup=self.catalog.lookup if self.catalog is not None else None,
+                )
+                try:
+                    deadline = self.monotonic() + self.plan.collection_limit_seconds
+                    reports = owner.orders(ids, standalone=True)
+                    by_order = {r.evidence.order_id: r for r in reports}
+                    unique = {}
+                    # Receipt times can differ. Check every saved variant against
+                    # REST before deduplicating execution IDs for cash posting.
+                    for event in events:
+                        if self.monotonic() >= deadline:
+                            raise PrivateSyncError("sync_collection_deadline")
+                        match = reconcile_executions(
+                            (event,), (by_order[event.execution_order_id],)
+                        )
+                        if match.unverified_execution_ids or match.mismatches:
+                            raise PrivateSyncError("sync_reconciliation_mismatch")
+                        unique.setdefault(event.entity_id, event)
+                    batch = ExecutionCashBatch(events=tuple(unique.values()), reports=reports)
+                    self._check_plan(expected_plan_sha256)
+                    if self.control.snapshot() != before:
+                        raise PrivateSyncError("sync_checkpoint_changed")
+                    with self.journal.guard_recovery_events(expected_head=expected_head):
+                        if self.monotonic() >= deadline:
+                            raise PrivateSyncError("sync_collection_deadline")
+                        booking = self.book.apply(batch)
+                finally:
+                    owner.close()
+            return {
+                **self.status(),
+                "reconciled_notice_count": len(events),
+                "booking": booking,
+                "recovery_required": True,
+            }
+
     def run(
         self,
         stop_event,
@@ -494,7 +592,16 @@ class SyncParser(argparse.ArgumentParser):
 def main(argv=None):
     parser = SyncParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("init", "status", "run", "recover", "init-orders", "register-order")
+        "command",
+        choices=(
+            "init",
+            "status",
+            "run",
+            "recover",
+            "init-orders",
+            "register-order",
+            "reconcile-stopped",
+        ),
     )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--plan", type=Path)
@@ -539,6 +646,14 @@ def main(argv=None):
                     expected_catalog_head=args.expected_catalog_head,
                     source_ref=args.source_ref,
                     intent_confirmed=args.intent_confirmed,
+                )
+            elif args.command == "reconcile-stopped":
+                result = workspace.reconcile_stopped(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_revision=args.expected_revision,
+                    expected_head=args.expected_head,
+                    expected_reason=args.expected_reason,
+                    read_only_confirmed=args.read_only_confirmed,
                 )
             elif args.command == "run":
                 if threading.current_thread() is threading.main_thread():
