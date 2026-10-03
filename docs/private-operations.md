@@ -83,6 +83,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-private-
 間隔は`-IntervalSeconds`で30秒から停滞閾値まで指定できます。
 同時起動はIgnoreNew、実行上限は90秒です。ログイン中の同じユーザーで、管理者権限を要求せずに動きます。
 同期の開始は[読取CLI](private-sync.md)から別に行います。タスクは監視・通知を担当します。
+同じ場所の`pythonw.exe`が利用できるWindows環境では、監視タスクのコンソールを表示しません。
+利用できない場合は従来のインタープリターを使います。既存タスクへの適用は再登録時です。
 
 同じ名前のタスクを更新する際は、保存した監視識別子を含む説明とユーザーSIDを照合します。
 無関係なタスクや別ユーザーのタスクは上書きしません。Windowsがユーザー名を別表記で保存しても、

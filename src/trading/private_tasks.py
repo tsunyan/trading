@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from trading.paper_runner import python_process_args
+from trading.paper_runner import scheduled_process_args
 from trading.private_operations import OperationsError, OperationsParser, PrivateOperations
 from trading.private_sync import PrivateSyncWorkspace
 
@@ -20,7 +20,7 @@ def task_plan(directory, *, interval_seconds=60):
         raise OperationsError("operations_task_binding_mismatch")
     if type(interval_seconds) is not int or not 30 <= interval_seconds <= monitor["stale_seconds"]:
         raise OperationsError("operations_task_interval_invalid")
-    argv = python_process_args(
+    argv = scheduled_process_args(
         "from trading.private_operations import main; raise SystemExit(main(sys.argv[1:]))",
         "watchdog",
         "--directory",

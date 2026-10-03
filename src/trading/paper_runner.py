@@ -114,8 +114,23 @@ def _process_lock(path):
 def python_process_args(code, *args):
     # Windows venv python.exe can be a redirector: killing it leaves its interpreter
     # child alive. Launch the real interpreter with the current dependency search path.
+    # A pythonw.exe parent still starts console workers, so CREATE_NO_WINDOW also hides
+    # the consoles of anything those workers launch.
+    interpreter = Path(sys._base_executable)
+    if interpreter.stem.lower() == "pythonw":
+        interpreter = interpreter.with_name(f"python{interpreter.suffix}")
     bootstrap = "import json,sys; sys.path[:]=json.loads(sys.argv.pop(1)); exec(sys.argv.pop(1))"
-    return [sys._base_executable, "-c", bootstrap, json.dumps(sys.path), code, *map(str, args)]
+    return [str(interpreter), "-c", bootstrap, json.dumps(sys.path), code, *map(str, args)]
+
+
+def scheduled_process_args(code, *args):
+    # Task Scheduler opens a visible console for python.exe on every run; pythonw.exe has none.
+    argv = python_process_args(code, *args)
+    interpreter = Path(argv[0])
+    windowless = interpreter.with_name(f"pythonw{interpreter.suffix}")
+    if os.name == "nt" and interpreter.stem.lower() == "python" and windowless.is_file():
+        argv[0] = str(windowless)
+    return argv
 
 
 def run_observation(directory, timeout):

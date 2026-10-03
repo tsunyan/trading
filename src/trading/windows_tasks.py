@@ -8,7 +8,7 @@ from pathlib import Path
 
 from trading.config import Settings
 from trading.observer import code_hashes, load_manifest
-from trading.paper_runner import PaperRunner, RunnerPolicy, python_process_args
+from trading.paper_runner import PaperRunner, RunnerPolicy, scheduled_process_args
 from trading.provenance import runtime_versions
 from trading.windows_notify import deliver_alerts
 
@@ -40,7 +40,7 @@ def task_plan(directory, policy_path=None):
         ("Observation", "trading.paper_runner", "step", policy.cycle_timeout_seconds + 30),
         ("Watchdog", "trading.windows_tasks", "watchdog", 90),
     ):
-        argv = python_process_args(
+        argv = scheduled_process_args(
             f"from {module} import main; raise SystemExit(main(sys.argv[1:]))",
             command,
             *arguments,

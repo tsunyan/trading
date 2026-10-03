@@ -48,7 +48,11 @@ def test_plan_uses_actual_interpreter_and_one_local_monitor_task_without_mutatio
     assert plan["control_instance"] == workspace.control.snapshot()["instance"]
     assert plan["interval_seconds"] == 60 and len(plan["tasks"]) == 1
     spec = plan["tasks"][0]
-    assert spec["executable"] == sys._base_executable
+    interpreter = Path(sys._base_executable)
+    windowless = interpreter.with_name(f"pythonw{interpreter.suffix}")
+    if os.name == "nt" and windowless.is_file():
+        interpreter = windowless
+    assert spec["executable"] == str(interpreter)
     assert str(workspace.directory) in spec["arguments"]
     assert "trading.private_operations" in spec["arguments"] and "watchdog" in spec["arguments"]
     assert "trading.private_sync" not in spec["arguments"]

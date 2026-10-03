@@ -1,9 +1,11 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -338,13 +340,35 @@ def test_existing_fill_is_not_notified_again_when_runner_is_adopted(tmp_path, ba
     assert read_alerts(directory) == []
 
 
+def windowless_interpreter():
+    interpreter = Path(sys._base_executable)
+    windowless = interpreter.with_name(f"pythonw{interpreter.suffix}")
+    return str(windowless) if os.name == "nt" and windowless.is_file() else str(interpreter)
+
+
+def test_workers_use_console_interpreter_even_from_pythonw(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "_base_executable", str(tmp_path / "pythonw.exe"))
+    assert paper_runner.python_process_args("pass")[0] == str(tmp_path / "python.exe")
+
+
+def test_scheduled_tasks_choose_windowless_interpreter_only_when_available(monkeypatch, tmp_path):
+    interpreter = tmp_path / "python.exe"
+    monkeypatch.setattr(sys, "_base_executable", str(interpreter))
+    assert paper_runner.scheduled_process_args("pass")[0] == str(interpreter)
+    windowless = tmp_path / "pythonw.exe"
+    windowless.touch()
+    expected = windowless if os.name == "nt" else interpreter
+    assert paper_runner.scheduled_process_args("pass")[0] == str(expected)
+    assert paper_runner.python_process_args("pass")[0] == str(interpreter)
+
+
 def test_task_plan_uses_actual_interpreter_and_preserves_fixed_account(account):
     directory, _ = account
     before = (directory / "manifest.json").read_bytes()
     plan = task_plan(directory)
     assert plan["interval_seconds"] == 300
     assert len(plan["tasks"]) == 2
-    assert {t["executable"] for t in plan["tasks"]} == {sys._base_executable}
+    assert {t["executable"] for t in plan["tasks"]} == {windowless_interpreter()}
     assert all(str(directory) in t["arguments"] for t in plan["tasks"])
     assert plan["tasks"][0]["execution_limit_seconds"] > RunnerPolicy().cycle_timeout_seconds
     assert (directory / "manifest.json").read_bytes() == before
