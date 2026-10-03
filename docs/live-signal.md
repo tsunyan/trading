@@ -1,0 +1,58 @@
+# 戦略シグナルからの注文提案
+
+2026-10-04。設定した戦略のシグナルと、実発注台帳の最後の口座証拠の建玉を比べ、次に出すべき
+注文意図（`OrderIntent`）を1件だけ提案するCLIを追加しました。台帳への準備・送信は行いません。
+提案は[`live_setup prepare`](live-setup.md)と[確認済み送信](order-runtime.md)を通して初めて発注になります。
+
+戦略はまだ昇格していません（[ロードマップ](roadmap.md)）。このCLIは、運用者が提案を確認して
+発注するための道具です。自動売買のループには接続していません。
+
+```powershell
+uv run python -m trading.live_quote --output runs/live-orders/quote.json
+uv run python -m trading.live_signal --config configs/fx.toml --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --quote runs/live-orders/quote.json --units 1000 --max-slippage 0.02 --output runs/live-orders/intent.json
+```
+
+## シグナル
+
+公開APIから直近10日分の1時間足を取得し、[ペーパー取引](paper-operations.md)と同じ規則で
+完成した足だけを使います。足の確定は現在時刻と気配時刻の早い方で判定し、作成中の足は使いません。
+最新の確定足が`max_signal_age_seconds`より古い場合、気配が`max_quote_age_seconds`より古い・
+`max_future_quote_seconds`より未来の場合は拒否します。シグナルは`strategy.signal_direction`で、
+空売りは設定の`allow_short`が有効な場合だけです。
+
+## 保有と提案
+
+保有は台帳の最後の照合済み口座証拠の建玉で判断します。口座証拠がない、または
+`max_snapshot_age_seconds`より古い場合は拒否します。先に[口座証拠を更新](live-account.md)してください。
+
+| 状態 | 提案 |
+| --- | --- |
+| 終わっていない注文が台帳にある（準備済み・送信中・有効・結果不明） | 見送り（`unsettled_local_order`） |
+| 保有の向きがシグナルと同じ | 見送り（`at_target`） |
+| 保有がありシグナルと違う | その向きの全建玉を建玉指定で決済（最大10建玉） |
+| 保有がなくシグナルが買い/売り | `--units`の新規成行注文 |
+| 新規でスプレッドが`max_spread`超 | 見送り（`spread_exceeds_entry_limit`） |
+| 買いと売りの建玉が両方ある | 拒否 |
+
+反転は2回に分かれます。今回は決済だけを提案し、決済の照合と口座証拠の更新後に新規を提案します。
+
+注文は成行で、価格保護の上限/下限を付けます。買いは「売気配の上の値＋`--max-slippage`」を
+呼値で切り下げ、売りは「買気配−`--max-slippage`」を呼値で切り上げます。
+新規の数量は台帳の注文上限（最小・最大・単位）を満たす必要があります。口座のリスク上限は
+送信時の口座リスク検査で別に判定します。
+
+顧客注文IDは`S`＋シグナル時刻（UTCの年月日時）＋新規/決済＋売買の頭文字です（例: `S2026100510OB`）。
+同じ足・同じ向きの提案を2回準備しようとすると、台帳が重複として拒否します。
+
+## 出力
+
+提案があれば`--output`へ注文意図のJSONを置き換え書込みし、決定内容を標準出力に出します。
+見送りではファイルを書きません。出力の`prepared`と`orders_sent`は常に`false`です。
+
+## 検証
+
+`tests/test_live_signal.py`で、上昇時の新規買いと価格保護、注文要求の生成、下落時の全建玉決済、
+空売りの設定と売り建玉の決済、見送りの各理由、数量・価格保護・気配・足の鮮度の拒否、
+作成中の足を使わないこと、書き出したファイルの読込、台帳の口座証拠と未決済注文の判定を検証します。
+足と気配は合成データで、実通信は行いません。
+追加15試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。

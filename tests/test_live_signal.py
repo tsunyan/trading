@@ -1,0 +1,207 @@
+"""Strategy proposals for the live journal from synthetic bars; never prepared or sent."""
+
+import json
+import socket
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pandas as pd
+import pytest
+
+from trading import live_signal
+from trading.account_guard import AccountQuote, Position
+from trading.broker_contracts import OrderLimits, order_request
+from trading.config import Settings
+from trading.live_signal import LiveSignalError, decide, write_intent
+
+NOW = datetime(2026, 10, 5, 10, 0, 5, tzinfo=UTC)
+LIMITS = OrderLimits(
+    min_units=1000,
+    max_units=10000,
+    unit_step=1000,
+    price_tick="0.001",
+    max_reference_notional="2000000",
+)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("real network attempted"))
+
+
+def settings(**changes):
+    return Settings(market="fx", symbol="USD_JPY", bar_seconds=3600, fast=2, slow=4, **changes)
+
+
+def bars(closes, end=NOW):
+    start = pd.Timestamp(end).floor("h") - pd.Timedelta(hours=len(closes))
+    rows = []
+    for i, close in enumerate(closes):
+        rows.append(
+            {
+                "timestamp": start + pd.Timedelta(hours=i),
+                "symbol": "USD_JPY",
+                "open": close,
+                "high": close + 0.05,
+                "low": close - 0.05,
+                "close": close,
+                "volume": 0,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+RISING, FALLING = [149.0, 149.2, 149.4, 149.6, 150.0], [151.0, 150.8, 150.6, 150.4, 150.0]
+
+
+def quote(bid="150.000", ask="150.010", at=NOW - timedelta(seconds=2), market_open=True):
+    return AccountQuote(bid=bid, ask=ask, observed_at=at, market_open=market_open)
+
+
+def run(closes, *, positions=(), pending=False, cfg=None, units=1000, current=None, **options):
+    return decide(
+        bars(closes),
+        current or quote(),
+        cfg or settings(),
+        positions=positions,
+        pending=pending,
+        units=units,
+        max_slippage=options.pop("max_slippage", "0.0205"),
+        limits=LIMITS,
+        now=options.pop("now", NOW),
+    )
+
+
+def long(units=1000, pid=401):
+    return Position(position_id=pid, side="BUY", units=units, average_price="149.5")
+
+
+def test_rising_signal_proposes_a_bounded_market_buy_that_the_request_builder_accepts():
+    decision = run(RISING)
+    intent = decision["intent"]
+    assert decision["action"] == "open" and decision["target"] == 1 and decision["current"] == 0
+    assert (intent.side, intent.effect, intent.kind, intent.units) == (
+        "BUY",
+        "OPEN",
+        "MARKET",
+        1000,
+    )
+    assert intent.bound == Decimal("150.030")  # ask + slippage, floored to the tick.
+    assert intent.client_id == "S2026100510OB"
+    plan = order_request(intent, LIMITS)
+    assert json.loads(plan.body)["upperBound"] == "150.030"
+
+
+def test_falling_signal_closes_every_long_lot_with_settlements():
+    decision = run(FALLING, positions=(long(), long(2000, 402)))
+    intent = decision["intent"]
+    assert decision["action"] == "close" and decision["target"] == 0
+    assert (intent.side, intent.effect, intent.units) == ("SELL", "CLOSE", 3000)
+    assert [(p.position_id, p.units) for p in intent.positions] == [(401, 1000), (402, 2000)]
+    assert intent.bound == Decimal("149.980")  # bid - slippage, ceiled to the tick.
+    assert intent.client_id == "S2026100510CS"
+
+
+def test_short_signal_needs_allow_short_and_closes_shorts_first():
+    assert run(FALLING)["action"] == "hold"
+    shorting = settings(allow_short=True)
+    assert run(FALLING, cfg=shorting)["intent"].side == "SELL"
+    short = Position(position_id=501, side="SELL", units=1000, average_price="151")
+    decision = run(RISING, cfg=shorting, positions=(short,))
+    assert decision["action"] == "close" and decision["intent"].side == "BUY"
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"pending": True}, "unsettled_local_order"),
+        ({"positions": (long(),)}, "at_target"),
+        ({"current": quote(bid="150.000", ask="150.100")}, "spread_exceeds_entry_limit"),
+    ],
+)
+def test_holds_without_an_intent(options, reason):
+    decision = run(RISING, **options)
+    assert decision["action"] == "hold" and decision["reason"] == reason
+    assert decision["intent"] is None
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"units": 1500}, "units_outside_order_limits"),
+        ({"units": 20000}, "units_outside_order_limits"),
+        ({"max_slippage": "0"}, "positive_slippage_bound_required"),
+        ({"current": quote(at=NOW - timedelta(seconds=120))}, "stale_or_future_quote"),
+        ({"now": NOW + timedelta(hours=3)}, "stale_or_future_quote"),
+    ],
+)
+def test_invalid_size_slippage_or_stale_inputs_are_refused(options, reason):
+    with pytest.raises(LiveSignalError, match=reason):
+        run(RISING, **options)
+
+
+def test_stale_bars_and_hedged_positions_are_refused():
+    old = bars(RISING, end=NOW - timedelta(hours=3))
+    with pytest.raises(LiveSignalError, match="stale_signal_data"):
+        decide(
+            old,
+            quote(),
+            settings(),
+            positions=(),
+            pending=False,
+            units=1000,
+            max_slippage="0.02",
+            limits=LIMITS,
+            now=NOW,
+        )
+    with pytest.raises(LiveSignalError, match="not_enough_completed_bars"):
+        run(RISING[-3:])
+    short = Position(position_id=501, side="SELL", units=1000, average_price="151")
+    with pytest.raises(LiveSignalError, match="both_sides_held"):
+        run(RISING, positions=(long(), short))
+
+
+def test_incomplete_current_bar_is_not_used():
+    # The bar opening at 10:00 closes at 11:00; it must not drive the 10:00 signal.
+    frame = bars(RISING + [100.0], end=NOW + timedelta(hours=1))
+    decision = decide(
+        frame,
+        quote(),
+        settings(),
+        positions=(),
+        pending=False,
+        units=1000,
+        max_slippage="0.02",
+        limits=LIMITS,
+        now=NOW,
+    )
+    assert decision["target"] == 1 and decision["signal_time"].startswith("2026-10-05T10:00")
+
+
+def test_intent_file_is_what_live_setup_prepare_reads(tmp_path):
+    from trading.broker_contracts import OrderIntent
+
+    intent = run(RISING)["intent"]
+    path = tmp_path / "intent.json"
+    write_intent(intent, path)
+    assert OrderIntent.model_validate_json(path.read_bytes()) == intent
+    assert [p.name for p in tmp_path.iterdir()] == ["intent.json"]
+
+
+def test_journal_state_requires_a_fresh_proof_and_reports_unsettled_orders(tmp_path):
+    from test_account_guard import account
+    from test_account_guard import quote as guard_quote
+    from test_private_order import setup as order_setup
+
+    clock, _, _, journal = order_setup.__wrapped__(tmp_path)
+    with pytest.raises(LiveSignalError, match="account_proof_required"):
+        live_signal.journal_state(journal, clock.now)
+    journal.update_account(account(clock.now), guard_quote(clock.now), now=clock.now)
+    positions, pending, limits = live_signal.journal_state(journal, clock.now)
+    assert positions == () and pending is False and limits == journal.limits
+    from test_account_guard import intent
+
+    journal.prepare(intent())
+    assert live_signal.journal_state(journal, clock.now)[1] is True
+    with pytest.raises(LiveSignalError, match="stale_account_proof"):
+        live_signal.journal_state(journal, clock.now + timedelta(seconds=61))
