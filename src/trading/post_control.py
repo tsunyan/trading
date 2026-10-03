@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 import uuid
 from contextlib import closing, contextmanager
@@ -89,6 +90,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         self._instance = None
         self._failed = False
         self._active_claim = None
+        self._active_thread = None
         with self._transaction() as conn:
             state = self._state(conn)
         self._instance = state.instance
@@ -321,6 +323,92 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             "complete": False,
         }
 
+    def owns_operation(self):
+        """Only the thread holding this object's actual OS lease may dispatch."""
+        return self._active_claim is not None and self._active_thread == threading.get_ident()
+
+    def require_operation(self, kind, request_sha256):
+        self.check()
+        state = self.snapshot()
+        if (
+            not self.owns_operation()
+            or state["phase"] != "IN_FLIGHT"
+            or state["claim"] != self._active_claim
+            or state["operation"] != kind
+            or state["request_sha256"] != request_sha256
+        ):
+            raise PostControlError("explicit_owned_post_operation_required")
+        return state["claim"]
+
+    def execution_binding(self):
+        with self._transaction() as conn:
+            self._state(conn)
+            return self._execution_binding(conn)
+
+    def _execution_binding(self, conn):
+        markers = conn.execute(
+            "SELECT revision FROM events WHERE kind='EXECUTION_BOUND'"
+        ).fetchall()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_binding'"
+        ).fetchone()
+        if present is None and not markers:
+            return None
+        try:
+            if present is None or len(markers) != 1:
+                raise ValueError
+            rows = conn.execute("SELECT id,body,digest FROM execution_binding LIMIT 2").fetchall()
+            if len(rows) != 1 or rows[0][0] != 1:
+                raise ValueError
+            body, digest = rows[0][1:]
+            binding = json.loads(body)
+            if (
+                set(binding) != {"instance", "path"}
+                or not isinstance(binding["instance"], str)
+                or len(binding["instance"]) != 32
+                or any(c not in "0123456789abcdef" for c in binding["instance"])
+                or not isinstance(binding["path"], str)
+                or not Path(binding["path"]).is_absolute()
+                or str(Path(binding["path"]).resolve()) != binding["path"]
+                or json.dumps(binding, sort_keys=True, separators=(",", ":")) != body
+                or hashlib.sha256(body.encode()).hexdigest() != digest
+            ):
+                raise ValueError
+            return binding
+        except (ValueError, TypeError, KeyError):
+            self._failed = True
+            raise PostControlError("execution_binding_integrity_failed") from None
+
+    def bind_execution(self, instance, directory):
+        binding = {"instance": instance, "path": str(Path(directory).resolve())}
+        if (
+            not isinstance(instance, str)
+            or len(instance) != 32
+            or any(c not in "0123456789abcdef" for c in instance)
+        ):
+            raise PostControlError("invalid_execution_binding")
+        with self._ownership():
+            self.check()
+            with self._transaction() as conn:
+                state = self._state(conn)
+                if state.phase != "READY" or self.reads.status()["blocked"]:
+                    raise PostControlError("execution_binding_dependencies_blocked")
+                current = self._execution_binding(conn)
+                if current is not None:
+                    if current != binding:
+                        raise PostControlError("execution_journal_already_bound")
+                    return
+                body = json.dumps(binding, sort_keys=True, separators=(",", ":"))
+                conn.execute(
+                    "CREATE TABLE execution_binding (id INTEGER PRIMARY KEY CHECK(id=1),"
+                    "body TEXT NOT NULL,digest TEXT NOT NULL)"
+                )
+                conn.execute(
+                    "INSERT INTO execution_binding VALUES(1,?,?)",
+                    (body, hashlib.sha256(body.encode()).hexdigest()),
+                )
+                self._write(conn, state, "EXECUTION_BOUND", wall_ns=self._now(state))
+
     @contextmanager
     def operation(self, kind, *, request_sha256=None):
         # Validate metadata before acquiring ownership or consuming a claim.
@@ -355,6 +443,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
                     wall_ns=self._now(state),
                 )
             self._active_claim = token
+            self._active_thread = threading.get_ident()
             try:
                 before = self.check()
                 self._sleep(1.1)
@@ -402,6 +491,7 @@ class PersistentPostLimiter(PrivateStreamLimiter):
                 raise
             finally:
                 self._active_claim = None
+                self._active_thread = None
 
     @contextmanager
     def slot(self):

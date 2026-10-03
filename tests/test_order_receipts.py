@@ -388,7 +388,7 @@ def test_actual_private_get_reader_retains_receipt_and_does_not_claim_completene
     )
 
 
-@pytest.mark.parametrize("kind", ["order_id", "root_id", "terminal_hint", "stale_time"])
+@pytest.mark.parametrize("kind", ["order_id", "root_id", "terminal_hint", "stale_time", "old_fill"])
 def test_get_evidence_must_agree_with_receipt_before_any_final_state(tmp_path, kind):
     book, order = journal(tmp_path), intent()
     claimed(book, order)
@@ -403,6 +403,16 @@ def test_get_evidence_must_agree_with_receipt_before_any_final_state(tmp_path, k
     if kind == "stale_time":
         evidence = evidence.model_copy(
             update={"observed_at": NOW - timedelta(seconds=1), "executions": ()}
+        )
+    elif kind == "old_fill":
+        evidence = evidence.model_copy(
+            update={
+                "executions": (
+                    evidence.executions[0].model_copy(
+                        update={"timestamp": NOW - timedelta(seconds=1)}
+                    ),
+                )
+            }
         )
     with pytest.raises(OrderBlocked, match="submission_receipt_evidence_mismatch"):
         book.reconcile(evidence)

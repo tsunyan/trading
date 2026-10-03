@@ -242,51 +242,54 @@ class OrderJournal:
         reconciliation. At-most-once local claiming is not broker exactly-once.
         """
         now = self._clock(now)
-        blocked = None
         with self._transaction() as conn:
-            row = self._row(conn, client_id)
-            self._available(conn, client_id)
-            if row["state"] != "PREPARED":
-                raise OrderBlocked("submission already claimed; do not resend")
-            request = order_request(
-                OrderIntent.model_validate_json(row["intent_json"]), self.limits
-            )
-            gate = self._gate(conn)
-            if gate is not None:
-                if not gate["proof_json"] or quote is None:
-                    raise OrderBlocked("account proof and fresh quote required")
-                quote = AccountQuote.model_validate(quote.model_dump())
-                policy = AccountPolicy.model_validate_json(gate["policy_json"])
-                proof = json.loads(gate["proof_json"])
-                if quote.observed_at < AccountQuote.model_validate(proof["quote"]).observed_at:
-                    raise OrderBlocked("stale_or_future_quote: quote predates account proof quote")
-                rows = [dict(item) for item in conn.execute("SELECT * FROM orders")]
-                if proof["revision"] != revision(rows):
-                    raise OrderBlocked("account proof invalidated by order changes")
-                result = evaluate_risk(
-                    policy,
-                    AccountSnapshot.model_validate(proof["snapshot"]),
-                    quote,
-                    rows,
-                    OrderIntent.model_validate_json(row["intent_json"]),
-                    now,
-                    Decimal(gate["peak"]),
-                    bool(gate["entry_halted"]),
-                )
-                conn.execute(
-                    "UPDATE account_gate SET peak=?,entry_halted=? WHERE id=1",
-                    (result["peak"], int(result["entry_halted"])),
-                )
-                self._event(conn, client_id, "RISK_CHECK", result)
-                if not result["allowed"]:
-                    blocked = ", ".join(result["reasons"])
-            if blocked is None:
-                conn.execute("UPDATE orders SET state='SUBMITTING' WHERE client_id=?", (client_id,))
-                self._event(conn, client_id, "SUBMITTING", {})
+            request, blocked = self._begin_submission(conn, client_id, quote, now)
         if blocked is not None:
             # Persist the rejection/entry-stop, but never consume the send claim.
             raise OrderBlocked("account risk blocked: " + blocked)
         return request
+
+    def _begin_submission(self, conn, client_id, quote, now):
+        """Reusable atomic risk/claim logic; caller owns and commits the transaction."""
+        blocked = None
+        row = self._row(conn, client_id)
+        self._available(conn, client_id)
+        if row["state"] != "PREPARED":
+            raise OrderBlocked("submission already claimed; do not resend")
+        request = order_request(OrderIntent.model_validate_json(row["intent_json"]), self.limits)
+        gate = self._gate(conn)
+        if gate is not None:
+            if not gate["proof_json"] or quote is None:
+                raise OrderBlocked("account proof and fresh quote required")
+            quote = AccountQuote.model_validate(quote.model_dump())
+            policy = AccountPolicy.model_validate_json(gate["policy_json"])
+            proof = json.loads(gate["proof_json"])
+            if quote.observed_at < AccountQuote.model_validate(proof["quote"]).observed_at:
+                raise OrderBlocked("stale_or_future_quote: quote predates account proof quote")
+            rows = [dict(item) for item in conn.execute("SELECT * FROM orders")]
+            if proof["revision"] != revision(rows):
+                raise OrderBlocked("account proof invalidated by order changes")
+            result = evaluate_risk(
+                policy,
+                AccountSnapshot.model_validate(proof["snapshot"]),
+                quote,
+                rows,
+                OrderIntent.model_validate_json(row["intent_json"]),
+                now,
+                Decimal(gate["peak"]),
+                bool(gate["entry_halted"]),
+            )
+            conn.execute(
+                "UPDATE account_gate SET peak=?,entry_halted=? WHERE id=1",
+                (result["peak"], int(result["entry_halted"])),
+            )
+            self._event(conn, client_id, "RISK_CHECK", result)
+            if not result["allowed"]:
+                blocked = ", ".join(result["reasons"])
+        if blocked is None:
+            conn.execute("UPDATE orders SET state='SUBMITTING' WHERE client_id=?", (client_id,))
+            self._event(conn, client_id, "SUBMITTING", {})
+        return request, blocked
 
     def unknown(self, client_id: str):
         """Timeout/error/malformed response: keep the intent, never free its ID."""
@@ -327,6 +330,7 @@ class OrderJournal:
             or (receipt.root_order_id, receipt.order_id)
             != (evidence.root_order_id, evidence.order_id)
             or evidence.observed_at < receipt.response_at
+            or any(fill.timestamp < receipt.order_at for fill in evidence.executions)
             or (
                 receipt.broker_status in {"EXECUTED", "EXPIRED"}
                 and evidence.status != receipt.broker_status
