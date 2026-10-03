@@ -89,7 +89,7 @@ def value_account(state, cash, account, quote, policy):
         notional = Fraction(quote.ask) * position.units
         pnl = _bounded(pnl + gain)
         gross = _bounded(gross + notional)
-        margins.append(notional * Fraction(policy.margin_rate))
+        margins.append(_bounded(notional * Fraction(policy.margin_rate)))
         if actual is None:
             problems.append(f"position_missing:{pid}")
         else:
