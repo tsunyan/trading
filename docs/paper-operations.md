@@ -71,6 +71,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-paper-ta
 
 実行ポリシーの指定はこのPowerShellプロセスだけに適用し、システム設定を変更しません。
 `-PlanOnly` は固定コード・設定・実行環境を検査し、登録する2タスクの定義だけを表示します。
+PythonのASCII JSONをそのまま表示するため、日本語・空白を含むパスもコードページ932とUTF-8で保持します。
 登録すると5分周期の観測タスクと独立したwatchdogタスクが作られ、ログオン時にも起動します。
 現在のユーザーの対話セッションで、管理者権限・保存パスワードなしで動作します。
 作業ディレクトリとPythonの絶対パスを記録し、同じタスクの多重起動は無視します。

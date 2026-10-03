@@ -77,6 +77,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-private-
 空白・日本語を含むパスにも対応します。
 
 登録するのは`TradingLab-Private-<同期識別子の先頭12文字>-Watchdog`の1タスクです。
+`-PlanOnly`はPythonのASCII JSONをそのまま表示します。日本語・空白のパスをコードページ932とUTF-8で保持し、
+登録・通信・保存状態の更新を行わないことを実PowerShellで検証しました。
 ログイン時と既定60秒ごとに`private_operations watchdog`を実行します。
 間隔は`-IntervalSeconds`で30秒から停滞閾値まで指定できます。
 同時起動はIgnoreNew、実行上限は90秒です。ログイン中の同じユーザーで、管理者権限を要求せずに動きます。

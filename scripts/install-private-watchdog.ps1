@@ -20,7 +20,8 @@ try {
     Pop-Location
 }
 if ($PlanOnly) {
-    $plan | ConvertTo-Json -Depth 5
+    # Python already emitted ASCII JSON; preserve escaped paths across code pages.
+    $planText
     return
 }
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `

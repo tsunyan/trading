@@ -23,7 +23,8 @@ try {
     Pop-Location
 }
 if ($PlanOnly) {
-    $plan | ConvertTo-Json -Depth 5
+    # Python already emitted ASCII JSON; preserve escaped paths across code pages.
+    $planText
     return
 }
 # Check both names before registering either, so an unrelated task is never overwritten.
