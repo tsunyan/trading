@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-04",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "fixture": "BEGIN, HEARTBEAT/ACK pairs, END; fully validated before sealing",
+  "limitations": "Warm local reads; one sample per size; byte scans and SQLite read locks still grow with retained bytes; no production latency guarantee",
+  "measurements": [
+    {
+      "segments": 100,
+      "records": 102400,
+      "body_bytes": 20518500,
+      "sqlite_bytes": 24748032,
+      "full_audit_seconds": 1.1844539000303484,
+      "byte_check_seconds": 0.02516630000900477,
+      "open_seconds": 0.025379500002600253,
+      "concurrent_scan_seconds": 0.03090060001704842,
+      "concurrent_writer_seconds": 0.04364849999547005,
+      "writer_committed": true
+    },
+    {
+      "segments": 500,
+      "records": 512000,
+      "body_bytes": 102592500,
+      "sqlite_bytes": 123600896,
+      "full_audit_seconds": 6.276415299973451,
+      "byte_check_seconds": 0.1424173999694176,
+      "open_seconds": 0.12271949998103082,
+      "concurrent_scan_seconds": 0.1138933000038378,
+      "concurrent_writer_seconds": 0.26789840002311394,
+      "writer_committed": true
+    }
+  ]
+}

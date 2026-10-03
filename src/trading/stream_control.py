@@ -266,7 +266,7 @@ class StreamControl:
             or str(cash_book.path) != state["cash_path"]
             or journal.scope != state["scope"]
             or cash_book.scope != state["scope"]
-            or journal.audit_history()["series"] != state["series"]
+            or journal.archive_identity()["series"] != state["series"]
             or cash_book.snapshot()["instance"] != state["cash_instance"]
         ):
             raise StreamControlError("stream_control_binding_mismatch")

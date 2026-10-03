@@ -24,6 +24,10 @@ from trading.execution_cash_book import ExecutionCashBook
 from trading.storage_init import new_storage_directory
 
 MAX_SEGMENTS = 10_000
+ARCHIVE_MAGIC = b"TLARCH01"
+ARCHIVE_HEADER_BYTES = len(ARCHIVE_MAGIC) + 4
+ARCHIVE_ROW_BYTES = 40  # uint32 id + uint32 body length + binary SHA-256
+SEALED_SCHEMA = "CREATE TABLE sealed_archives (id INTEGER PRIMARY KEY, body BLOB NOT NULL)"
 ARCHIVE_SCHEMA = """
 CREATE TABLE series (
  id INTEGER PRIMARY KEY CHECK(id=1), instance TEXT NOT NULL,
@@ -50,10 +54,52 @@ class Segment(Contract):
     head: str = Field(pattern=r"^[a-f0-9]{64}$")
     started_at: AwareDatetime
     ended_at: AwareDatetime
+    archive_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 def _segment_digest(series, index, previous, body):
     return hashlib.sha256(_canonical([series, index, previous, body]).encode()).hexdigest()
+
+
+def _segment_body(segment):
+    # Old descriptors retain their exact canonical bytes and chain identity.
+    return _canonical(segment.model_dump(mode="json", exclude_none=True))
+
+
+def _pack_archive(records):
+    """Exact, framed row bytes; caller must fully verify the active journal first."""
+    chunks = [ARCHIVE_MAGIC, len(records).to_bytes(4, "big")]
+    for expected, (identity, body, digest) in enumerate(records, 1):
+        if type(identity) is not int or identity != expected:
+            raise ValueError
+        raw = body.encode("ascii")
+        chunks.extend(
+            (identity.to_bytes(4, "big"), len(raw).to_bytes(4, "big"), bytes.fromhex(digest), raw)
+        )
+    return b"".join(chunks)
+
+
+def _unpack_archive(body):
+    if type(body) is not bytes or body[: len(ARCHIVE_MAGIC)] != ARCHIVE_MAGIC:
+        raise ValueError
+    count = int.from_bytes(body[len(ARCHIVE_MAGIC) : ARCHIVE_HEADER_BYTES], "big")
+    if not 2 <= count <= 20_000:
+        raise ValueError
+    records, offset = [], ARCHIVE_HEADER_BYTES
+    for expected in range(1, count + 1):
+        if offset + ARCHIVE_ROW_BYTES > len(body):
+            raise ValueError
+        identity = int.from_bytes(body[offset : offset + 4], "big")
+        length = int.from_bytes(body[offset + 4 : offset + 8], "big")
+        digest = body[offset + 8 : offset + ARCHIVE_ROW_BYTES].hex()
+        offset += ARCHIVE_ROW_BYTES
+        if identity != expected or not 1 <= length <= 110_000 or offset + length > len(body):
+            raise ValueError
+        records.append((identity, body[offset : offset + length].decode("ascii"), digest))
+        offset += length
+    if offset != len(body):
+        raise ValueError
+    return records
 
 
 class SegmentedEventJournal(EventJournal):
@@ -64,9 +110,11 @@ class SegmentedEventJournal(EventJournal):
     The old journal object is fenced by its instance, including after reopening it
     as a standalone version-1 journal. This is not broker continuity evidence.
 
-    Archived bodies are fully audited on open and explicit audit_history(), and
-    before rotation. Active operations check the active segment and the constant-
-    size last archive anchor. They do not rescan all archived bodies per event.
+    New archives seal exact bytes only after full validation at rotation. Open
+    and rotation reread every sealed byte; explicit audit_history() also replays
+    all semantics. Legacy rows retain their full validation. Active operations
+    check the active segment and the fixed-size last archive anchor. They do not
+    rescan all archived bodies per event.
     """
 
     _version = 2
@@ -74,7 +122,7 @@ class SegmentedEventJournal(EventJournal):
     def __init__(self, directory, scope):
         self._series_instance = None
         super().__init__(directory, scope)
-        self.audit_history()
+        self.check_history()
 
     @classmethod
     def create(cls, directory, scope, *, max_records=1024):
@@ -89,7 +137,7 @@ class SegmentedEventJournal(EventJournal):
             try:
                 with closing(sqlite3.connect(directory / "event-journal.sqlite")) as conn:
                     conn.execute("PRAGMA synchronous=FULL")
-                    conn.executescript(SCHEMA + ARCHIVE_SCHEMA)
+                    conn.executescript(SCHEMA + ARCHIVE_SCHEMA + SEALED_SCHEMA + ";")
                     origin = uuid.uuid4().hex
                     conn.execute(
                         "INSERT INTO journal VALUES(1,2,?,?,?,0,0,?)",
@@ -151,7 +199,7 @@ class SegmentedEventJournal(EventJournal):
     def _descriptor(self, series, index, body, digest):
         segment = Segment.model_validate_json(body)
         if (
-            _canonical(segment.model_dump(mode="json")) != body
+            _segment_body(segment) != body
             or segment.index != index
             or segment.series != series["instance"]
             or segment.scope != self.scope
@@ -163,6 +211,36 @@ class SegmentedEventJournal(EventJournal):
             raise ValueError
         return segment
 
+    def _sealed_body(self, conn, segment):
+        expected_length = segment.bytes + ARCHIVE_ROW_BYTES * segment.records + ARCHIVE_HEADER_BYTES
+        row = conn.execute(
+            "SELECT length(body),typeof(body) FROM sealed_archives WHERE id=?", (segment.index,)
+        ).fetchone()
+        if row is None or tuple(row) != (expected_length, "blob"):
+            raise ValueError
+        body = conn.execute(
+            "SELECT body FROM sealed_archives WHERE id=?", (segment.index,)
+        ).fetchone()[0]
+        if (
+            hashlib.sha256(body).hexdigest() != segment.archive_sha256
+            or body[: len(ARCHIVE_MAGIC)] != ARCHIVE_MAGIC
+            or int.from_bytes(body[len(ARCHIVE_MAGIC) : ARCHIVE_HEADER_BYTES], "big")
+            != segment.records
+        ):
+            raise ValueError
+        return body
+
+    def _archive_records(self, conn, segment):
+        if segment.archive_sha256 is not None:
+            return _unpack_archive(self._sealed_body(conn, segment))
+        return [
+            tuple(r)
+            for r in conn.execute(
+                "SELECT id,body,digest FROM archived_records WHERE segment=? ORDER BY id",
+                (segment.index,),
+            )
+        ]
+
     def _snapshot(self, conn):
         meta, records = super()._snapshot(conn)
         series = self._anchor(conn, meta)
@@ -171,10 +249,11 @@ class SegmentedEventJournal(EventJournal):
         meta["_series_head"] = series["head"]
         return meta, records
 
-    def _audit(self, conn, meta):
+    def _audit(self, conn, meta, *, full=True):
         series = self._anchor(conn, meta)
         previous, instance, total_records, total_bytes = ZERO, series["origin"], 0, 0
         prior_end = None
+        legacy_records = sealed_segments = 0
         try:
             count, oversized = conn.execute(
                 "SELECT COUNT(*),COALESCE(MAX(length(CAST(body AS BLOB))),0) FROM segments"
@@ -189,43 +268,60 @@ class SegmentedEventJournal(EventJournal):
                     raise ValueError
                 if segment.previous != previous or segment.instance != instance:
                     raise ValueError
-                lengths = conn.execute(
-                    "SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))),0),"
-                    "COALESCE(MAX(length(CAST(body AS BLOB))),0) FROM archived_records "
-                    "WHERE segment=?",
-                    (index,),
-                ).fetchone()
-                if tuple(lengths[:2]) != (segment.records, segment.bytes) or lengths[2] > 110_000:
+                if prior_end is not None and segment.started_at < prior_end:
                     raise ValueError
-                records = [
-                    tuple(r)
-                    for r in conn.execute(
-                        "SELECT id,body,digest FROM archived_records WHERE segment=? ORDER BY id",
+                if segment.archive_sha256 is None:
+                    lengths = conn.execute(
+                        "SELECT COUNT(*),COALESCE(SUM(length(CAST(body AS BLOB))),0),"
+                        "COALESCE(MAX(length(CAST(body AS BLOB))),0) FROM archived_records "
+                        "WHERE segment=?",
                         (index,),
-                    )
-                ]
-                archived_meta = {
-                    "instance": segment.instance,
-                    "head": segment.head,
-                    "_archive_at": prior_end,
-                }
-                _, entries, state = self._check(archived_meta, records)
-                if (
-                    state["active"]
-                    or state["unacknowledged"]
-                    or entries[-1].kind != "END"
-                    or entries[0].at != segment.started_at
-                    or entries[-1].at != segment.ended_at
-                ):
-                    raise ValueError
+                    ).fetchone()
+                    if (
+                        tuple(lengths[:2]) != (segment.records, segment.bytes)
+                        or lengths[2] > 110_000
+                    ):
+                        raise ValueError
+                    legacy_records += segment.records
+                    records = self._archive_records(conn, segment)
+                else:
+                    sealed_segments += 1
+                    sealed = self._sealed_body(conn, segment)
+                    records = _unpack_archive(sealed) if full else None
+                if records is not None:
+                    archived_meta = {
+                        "instance": segment.instance,
+                        "head": segment.head,
+                        "_archive_at": prior_end,
+                    }
+                    _, entries, state = self._check(archived_meta, records)
+                    if (
+                        sum(len(row[1].encode("ascii")) for row in records) != segment.bytes
+                        or len(records) != segment.records
+                        or state["active"]
+                        or state["unacknowledged"]
+                        or entries[-1].kind != "END"
+                        or entries[0].at != segment.started_at
+                        or entries[-1].at != segment.ended_at
+                    ):
+                        raise ValueError
                 previous, instance = digest, segment.next_instance
                 prior_end = segment.ended_at
                 total_records += segment.records
                 total_bytes += segment.bytes
             # No orphan archive rows, truncated descriptor chain, or spliced active segment.
             actual_count = conn.execute("SELECT COUNT(*) FROM archived_records").fetchone()[0]
+            has_sealed = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sealed_archives'"
+            ).fetchone()
+            actual_sealed = (
+                conn.execute("SELECT COUNT(*) FROM sealed_archives").fetchone()[0]
+                if has_sealed
+                else 0
+            )
             if (
-                actual_count != total_records
+                actual_count != legacy_records
+                or actual_sealed != sealed_segments
                 or previous != series["head"]
                 or instance != meta["instance"]
             ):
@@ -239,6 +335,8 @@ class SegmentedEventJournal(EventJournal):
                 "active_instance": meta["instance"],
                 "active_records": meta["count"],
                 "active_head": meta["head"],
+                "sealed_segments": sealed_segments,
+                "archive_validation": "full" if full else "sealed_bytes_and_legacy_semantics",
                 "history_gap_unproven": True,
                 "resync_required": True,
                 "complete": False,
@@ -258,6 +356,31 @@ class SegmentedEventJournal(EventJournal):
 
         return self._retry_busy(attempt)
 
+    def check_history(self):
+        """Reread every sealed byte; legacy archives and active records are fully validated."""
+
+        def attempt():
+            with self._transaction() as conn:
+                meta, _, _ = self._verify(conn)
+                return self._audit(conn, meta, full=False)
+
+        return self._retry_busy(attempt)
+
+    def archive_identity(self):
+        """Current verified identity for binding; not a substitute for a history audit."""
+
+        def attempt():
+            with self._transaction() as conn:
+                meta, _, _ = self._verify(conn)
+                series = self._anchor(conn, meta)
+                return {
+                    "series": series["instance"],
+                    "archive_head": series["head"],
+                    "archived_segments": series["count"],
+                }
+
+        return self._retry_busy(attempt)
+
     def replay_archive(self, index):
         """Replay one audited archive diagnostically, without restoring a session."""
         if type(index) is not int or not 1 <= index <= MAX_SEGMENTS:
@@ -271,13 +394,7 @@ class SegmentedEventJournal(EventJournal):
                 if row is None:
                     raise JournalError("archive_not_found")
                 segment = Segment.model_validate_json(row[0])
-                records = [
-                    tuple(r)
-                    for r in conn.execute(
-                        "SELECT id,body,digest FROM archived_records WHERE segment=? ORDER BY id",
-                        (index,),
-                    )
-                ]
+                records = self._archive_records(conn, segment)
             return self._check(
                 {"instance": segment.instance, "head": segment.head, "count": segment.records},
                 records,
@@ -298,11 +415,15 @@ class SegmentedEventJournal(EventJournal):
                     raise JournalError("capture_delivery_unresolved")
                 if state["active"] or not entries or entries[-1].kind != "END":
                     raise JournalError("journal_clean_end_required")
-                self._audit(conn, meta)
+                self._audit(conn, meta, full=False)
                 index = meta["_archived_segments"] + 1
                 if index > MAX_SEGMENTS:
                     raise JournalError("journal_archive_capacity_exceeded")
                 next_instance = uuid.uuid4().hex
+                records = [
+                    tuple(r) for r in conn.execute("SELECT id,body,digest FROM records ORDER BY id")
+                ]
+                sealed = _pack_archive(records)
                 segment = Segment(
                     series=self._series_instance,
                     index=index,
@@ -316,13 +437,26 @@ class SegmentedEventJournal(EventJournal):
                     head=meta["head"],
                     started_at=entries[0].at,
                     ended_at=entries[-1].at,
+                    archive_sha256=hashlib.sha256(sealed).hexdigest(),
                 )
-                body = _canonical(segment.model_dump(mode="json"))
+                body = _segment_body(segment)
                 digest = _segment_digest(self._series_instance, index, segment.previous, body)
                 conn.execute("INSERT INTO segments VALUES(?,?,?)", (index, body, digest))
-                conn.execute(
-                    "INSERT INTO archived_records SELECT ?,id,body,digest FROM records", (index,)
-                )
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sealed_archives'"
+                    ).fetchone()
+                    is None
+                ):
+                    conn.execute(SEALED_SCHEMA)
+                conn.execute("INSERT INTO sealed_archives VALUES(?,?)", (index, sealed))
+                # A storage trigger or damaged write cannot admit different bytes
+                # from the exact active rows whose full semantics were verified.
+                try:
+                    self._sealed_body(conn, segment)
+                except (ValueError, TypeError, OverflowError):
+                    self._failed = True
+                    raise JournalError("journal_archive_integrity_failed") from None
                 conn.execute("DELETE FROM records")
                 conn.execute("UPDATE series SET count=?,head=? WHERE id=1", (index, digest))
                 conn.execute(

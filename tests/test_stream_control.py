@@ -236,6 +236,16 @@ def test_rotation_checkpoint_and_wrong_cash_book_binding(setup, tmp_path):
         control.check_binding(journal, other)
 
 
+def test_binding_does_not_repeat_history_scan_but_refuses_changed_series(setup, monkeypatch):
+    _, journal, book, control = setup
+    monkeypatch.setattr(journal, "audit_history", lambda: pytest.fail("duplicate history scan"))
+    control.check_binding(journal, book)
+    with sqlite3.connect(journal.path) as conn:
+        conn.execute("UPDATE series SET instance=?", ("b" * 32,))
+    with pytest.raises(JournalError, match="archive_integrity_failed"):
+        control.check_binding(journal, book)
+
+
 def test_regular_sync_counters_do_not_consume_transition_capacity(setup):
     _, journal, _, control = setup
     with control.ownership():
