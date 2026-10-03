@@ -9,8 +9,18 @@ from pathlib import Path
 
 from pydantic import AwareDatetime, Field
 
+from trading.account_events import parse_event
 from trading.broker_contracts import Contract
-from trading.event_journal import MAX_BYTES, SCHEMA, ZERO, EventJournal, JournalError, _canonical
+from trading.event_journal import (
+    MAX_BYTES,
+    SCHEMA,
+    ZERO,
+    Entry,
+    EventJournal,
+    JournalError,
+    _canonical,
+)
+from trading.execution_cash_book import ExecutionCashBook
 from trading.storage_init import new_storage_directory
 
 MAX_SEGMENTS = 10_000
@@ -323,3 +333,98 @@ class SegmentedEventJournal(EventJournal):
         self._retry_busy(attempt)
         # The old handle intentionally stays bound to its retired instance.
         return type(self)(self.path.parent, self.scope)
+
+    def capacity(self):
+        """Constant-size scheduling hint; record/current still perform full verification."""
+
+        def attempt():
+            with self._transaction() as conn:
+                rows = conn.execute("SELECT * FROM journal LIMIT 2").fetchall()
+                if len(rows) != 1:
+                    raise JournalError("journal_integrity_failed")
+                meta = dict(rows[0])
+                if (
+                    meta["version"] != 2
+                    or meta["scope"] != self.scope
+                    or meta["instance"] != self._instance
+                    or type(meta["count"]) is not int
+                    or type(meta["bytes"]) is not int
+                    or type(meta["max_records"]) is not int
+                    or not 4 <= meta["max_records"] <= 20_000
+                    or not 0 <= meta["count"] <= meta["max_records"]
+                    or not 0 <= meta["bytes"] <= MAX_BYTES
+                ):
+                    raise JournalError("journal_integrity_failed")
+                self._anchor(conn, meta)
+                return {
+                    "max_records": meta["max_records"],
+                    "records_remaining": meta["max_records"] - meta["count"],
+                    "bytes_remaining": MAX_BYTES - meta["bytes"],
+                }
+
+        return self._retry_busy(attempt)
+
+    def retire_for_recovery(self, *, expected_head, cash_book, at, monotonic_ns):
+        """Explicit orphan retirement ONLY under the supervisor's checked OS ownership.
+
+        Never clear unknown ACKs or infer that a received execution was booked.
+        A clean END (or an empty segment) needs no additional journal write.
+        This API alone does not prove that a former process is absent.
+        """
+        if not isinstance(cash_book, ExecutionCashBook) or cash_book.scope != self.scope:
+            raise JournalError("recovery_cash_book_required")
+        at, mono = self._stamp(at, monotonic_ns)
+
+        def attempt():
+            with self._transaction(write=True) as conn:
+                meta, entries, state = self._verify(conn)
+                if expected_head != meta["head"]:
+                    raise JournalError("journal_head_changed")
+                self._audit(conn, meta)
+                if state["unacknowledged"]:
+                    raise JournalError("capture_delivery_unresolved")
+                if cash_book.snapshot()["halted"]:
+                    raise JournalError("recovery_cash_book_halted")
+                unique, variants, skew = {}, [], 0
+                for entry in entries:
+                    if entry.kind == "BEGIN":
+                        skew = entry.clock_skew_ms or 0
+                    elif entry.kind == "EVENT":
+                        event = parse_event(entry.payload.encode(), entry.at, clock_skew_ms=skew)
+                        if event.channel == "executionEvents":
+                            if event.entity_id in unique:
+                                variants.append(event)
+                            else:
+                                unique[event.entity_id] = event
+                receipt = cash_book.match_booked_events(tuple(unique.values()))
+                if set(receipt["booked_execution_ids"]) != set(unique):
+                    raise JournalError("recovery_execution_not_booked")
+                for event in variants:
+                    if cash_book.match_booked_events((event,))["booked_execution_ids"] != (
+                        event.entity_id,
+                    ):
+                        raise JournalError("recovery_execution_not_booked")
+                if not entries:
+                    return meta["head"]
+                if not state["active"]:
+                    if entries[-1].kind != "END":
+                        raise JournalError("recovery_fault_requires_review")
+                    return meta["head"]
+                if at < state["at"]:
+                    raise JournalError("invalid_capture_clock")
+                self._append(
+                    conn,
+                    meta,
+                    # Monotonic clocks reset with the process. Keep the old epoch's
+                    # maximum until its END; new epochs get a new monotonic origin.
+                    Entry(
+                        kind="END",
+                        epoch=state["epoch"],
+                        session=state["session"],
+                        at=at,
+                        monotonic_ns=max(mono, state["mono"]),
+                    ),
+                )
+                return conn.execute("SELECT head FROM journal").fetchone()[0]
+
+        return self._retry_busy(attempt)
