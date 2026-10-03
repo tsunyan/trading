@@ -68,7 +68,8 @@
 
 9. [気配を取得](live-quote.md)し、`order_runtime context`で実行内容を確認してから、
    そのSHA-256を指定して`order_runtime submit`で送信します（[確認済み送信](order-runtime.md)）。
-10. 受付後は同期のGET照合で約定と状態を確認し、次の注文の前に口座証拠を更新します。
+10. 受付後は[受付済み注文のGET照合](live-order-sync.md)で台帳の注文状態を進め、
+    次の注文の前に[口座証拠を更新](live-account.md)します。
 
 ## 状態確認と停止
 

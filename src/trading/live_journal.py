@@ -120,6 +120,7 @@ CODE_FILES = (
     "order_credentials.py",
     "order_runtime.py",
     "live_account.py",
+    "live_order_sync.py",
 )
 
 
