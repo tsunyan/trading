@@ -11,6 +11,8 @@ uv run python -m trading.private_operations init --directory runs/private-sync
 uv run python -m trading.private_operations watchdog --directory runs/private-sync
 uv run python -m trading.private_operations status --directory runs/private-sync
 uv run python -m trading.private_operations alerts --directory runs/private-sync
+uv run python -m trading.private_operations history --directory runs/private-sync --after-alert-id 0 --limit 100
+uv run python -m trading.private_operations audit --directory runs/private-sync
 ```
 
 既存の同期環境に`private-operations/operations.sqlite`とOSロックを作ります。
@@ -58,8 +60,42 @@ uv run python -m trading.private_operations ack --directory runs/private-sync --
 
 既読操作は通知だけを変更し、障害条件・同期制御・GET制御を解除しません。
 停止の原因を確認し、必要なら[停止中の照合と明示復旧](private-sync.md)を別に行ってください。
-通知記録は最大10,000件で自動削除しません。`alerts`は未確認の最新100件を表示します。
+通知IDは累積で増え、過去の本文と送信・既読・解消情報を自動削除しません。
+`alerts`は履歴区間も含む未確認の最新100件を表示します。
+`history`は既読済みも含めてID順に最大100件ずつ返します。次のページでは返された
+`next_alert_id`を`--after-alert-id`に指定します。読取り・監査で通知や口座状態を変更しません。
 DBは暗号化しておらず、ローカルの整合性検査は悪意ある書換えやバックアップ巻戻しを防ぐ仕組みではありません。
+
+## 通知履歴を残した継続監視
+
+2026-10-04、累積10,000件で監視が止まる上限を、通常処理に残す本文の上限へ変更しました。
+本文が10,000件に達した時点で、移動可能な最大1,000件を検証し、同じSQLite内の履歴BLOBへ保存します。
+対象は解消済みの障害通知と、既読・送信済みの解消通知またはテスト通知です。
+送信待ちの通知と継続中の障害通知は移しません。継続中の障害は、既読・送信済みでも通常処理に残します。
+
+本文・ID・元のSHA-256をそのまま保存し、区間のハッシュ連鎖と検索索引を照合します。
+既読・解消・送信試行の情報は同じIDのまま保持するため、履歴へ移した後でも既読操作ができます。
+本文の移動、索引追加、新しい通知、監視件数の更新は一つのトランザクションで行います。
+途中終了後は移動前か移動完了後の状態となり、保存失敗で未送信通知を削除しません。
+旧監視DBの読取りは元の正規化本文を保持し、履歴テーブルの追加は最初の移動時だけ行います。
+
+起動・監視・通知時も全履歴BLOBを読み直してSHA-256を確認し、索引・通知IDの欠落や差替え、
+送信情報の不正、時刻逆行を検出します。旧本文のJSON解析は繰り返しません。
+`audit`は全履歴の本文も解析して、元の通知と索引の一致を検査します。
+ハッシュを再計算した敵対的なSQL編集や巻き戻しを防ぐ仕組みではありません。
+
+未処理通知だけで10,000件を占める場合は、新しい通知を作る監視試行が
+`operations_alert_capacity`となり、前の監視条件と記録を維持します。
+`watchdog`はこの場合も既存通知の送信を試み、`check_failed=true`と終了コード1を返します。
+Windowsへの送信が回復すれば次の監視試行で移動できる通知ができ、監視を継続できます。
+通知の送信失敗が続く場合は、通知先と未処理通知を確認してください。件数を減らすための自動既読は行いません。
+
+[合成測定](../research/20261004-operations-archive-benchmark.json)では、累積50,000件・通常本文1,000件で、
+再起動0.33秒、状態確認0.31秒、監視更新0.93秒、全本文の監査0.98秒、模擬通知送信0.64秒でした。
+[測定スクリプト](../research/benchmark_operations_archive.py)は一時監視DBと合成READY観測だけを使い、
+資格情報・HTTP・Windowsタスク・デスクトップ通知を使いません。
+各サイズ一度の暖まったローカル読取りです。履歴の全量読取りと送信情報の検証は件数に比例し、
+ディスク容量と大きな履歴での処理時間は引き続き監視が必要です。
 
 ## Windowsでの定期監視
 
@@ -109,3 +145,5 @@ Get-ScheduledTask -TaskName <task_name> | Get-ScheduledTaskInfo
 実プロセス終了とOS所有権解放、停止・停滞・確認不能、同じ通知の再試行、既読と停止の分離を
 合成環境で検証しています。
 一時的な合成環境からのPrivateテストtoastは実Windowsでも受け付け1件・失敗0件を確認しました。
+履歴保存は`tests/test_operations_archive.py`で、1万件超の継続、未送信・継続中の障害の保持、
+後日の既読、履歴ページ、破損、移動失敗、commit前後の実プロセス終了を検証します。

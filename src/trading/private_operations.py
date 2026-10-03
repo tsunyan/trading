@@ -23,6 +23,17 @@ from trading.stream_control import StreamControlError
 from trading.windows_notify import send_toast
 
 MAX_ALERTS = 10_000
+ARCHIVE_BATCH = 1000
+ZERO = "0" * 64
+ARCHIVE_SCHEMA = (
+    "CREATE TABLE alert_archives(id INTEGER PRIMARY KEY,body TEXT NOT NULL,"
+    "digest TEXT NOT NULL,payload BLOB NOT NULL)",
+    "CREATE TABLE alert_archive_index(id INTEGER PRIMARY KEY,archive INTEGER NOT NULL,"
+    "kind TEXT NOT NULL,created_at TEXT NOT NULL,digest TEXT NOT NULL)",
+    "CREATE INDEX alert_archive_members ON alert_archive_index(archive,id)",
+    "CREATE INDEX IF NOT EXISTS active_alert_rows ON alerts(id) WHERE body<>''",
+    "CREATE INDEX IF NOT EXISTS unread_alert_rows ON alerts(id) WHERE acknowledged_at IS NULL",
+)
 CONDITIONS = frozenset(
     {
         "private_sync_stopped",
@@ -65,7 +76,10 @@ class MonitorState(Contract):
     sync_successes: int = Field(default=0, strict=True, ge=0)
     stale_seconds: int = Field(strict=True, ge=30, le=86400)
     retry_seconds: int = Field(strict=True, ge=1, le=86400)
-    alert_count: int = Field(default=0, strict=True, ge=0, le=MAX_ALERTS)
+    alert_count: int = Field(default=0, strict=True, ge=0, lt=2**63)
+    archive_count: int = Field(default=0, strict=True, ge=0, lt=2**63)
+    archived_alerts: int = Field(default=0, strict=True, ge=0, lt=2**63)
+    archive_head: str = Field(default=ZERO, pattern=r"^[a-f0-9]{64}$")
 
 
 class Alert(Contract):
@@ -75,8 +89,29 @@ class Alert(Contract):
     condition: str | None = None
 
 
+class AlertArchive(Contract):
+    monitor: str = Field(pattern=r"^[a-f0-9]{32}$")
+    index: int = Field(strict=True, gt=0, lt=2**63)
+    previous: str = Field(pattern=r"^[a-f0-9]{64}$")
+    records: int = Field(strict=True, gt=0, le=ARCHIVE_BATCH)
+    bytes: int = Field(strict=True, gt=0, le=700_000)
+    payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    index_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    sealed_at: AwareDatetime
+
+
 def _body(model):
-    return json.dumps(model.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    data = model.model_dump(mode="json")
+    if isinstance(model, MonitorState):
+        # Preserve exact canonical bytes of pre-archive monitor records on read.
+        for name, default in (("archive_count", 0), ("archived_alerts", 0), ("archive_head", ZERO)):
+            if data[name] == default:
+                data.pop(name)
+    return _json(data)
+
+
+def _json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _hash(body):
@@ -140,6 +175,8 @@ class PrivateOperations:
             with closing(sqlite3.connect(storage / "operations.sqlite")) as conn:
                 conn.execute("PRAGMA synchronous=FULL")
                 conn.executescript(SCHEMA)
+                for statement in ARCHIVE_SCHEMA:
+                    conn.execute(statement)
                 body = _body(state)
                 conn.execute("INSERT INTO monitor VALUES(1,?,?)", (body, _hash(body)))
                 conn.commit()
@@ -182,45 +219,178 @@ class PrivateOperations:
             conditions = {row[0] for row in conn.execute("SELECT kind FROM conditions LIMIT 8")}
             if not conditions <= CONDITIONS:
                 raise ValueError
-            rows = conn.execute(
-                "SELECT * FROM alerts ORDER BY id LIMIT ?", (MAX_ALERTS + 1,)
-            ).fetchall()
-            if len(rows) != state.alert_count:
+            count, minimum, maximum = conn.execute(
+                "SELECT COUNT(*),COALESCE(MIN(id),1),COALESCE(MAX(id),0) FROM alerts"
+            ).fetchone()
+            if (count, minimum, maximum) != (state.alert_count, 1, state.alert_count):
                 raise ValueError
-            for index, row in enumerate(rows, 1):
+            rows = conn.execute(
+                "SELECT * FROM alerts WHERE body<>'' ORDER BY id LIMIT ?", (MAX_ALERTS + 1,)
+            ).fetchall()
+            if len(rows) > MAX_ALERTS or len(rows) + state.archived_alerts != state.alert_count:
+                raise ValueError
+            latest = state.last_check_at or state.created_at
+            for row in rows:
                 raw = row["body"]
-                if row["id"] != index or len(raw.encode()) > 512 or _hash(raw) != row["digest"]:
+                if type(raw) is not str or len(raw.encode()) > 512 or _hash(raw) != row["digest"]:
                     raise ValueError
-                alert = Alert.model_validate_json(raw)
-                if (
-                    _body(alert) != raw
-                    or alert.kind not in KINDS
-                    or alert.created_at < state.created_at
-                ):
-                    raise ValueError
-                if (alert.kind == "private_condition_cleared") != (alert.condition in CONDITIONS):
-                    raise ValueError
-                if type(row["attempts"]) is not int or not 0 <= row["attempts"] < 2**63:
-                    raise ValueError
-                if bool(row["attempts"]) != (row["last_attempt_at"] is not None):
-                    raise ValueError
-                for name in ("acknowledged_at", "resolved_at", "last_attempt_at", "submitted_at"):
-                    if row[name] is not None:
-                        stamp = datetime.fromisoformat(row[name])
-                        if stamp.utcoffset() is None or stamp < alert.created_at:
-                            raise ValueError
-                if row["submitted_at"] is not None and row["last_attempt_at"] is None:
-                    raise ValueError
-                if row["error"] not in {None, "notification_failed"}:
-                    raise ValueError
-            return state, conditions, rows
+                alert = self._parse_alert(raw, state)
+                latest = max(latest, self._verify_delivery(row, alert.created_at))
+            latest = max(latest, self._verify_archives(conn, state))
+            return state, conditions, rows, latest
         except (ValueError, TypeError, KeyError):
             raise OperationsError("operations_integrity_failed") from None
+
+    @staticmethod
+    def _parse_alert(raw, state):
+        alert = Alert.model_validate_json(raw)
+        if (
+            _body(alert) != raw
+            or alert.kind not in KINDS
+            or alert.created_at < state.created_at
+            or (alert.kind == "private_condition_cleared") != (alert.condition in CONDITIONS)
+        ):
+            raise ValueError
+        return alert
+
+    @staticmethod
+    def _verify_delivery(row, created_at):
+        if type(row["attempts"]) is not int or not 0 <= row["attempts"] < 2**63:
+            raise ValueError
+        if bool(row["attempts"]) != (row["last_attempt_at"] is not None):
+            raise ValueError
+        latest = created_at
+        for name in ("acknowledged_at", "resolved_at", "last_attempt_at", "submitted_at"):
+            if row[name] is not None:
+                stamp = datetime.fromisoformat(row[name])
+                if stamp.utcoffset() is None or stamp < created_at:
+                    raise ValueError
+                latest = max(latest, stamp)
+        if row["submitted_at"] is not None and row["last_attempt_at"] is None:
+            raise ValueError
+        if row["error"] not in {None, "notification_failed"}:
+            raise ValueError
+        return latest
+
+    def _archive_payload(self, conn, index):
+        row = conn.execute(
+            "SELECT body,digest,length(payload),typeof(payload) FROM alert_archives WHERE id=?",
+            (index,),
+        ).fetchone()
+        if (
+            row is None
+            or type(row[0]) is not str
+            or len(row[0].encode()) > 1024
+            or _hash(row[0]) != row[1]
+        ):
+            raise ValueError
+        descriptor = AlertArchive.model_validate_json(row[0])
+        if (
+            _body(descriptor) != row[0]
+            or descriptor.index != index
+            or tuple(row[2:]) != (descriptor.bytes, "blob")
+        ):
+            raise ValueError
+        payload = conn.execute(
+            "SELECT payload FROM alert_archives WHERE id=?", (index,)
+        ).fetchone()[0]
+        if hashlib.sha256(payload).hexdigest() != descriptor.payload_sha256:
+            raise ValueError
+        return descriptor, row[1], payload
+
+    def _verify_archives(self, conn, state, *, full=False):
+        present = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('alert_archives','alert_archive_index')"
+        ).fetchone()[0]
+        if (
+            present == 0
+            and state.archive_count == state.archived_alerts == 0
+            and state.archive_head == ZERO
+        ):
+            return state.created_at
+        if present != 2:
+            raise ValueError
+        if conn.execute("SELECT COUNT(*) FROM alert_archives").fetchone()[0] != state.archive_count:
+            raise ValueError
+        head, total, latest = ZERO, 0, state.created_at
+        previous_seal = state.created_at
+        for expected, (index,) in enumerate(
+            conn.execute("SELECT id FROM alert_archives ORDER BY id"), 1
+        ):
+            descriptor, digest, payload = self._archive_payload(conn, index)
+            if (
+                index != expected
+                or descriptor.monitor != state.instance
+                or descriptor.previous != head
+                or descriptor.sealed_at < previous_seal
+            ):
+                raise ValueError
+            members = conn.execute(
+                "SELECT i.id,i.kind,i.created_at,i.digest AS original_digest,a.* "
+                "FROM alert_archive_index i "
+                "JOIN alerts a ON a.id=i.id WHERE i.archive=? ORDER BY i.id",
+                (index,),
+            ).fetchall()
+            identities = [[r[0], r[1], r[2], r[3]] for r in members]
+            if (
+                len(members) != descriptor.records
+                or _hash(_json(identities)) != descriptor.index_sha256
+            ):
+                raise ValueError
+            original = json.loads(payload) if full else None
+            if full and (
+                type(original) is not list
+                or len(original) != descriptor.records
+                or _json(original).encode() != payload
+            ):
+                raise ValueError
+            latest = max(latest, descriptor.sealed_at)
+            previous_seal = descriptor.sealed_at
+            for offset, row in enumerate(members):
+                created = datetime.fromisoformat(row[2])
+                if (
+                    not 1 <= row[0] <= state.alert_count
+                    or row[1] not in KINDS
+                    or created.utcoffset() is None
+                    or created < state.created_at
+                    or row[3] != row["digest"]
+                    or row["body"] != ""
+                    or (row[1] in CONDITIONS and row["resolved_at"] is None)
+                    or not any(
+                        row[k] is not None
+                        for k in ("acknowledged_at", "resolved_at", "submitted_at")
+                    )
+                ):
+                    raise ValueError
+                latest = max(latest, self._verify_delivery(row, created))
+                if full:
+                    item = original[offset]
+                    if (
+                        type(item) is not list
+                        or len(item) != 3
+                        or (item[0], item[2]) != (row[0], row[3])
+                    ):
+                        raise ValueError
+                    alert = self._parse_alert(item[1], state)
+                    if _hash(item[1]) != item[2] or (alert.kind, alert.created_at.isoformat()) != (
+                        row[1],
+                        row[2],
+                    ):
+                        raise ValueError
+            head, total = digest, total + descriptor.records
+        if (
+            head != state.archive_head
+            or total != state.archived_alerts
+            or conn.execute("SELECT COUNT(*) FROM alert_archive_index").fetchone()[0] != total
+        ):
+            raise ValueError
+        return latest
 
     @contextmanager
     def _owned(self):
         with self._store() as conn:
-            state, _, _ = self._verify(conn)
+            state, _, _, _ = self._verify(conn)
 
         def check_lock():
             try:
@@ -240,19 +410,8 @@ class PrivateOperations:
                 raise OperationsError("operations_busy")
             with self._store(write=True) as conn:
                 try:
-                    current, conditions, rows = self._verify(conn)
+                    current, conditions, rows, latest = self._verify(conn)
                     now = _now(self.clock)
-                    latest = current.last_check_at or current.created_at
-                    for row in rows:
-                        latest = max(latest, Alert.model_validate_json(row["body"]).created_at)
-                        for name in (
-                            "acknowledged_at",
-                            "resolved_at",
-                            "last_attempt_at",
-                            "submitted_at",
-                        ):
-                            if row[name] is not None:
-                                latest = max(latest, datetime.fromisoformat(row[name]))
                     if now < latest:
                         raise OperationsError("operations_clock_invalid")
                     yield conn, current, conditions, rows, now
@@ -267,8 +426,10 @@ class PrivateOperations:
         conn.execute("UPDATE monitor SET body=?,digest=? WHERE id=1", (body, _hash(body)))
 
     def _alert(self, conn, state, kind, now, *, revision=None, condition=None):
-        if state.alert_count >= MAX_ALERTS:
-            raise OperationsError("operations_alert_capacity")
+        if state.alert_count >= 2**63 - 1:
+            raise OperationsError("operations_alert_id_capacity")
+        if state.alert_count - state.archived_alerts >= MAX_ALERTS:
+            state = self._archive_closed(conn, state, now)
         alert = Alert(kind=kind, created_at=now, revision=revision, condition=condition)
         body = _body(alert)
         updated = state.model_copy(update={"alert_count": state.alert_count + 1})
@@ -276,6 +437,61 @@ class PrivateOperations:
             "INSERT INTO alerts(id,body,digest) VALUES(?,?,?)",
             (updated.alert_count, body, _hash(body)),
         )
+        return updated
+
+    def _archive_closed(self, conn, state, now):
+        selected, identities = [], []
+        for row in conn.execute("SELECT * FROM alerts WHERE body<>'' ORDER BY id"):
+            alert = self._parse_alert(row["body"], state)
+            if (alert.kind in CONDITIONS and row["resolved_at"] is None) or not any(
+                row[k] is not None for k in ("acknowledged_at", "resolved_at", "submitted_at")
+            ):
+                continue
+            selected.append([row["id"], row["body"], row["digest"]])
+            identities.append([row["id"], alert.kind, alert.created_at.isoformat(), row["digest"]])
+            if len(selected) >= ARCHIVE_BATCH:
+                break
+        if not selected:
+            raise OperationsError("operations_alert_capacity")
+        present = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name IN ('alert_archives','alert_archive_index')"
+        ).fetchone()[0]
+        if present == 0:
+            for statement in ARCHIVE_SCHEMA:
+                conn.execute(statement)  # No executescript: preserve the surrounding transaction.
+        payload = _json(selected).encode()
+        descriptor = AlertArchive(
+            monitor=state.instance,
+            index=state.archive_count + 1,
+            previous=state.archive_head,
+            records=len(selected),
+            bytes=len(payload),
+            payload_sha256=hashlib.sha256(payload).hexdigest(),
+            index_sha256=_hash(_json(identities)),
+            sealed_at=now,
+        )
+        body = _body(descriptor)
+        updated = state.model_copy(
+            update={
+                "archive_count": descriptor.index,
+                "archived_alerts": state.archived_alerts + len(selected),
+                "archive_head": _hash(body),
+            }
+        )
+        conn.execute(
+            "INSERT INTO alert_archives VALUES(?,?,?,?)",
+            (descriptor.index, body, _hash(body), payload),
+        )
+        conn.executemany(
+            "INSERT INTO alert_archive_index VALUES(?,?,?,?,?)",
+            [(r[0], descriptor.index, *r[1:]) for r in identities],
+        )
+        conn.executemany("UPDATE alerts SET body='' WHERE id=?", [(r[0],) for r in selected])
+        try:
+            self._verify_archives(conn, updated)
+        except (ValueError, TypeError, KeyError):
+            raise OperationsError("operations_integrity_failed") from None
         return updated
 
     def _observe(self, state):
@@ -352,7 +568,9 @@ class PrivateOperations:
                 conn.execute("INSERT INTO conditions VALUES(?)", (kind,))
             for kind in sorted(previous - active):
                 conn.execute("DELETE FROM conditions WHERE kind=?", (kind,))
-                for row in conn.execute("SELECT id,body FROM alerts WHERE resolved_at IS NULL"):
+                for row in conn.execute(
+                    "SELECT id,body FROM alerts WHERE body<>'' AND resolved_at IS NULL"
+                ):
                     if Alert.model_validate_json(row["body"]).kind == kind:
                         conn.execute(
                             "UPDATE alerts SET resolved_at=? WHERE id=?",
@@ -367,7 +585,12 @@ class PrivateOperations:
 
     def status(self):
         with self._store() as conn:
-            state, conditions, rows = self._verify(conn)
+            state, conditions, rows, _ = self._verify(conn)
+            unread, waiting = conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE acknowledged_at IS NULL),"
+                "COUNT(*) FILTER (WHERE acknowledged_at IS NULL AND resolved_at IS NULL "
+                "AND submitted_at IS NULL) FROM alerts"
+            ).fetchone()
         return {
             "monitor_instance": state.instance,
             "control_instance": state.control_instance,
@@ -378,32 +601,100 @@ class PrivateOperations:
             "retry_seconds": state.retry_seconds,
             "conditions": sorted(conditions),
             "alert_count": state.alert_count,
-            "unacknowledged_alerts": sum(r["acknowledged_at"] is None for r in rows),
-            "notifications_waiting_submission": sum(
-                r["acknowledged_at"] is None
-                and r["resolved_at"] is None
-                and r["submitted_at"] is None
-                for r in rows
-            ),
+            "active_alerts": len(rows),
+            "archived_alerts": state.archived_alerts,
+            "archive_count": state.archive_count,
+            "unacknowledged_alerts": unread,
+            "notifications_waiting_submission": waiting,
             "complete": False,
             "live_enabled": False,
         }
 
     def alerts(self):
         with self._store() as conn:
-            _, _, rows = self._verify(conn)
-        return [
-            {
-                "id": r["id"],
-                **Alert.model_validate_json(r["body"]).model_dump(mode="json"),
-                **{
-                    k: r[k]
-                    for k in ("acknowledged_at", "resolved_at", "submitted_at", "attempts", "error")
-                },
+            self._verify(conn)
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM alerts WHERE acknowledged_at IS NULL ORDER BY id DESC LIMIT 100"
+                )
+            ]
+            return self._alert_views(conn, list(reversed(rows)))
+
+    def _alert_views(self, conn, rows):
+        try:
+            archives = {}
+            for row in rows:
+                if row["body"] == "":
+                    index = conn.execute(
+                        "SELECT archive FROM alert_archive_index WHERE id=?", (row["id"],)
+                    ).fetchone()[0]
+                    if index not in archives:
+                        _, _, payload = self._archive_payload(conn, index)
+                        archives[index] = {item[0]: item for item in json.loads(payload)}
+                    item = archives[index][row["id"]]
+                    if item[2] != row["digest"] or _hash(item[1]) != item[2]:
+                        raise OperationsError("operations_integrity_failed")
+                    row["body"] = item[1]
+            return [
+                {
+                    "id": r["id"],
+                    **Alert.model_validate_json(r["body"]).model_dump(mode="json"),
+                    **{
+                        k: r[k]
+                        for k in (
+                            "acknowledged_at",
+                            "resolved_at",
+                            "submitted_at",
+                            "attempts",
+                            "error",
+                        )
+                    },
+                }
+                for r in rows
+            ]
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            raise OperationsError("operations_integrity_failed") from None
+
+    def history(self, *, after_id=0, limit=100):
+        """Paginate retained alerts, including acknowledged rows; no notification or recovery."""
+        if (
+            type(after_id) is not int
+            or not 0 <= after_id < 2**63
+            or type(limit) is not int
+            or not 1 <= limit <= 100
+        ):
+            raise OperationsError("operations_history_page_invalid")
+        with self._store() as conn:
+            self._verify(conn)
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM alerts WHERE id>? ORDER BY id LIMIT ?", (after_id, limit)
+                )
+            ]
+            return {
+                "alerts": self._alert_views(conn, rows),
+                "next_alert_id": rows[-1]["id"] if rows else after_id,
+                "complete": False,
+                "live_enabled": False,
             }
-            for r in rows
-            if r["acknowledged_at"] is None
-        ][-100:]
+
+    def audit_history(self):
+        """Explicit semantic audit of every retained alert body and current delivery state."""
+        try:
+            with self._store() as conn:
+                state, _, _, _ = self._verify(conn)
+                self._verify_archives(conn, state, full=True)
+                return {
+                    "alerts": state.alert_count,
+                    "archived_alerts": state.archived_alerts,
+                    "archive_count": state.archive_count,
+                    "complete": False,
+                    "live_enabled": False,
+                }
+        except (ValueError, TypeError, KeyError):
+            raise OperationsError("operations_integrity_failed") from None
 
     def acknowledge(self, alert_id):
         if type(alert_id) is not int or alert_id <= 0:
@@ -457,6 +748,18 @@ class PrivateOperations:
                 conn.commit()
         return {"submitted": submitted, "failed": failed, "complete": False, "live_enabled": False}
 
+    def watchdog(self, *, send=send_toast):
+        """A full pending outbox must still drain; a failed sample never clears conditions."""
+        try:
+            result = self.check()
+        except OperationsError as error:
+            if str(error) != "operations_alert_capacity":
+                raise
+            result = self.status()
+            result.update(check_failed=True, reason="operations_alert_capacity")
+        result["notifications"] = self.notify(send=send)
+        return result
+
 
 class OperationsParser(argparse.ArgumentParser):
     def error(self, message):
@@ -467,12 +770,25 @@ def main(argv=None):
     parser = OperationsParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("init", "check", "watchdog", "status", "alerts", "ack", "notify", "test"),
+        choices=(
+            "init",
+            "check",
+            "watchdog",
+            "status",
+            "alerts",
+            "ack",
+            "notify",
+            "test",
+            "audit",
+            "history",
+        ),
     )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--stale-seconds", type=int, default=120)
     parser.add_argument("--retry-seconds", type=int, default=300)
     parser.add_argument("--alert-id", type=int)
+    parser.add_argument("--after-alert-id", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
     try:
         monitor = (
@@ -486,6 +802,10 @@ def main(argv=None):
             result = monitor.status()
         elif args.command == "alerts":
             result = {"alerts": monitor.alerts()}
+        elif args.command == "audit":
+            result = monitor.audit_history()
+        elif args.command == "history":
+            result = monitor.history(after_id=args.after_alert_id, limit=args.limit)
         elif args.command == "ack":
             result = monitor.acknowledge(args.alert_id)
         elif args.command == "notify":
@@ -493,13 +813,14 @@ def main(argv=None):
         elif args.command == "test":
             monitor.test_notification()
             result = monitor.notify()
+        elif args.command == "watchdog":
+            result = monitor.watchdog()
         else:
             result = monitor.check()
-            if args.command == "watchdog":
-                result["notifications"] = monitor.notify()
-        print(json.dumps({"ok": True, **result}, default=str))
+        print(json.dumps({"ok": not result.get("check_failed", False), **result}, default=str))
         return int(
             bool(result.get("conditions"))
+            or bool(result.get("check_failed"))
             or bool(result.get("failed"))
             or bool(result.get("notifications", {}).get("failed"))
         )
