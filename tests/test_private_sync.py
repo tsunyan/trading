@@ -47,7 +47,7 @@ def no_native_or_network(monkeypatch):
     monkeypatch.setattr(socket, "socket", forbidden)
 
 
-def make_setup(tmp_path, *, legacy_catalog=False, **plan_options):
+def make_setup(tmp_path, *, legacy_catalog=False, position_basis=None, **plan_options):
     clock = Clock()
     read_clocks = {
         "wall_ns": lambda: int(clock.wall.timestamp() * 1e9),
@@ -61,7 +61,11 @@ def make_setup(tmp_path, *, legacy_catalog=False, **plan_options):
     book = ExecutionCashBook.create(
         tmp_path / "cash",
         "synthetic",
-        OpeningCash(balance="1000000", cutoff=clock.wall - timedelta(seconds=1)),
+        OpeningCash(
+            balance="1000000",
+            cutoff=clock.wall - timedelta(seconds=1),
+            position_basis=position_basis,
+        ),
     )
     plan = SyncPlan(
         scope="synthetic",

@@ -156,10 +156,24 @@ class _ReaderOwner:
             lambda: tuple(reader.collect_order(orders[identity], identity) for identity in ids)
         )
 
-    def account(self):
-        # Monitor collection starts with the account, followed by known orders.
-        # Both callbacks share one budget; periodic attempts get a fresh budget.
+    def reservations(self):
+        """Discover active IDs, then read declared intents before the final account."""
         self._deadline = self.monotonic() + self.plan.collection_limit_seconds
+
+        def collect():
+            discovery = AccountReader(self, clock=self.clock).collect_account()
+            ids = tuple(sorted(o.order_id for o in discovery.active_orders))
+            if len(ids) > 1000:
+                raise PrivateSyncError("sync_reservation_collection_capacity")
+            # orders validates every ID before the first individual order GET.
+            return self.orders(ids)
+
+        return self._call(collect)
+
+    def account(self, *, continuation=False):
+        # Reservation discovery, final account and execution orders share one budget.
+        if not continuation:
+            self._deadline = self.monotonic() + self.plan.collection_limit_seconds
         return self._call(lambda: AccountReader(self, clock=self.clock).collect_account())
 
     def close(self):
@@ -556,16 +570,23 @@ class PrivateSyncWorkspace:
                 tokens.close()
                 raise
 
+        position_aware = bool(self.book.snapshot().get("position_accounting_applied"))
+        reservation_options = (
+            {"collect_reservations": lambda: owner.reservations(), "reservation_book": self.book}
+            if position_aware
+            else {}
+        )
         runner = PrivateStreamSupervisor(
             self.control,
             self.journal,
             self.book,
             limiter,
             factory,
-            lambda: owner.account(),
+            lambda: owner.account(continuation=position_aware),
             collect_orders=lambda ids: owner.orders(ids),
             policy=self.plan.supervisor,
             monotonic=self.monotonic,
+            **reservation_options,
         )
         try:
             runner.start(expected_revision=expected_revision, expected_head=expected_head)
