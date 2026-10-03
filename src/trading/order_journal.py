@@ -437,101 +437,101 @@ class OrderJournal:
             raise
 
     def _reconcile(self, evidence: OrderEvidence) -> str:
+        with self._transaction() as conn:
+            return self._reconcile_in_transaction(conn, evidence)
+
+    def _reconcile_in_transaction(self, conn, evidence: OrderEvidence) -> str:
         evidence = OrderEvidence.model_validate(evidence.model_dump())
         validate_evidence(evidence)
         client_id = evidence.intent.client_id
-        with self._transaction() as conn:
-            row = self._row(conn, client_id)
-            if OrderIntent.model_validate_json(row["intent_json"]) != evidence.intent:
-                raise OrderBlocked("evidence belongs to a different intent")
-            if row["state"] in {"PREPARED", "ABANDONED"}:
-                raise OrderBlocked("unexpected broker order for unsubmitted intent")
-            receipt = self._receipt(conn, client_id)
-            if receipt is not None:
-                self._check_receipt_evidence(receipt, evidence)
-            previous = (
-                OrderEvidence.model_validate_json(row["evidence_json"])
-                if row["evidence_json"]
-                else None
-            )
-            if previous:
-                if (previous.root_order_id, previous.order_id) != (
-                    evidence.root_order_id,
-                    evidence.order_id,
-                ):
-                    raise OrderBlocked("broker order identity changed")
-                if evidence.observed_at < previous.observed_at:
-                    raise OrderBlocked("stale evidence")
-                old = {e.execution_id: e for e in previous.executions}
-                new = {e.execution_id: e for e in evidence.executions}
-                if any(new.get(key) != value for key, value in old.items()):
-                    raise OrderBlocked("executions disappeared or changed")
-                if evidence.observed_at == previous.observed_at and evidence != previous:
-                    raise OrderBlocked("conflicting same-time evidence")
-                if previous.status in {"EXECUTED", "CANCELED", "EXPIRED"} and (
-                    evidence.status != previous.status
-                ):
-                    raise OrderBlocked("terminal broker status changed")
-            # Broker identifiers must never bind to a different local intent.
-            for other in conn.execute(
-                "SELECT client_id,evidence_json FROM orders WHERE client_id!=?",
-                (client_id,),
+        row = self._row(conn, client_id)
+        if OrderIntent.model_validate_json(row["intent_json"]) != evidence.intent:
+            raise OrderBlocked("evidence belongs to a different intent")
+        if row["state"] in {"PREPARED", "ABANDONED"}:
+            raise OrderBlocked("unexpected broker order for unsubmitted intent")
+        receipt = self._receipt(conn, client_id)
+        if receipt is not None:
+            self._check_receipt_evidence(receipt, evidence)
+        previous = (
+            OrderEvidence.model_validate_json(row["evidence_json"])
+            if row["evidence_json"]
+            else None
+        )
+        if previous:
+            if (previous.root_order_id, previous.order_id) != (
+                evidence.root_order_id,
+                evidence.order_id,
             ):
-                other_receipt = self._receipt(conn, other["client_id"])
-                if other_receipt is not None and (
-                    other_receipt.root_order_id == evidence.root_order_id
-                    or other_receipt.order_id == evidence.order_id
-                ):
-                    raise OrderBlocked("broker ID already bound to another receipt")
-                if other["evidence_json"] is None:
-                    continue
-                item = OrderEvidence.model_validate_json(other["evidence_json"])
-                if (
-                    item.order_id == evidence.order_id
-                    or item.root_order_id == evidence.root_order_id
-                ):
-                    raise OrderBlocked("broker ID already bound to another intent")
-                if {e.execution_id for e in item.executions} & {
-                    e.execution_id for e in evidence.executions
-                }:
-                    raise OrderBlocked("execution ID already bound to another intent")
-            filled = sum(e.units for e in evidence.executions)
-            if not evidence.executions_complete:
-                state = "RECONCILING"
-            elif evidence.status == "EXECUTED":
-                state = "FILLED" if filled == evidence.intent.units else "RECONCILING"
-            elif evidence.status in {"CANCELED", "EXPIRED"}:
-                state = evidence.status
-            else:
-                state = "PARTIAL" if filled else "WORKING"
-                # An acknowledgement is not final cancellation. Do not release
-                # this gate on an unchanged working snapshot after a cancel request.
-                if row["state"] == "CANCEL_PENDING":
-                    state = "CANCEL_PENDING"
-            if row["state"] in TERMINAL:
-                # Even late extra fills must be escalated, not silently accepted
-                # after releasing a reservation for a supposedly final snapshot.
-                if (
-                    state != row["state"]
-                    or evidence.model_copy(update={"observed_at": previous.observed_at}) != previous
-                ):
-                    raise OrderBlocked("final evidence changed; halt and investigate")
-                return state
-            if evidence == previous and state == row["state"]:
-                return state
-            conn.execute(
-                "UPDATE orders SET state=?,evidence_json=? WHERE client_id=?",
-                (state, evidence.model_dump_json(), client_id),
-            )
-            self._event(
-                conn,
-                client_id,
-                "RECONCILED",
-                {
-                    "state": state,
-                    "evidence": evidence.model_dump(mode="json"),
-                },
-            )
+                raise OrderBlocked("broker order identity changed")
+            if evidence.observed_at < previous.observed_at:
+                raise OrderBlocked("stale evidence")
+            old = {e.execution_id: e for e in previous.executions}
+            new = {e.execution_id: e for e in evidence.executions}
+            if any(new.get(key) != value for key, value in old.items()):
+                raise OrderBlocked("executions disappeared or changed")
+            if evidence.observed_at == previous.observed_at and evidence != previous:
+                raise OrderBlocked("conflicting same-time evidence")
+            if previous.status in {"EXECUTED", "CANCELED", "EXPIRED"} and (
+                evidence.status != previous.status
+            ):
+                raise OrderBlocked("terminal broker status changed")
+        # Broker identifiers must never bind to a different local intent.
+        for other in conn.execute(
+            "SELECT client_id,evidence_json FROM orders WHERE client_id!=?",
+            (client_id,),
+        ):
+            other_receipt = self._receipt(conn, other["client_id"])
+            if other_receipt is not None and (
+                other_receipt.root_order_id == evidence.root_order_id
+                or other_receipt.order_id == evidence.order_id
+            ):
+                raise OrderBlocked("broker ID already bound to another receipt")
+            if other["evidence_json"] is None:
+                continue
+            item = OrderEvidence.model_validate_json(other["evidence_json"])
+            if item.order_id == evidence.order_id or item.root_order_id == evidence.root_order_id:
+                raise OrderBlocked("broker ID already bound to another intent")
+            if {e.execution_id for e in item.executions} & {
+                e.execution_id for e in evidence.executions
+            }:
+                raise OrderBlocked("execution ID already bound to another intent")
+        filled = sum(e.units for e in evidence.executions)
+        if not evidence.executions_complete:
+            state = "RECONCILING"
+        elif evidence.status == "EXECUTED":
+            state = "FILLED" if filled == evidence.intent.units else "RECONCILING"
+        elif evidence.status in {"CANCELED", "EXPIRED"}:
+            state = evidence.status
+        else:
+            state = "PARTIAL" if filled else "WORKING"
+            # An acknowledgement is not final cancellation. Do not release
+            # this gate on an unchanged working snapshot after a cancel request.
+            if row["state"] == "CANCEL_PENDING":
+                state = "CANCEL_PENDING"
+        if row["state"] in TERMINAL:
+            # Even late extra fills must be escalated, not silently accepted
+            # after releasing a reservation for a supposedly final snapshot.
+            if (
+                state != row["state"]
+                or evidence.model_copy(update={"observed_at": previous.observed_at}) != previous
+            ):
+                raise OrderBlocked("final evidence changed; halt and investigate")
+            return state
+        if evidence == previous and state == row["state"]:
+            return state
+        conn.execute(
+            "UPDATE orders SET state=?,evidence_json=? WHERE client_id=?",
+            (state, evidence.model_dump_json(), client_id),
+        )
+        self._event(
+            conn,
+            client_id,
+            "RECONCILED",
+            {
+                "state": state,
+                "evidence": evidence.model_dump(mode="json"),
+            },
+        )
         return state
 
     def begin_cancel(self, client_id: str):

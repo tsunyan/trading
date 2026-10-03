@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import AwareDatetime, Field, model_validator
 
 from trading.account_guard import AccountPolicy
+from trading.account_reader import OrderReadReport
 from trading.broker_contracts import Contract, OrderIntent, OrderLimits, order_request
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
 from trading.post_control import PersistentPostLimiter
@@ -460,6 +461,124 @@ class LiveOrderJournal(OrderJournal):
     def reconcile(self, evidence):
         with self._mutation():
             return super().reconcile(evidence)
+
+    def order_recovery_context(self, client_id):
+        """Local checkpoint for GET investigation; never infer an absent order."""
+        with self._transaction() as conn:
+            return self._order_recovery_context(conn, client_id)
+
+    def _order_recovery_context(self, conn, client_id):
+        state = self._live_state(conn)
+        row = dict(self._row(conn, client_id))
+        intent = OrderIntent.model_validate_json(row["intent_json"])
+        plan = order_request(intent, state.limits)
+        post = self.posts.snapshot()
+        submitted = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='SUBMITTING'",
+            (client_id,),
+        ).fetchall()
+        prepared = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='PREPARED'",
+            (client_id,),
+        ).fetchall()
+        if (
+            post["phase"] not in {"IN_FLIGHT", "STOPPED"}
+            or post["claim"] is None
+            or post["operation"] != ("order" if intent.effect == "OPEN" else "close_order")
+            or post["request_sha256"] != hashlib.sha256(plan.body).hexdigest()
+            or row["state"] in {"PREPARED", "ABANDONED"}
+            or len(submitted) != 1
+            or len(prepared) != 1
+            or json.loads(prepared[0][0]) != {"path": plan.path, "body": json.loads(plan.body)}
+        ):
+            raise LiveOrderError("order_recovery_claim_mismatch")
+        checkpoint = {
+            "live": state.model_dump(mode="json"),
+            "order": row,
+            "event_id": conn.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0],
+            "halted": conn.execute("SELECT halted FROM metadata").fetchone()[0],
+            "post": {
+                k: v for k, v in post.items() if k not in {"blocked", "live_enabled", "complete"}
+            },
+        }
+        return {
+            "client_id": client_id,
+            "checkpoint_sha256": _hash(
+                json.dumps(checkpoint, sort_keys=True, separators=(",", ":"))
+            ),
+            "post_revision": post["revision"],
+            "post_claim": post["claim"],
+            "post_reason": post["reason"],
+            "live_revision": state.revision,
+            "event_id": checkpoint["event_id"],
+            "live_enabled": False,
+            "complete": False,
+        }
+
+    def reconcile_unknown_order(self, client_id, *, expected_sha256, collect):
+        """Hold the POST OS owner across a trusted GET collector and persistence.
+
+        The collector returns an OrderReadReport, never a complete account proof.
+        Preserve the ambiguous POST claim and all stops, including on interruption.
+        """
+        with self._lock, self.posts._ownership():
+            before = self.order_recovery_context(client_id)
+            if before["checkpoint_sha256"] != expected_sha256:
+                raise LiveOrderError("order_recovery_checkpoint_changed")
+            if self.posts.reads.status()["blocked"]:
+                raise LiveOrderError("order_recovery_reads_blocked")
+            with self._transaction() as conn:
+                intent = OrderIntent.model_validate_json(self._row(conn, client_id)["intent_json"])
+            report = collect(intent)
+            if not isinstance(report, OrderReadReport):
+                raise LiveOrderError("order_recovery_read_report_required")
+            report = OrderReadReport.model_validate(report.model_dump())
+            if report.evidence.intent != intent or report.evidence.executions_complete:
+                raise LiveOrderError("order_recovery_evidence_mismatch")
+            if self.order_recovery_context(client_id) != before:
+                raise LiveOrderError("order_recovery_checkpoint_changed")
+            if self.posts.reads.status()["blocked"]:
+                raise LiveOrderError("order_recovery_reads_blocked")
+            try:
+                with self._transaction() as conn:
+                    if self._order_recovery_context(conn, client_id) != before:
+                        raise LiveOrderError("order_recovery_checkpoint_changed")
+                    # Stop, normalized evidence and its GET provenance commit
+                    # together. A dead sender may not have run its stop handler.
+                    state = self._live_state(conn)
+                    conn.execute("UPDATE metadata SET halted=1 WHERE id=1")
+                    if state.phase != "STOPPED":
+                        self._write_live(conn, state, phase="STOPPED")
+                        self._event(conn, None, "LIVE_STOPPED", {})
+                    result = self._reconcile_in_transaction(conn, report.evidence)
+                    self._event(
+                        conn,
+                        client_id,
+                        "ORDER_GET_OBSERVED",
+                        {
+                            "checkpoint_sha256": expected_sha256,
+                            "report_sha256": _hash(_body(report)),
+                            "observations": [
+                                o.model_dump(mode="json") for o in report.observations
+                            ],
+                        },
+                    )
+            except LiveOrderError:
+                raise
+            except (ValueError, KeyError, TypeError, ArithmeticError):
+                self.halt()
+                raise
+            return {
+                "client_id": client_id,
+                "order_id": report.evidence.order_id,
+                "broker_status": report.evidence.status,
+                "state": result,
+                "executions_complete": False,
+                "post_claim_retained": True,
+                "recovery_required": True,
+                "live_enabled": False,
+                "complete": False,
+            }
 
     def acknowledge_submission(self, receipt):
         with self._mutation():
