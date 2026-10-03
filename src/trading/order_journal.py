@@ -497,7 +497,7 @@ class OrderJournal:
                 raise OrderBlocked("execution ID already bound to another intent")
         filled = sum(e.units for e in evidence.executions)
         if not evidence.executions_complete:
-            state = "RECONCILING"
+            state = "CANCEL_PENDING" if row["state"] == "CANCEL_PENDING" else "RECONCILING"
         elif evidence.status == "EXECUTED":
             state = "FILLED" if filled == evidence.intent.units else "RECONCILING"
         elif evidence.status in {"CANCELED", "EXPIRED"}:

@@ -16,8 +16,17 @@ from pydantic import AwareDatetime, Field, model_validator
 
 from trading.account_guard import AccountPolicy
 from trading.account_reader import OrderReadReport
-from trading.broker_contracts import Contract, OrderIntent, OrderLimits, order_request
+from trading.broker_contracts import (
+    Contract,
+    OrderEvidence,
+    OrderIntent,
+    OrderLimits,
+    cancel_request,
+    order_request,
+    validate_evidence,
+)
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
+from trading.order_receipts import CancellationReceipt
 from trading.post_control import PersistentPostLimiter
 from trading.storage_init import new_storage_directory
 
@@ -471,8 +480,47 @@ class LiveOrderJournal(OrderJournal):
         state = self._live_state(conn)
         row = dict(self._row(conn, client_id))
         intent = OrderIntent.model_validate_json(row["intent_json"])
-        plan = order_request(intent, state.limits)
+        order_plan = order_request(intent, state.limits)
+        plan = order_plan
         post = self.posts.snapshot()
+        operation = "order" if intent.effect == "OPEN" else "close_order"
+        if post["operation"] == "cancel":
+            if not row["evidence_json"]:
+                raise LiveOrderError("order_recovery_claim_mismatch")
+            evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+            if evidence.intent != intent:
+                raise LiveOrderError("order_recovery_claim_mismatch")
+            plan = cancel_request(evidence.root_order_id)
+            operation = "cancel"
+            claims = conn.execute(
+                "SELECT payload_json FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'",
+                (client_id,),
+            ).fetchall()
+            if len(claims) != 1:
+                raise LiveOrderError("order_recovery_claim_mismatch")
+            saved = json.loads(claims[0][0])
+            if (
+                not isinstance(saved, dict)
+                or set(saved)
+                != {"post_claim", "request_sha256", "root_order_id", "order_id", "evidence_sha256"}
+                or saved["post_claim"] != post["claim"]
+                or saved["request_sha256"] != hashlib.sha256(plan.body).hexdigest()
+                or saved["root_order_id"] != evidence.root_order_id
+                or saved["order_id"] != evidence.order_id
+            ):
+                raise LiveOrderError("order_recovery_claim_mismatch")
+            # Later GET evidence may contain additional fills. Bind the cancel
+            # attempt to the exact earlier evidence, without requiring it to stay current.
+            history = conn.execute(
+                "SELECT payload_json FROM events WHERE client_id=? AND kind='RECONCILED'",
+                (client_id,),
+            ).fetchall()
+            if not any(
+                _hash(OrderEvidence.model_validate(json.loads(h[0])["evidence"]).model_dump_json())
+                == saved["evidence_sha256"]
+                for h in history
+            ):
+                raise LiveOrderError("order_recovery_claim_mismatch")
         submitted = conn.execute(
             "SELECT payload_json FROM events WHERE client_id=? AND kind='SUBMITTING'",
             (client_id,),
@@ -484,12 +532,13 @@ class LiveOrderJournal(OrderJournal):
         if (
             post["phase"] not in {"IN_FLIGHT", "STOPPED"}
             or post["claim"] is None
-            or post["operation"] != ("order" if intent.effect == "OPEN" else "close_order")
+            or post["operation"] != operation
             or post["request_sha256"] != hashlib.sha256(plan.body).hexdigest()
             or row["state"] in {"PREPARED", "ABANDONED"}
             or len(submitted) != 1
             or len(prepared) != 1
-            or json.loads(prepared[0][0]) != {"path": plan.path, "body": json.loads(plan.body)}
+            or json.loads(prepared[0][0])
+            != {"path": order_plan.path, "body": json.loads(order_plan.body)}
         ):
             raise LiveOrderError("order_recovery_claim_mismatch")
         checkpoint = {
@@ -509,6 +558,7 @@ class LiveOrderJournal(OrderJournal):
             "post_revision": post["revision"],
             "post_claim": post["claim"],
             "post_reason": post["reason"],
+            "post_operation": post["operation"],
             "live_revision": state.revision,
             "event_id": checkpoint["event_id"],
             "live_enabled": False,
@@ -592,8 +642,152 @@ class LiveOrderJournal(OrderJournal):
         with self._mutation():
             return super().abandon(client_id)
 
+    def _cancel_plan(self, conn, client_id, now=None, *, claimed=False):
+        row = self._row(conn, client_id)
+        allowed = {"CANCEL_PENDING"} if claimed else {"WORKING", "PARTIAL", "RECONCILING"}
+        if row["state"] not in allowed or not row["evidence_json"]:
+            raise LiveOrderError("live_cancel_confirmed_order_required")
+        intent = OrderIntent.model_validate_json(row["intent_json"])
+        evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+        validate_evidence(evidence)
+        recorded = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='RECONCILED' "
+            "ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        ).fetchone()
+        if (
+            recorded is None
+            or OrderEvidence.model_validate(json.loads(recorded[0])["evidence"]) != evidence
+        ):
+            raise LiveOrderError("live_cancel_evidence_integrity_failed")
+        if (
+            evidence.intent != intent
+            or evidence.status not in {"WAITING", "ORDERED", "MODIFYING"}
+            or sum(e.units for e in evidence.executions) >= intent.units
+        ):
+            raise LiveOrderError("live_cancel_evidence_mismatch")
+        if now is not None and not (
+            0
+            <= (now - evidence.observed_at).total_seconds()
+            <= self._live_state(conn).policy.max_snapshot_age_seconds
+        ):
+            raise LiveOrderError("live_cancel_evidence_stale")
+        plan = order_request(intent, self.limits)
+        prepared = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='PREPARED'", (client_id,)
+        ).fetchall()
+        submitted = conn.execute(
+            "SELECT 1 FROM events WHERE client_id=? AND kind='SUBMITTING'", (client_id,)
+        ).fetchall()
+        if (
+            len(prepared) != 1
+            or len(submitted) != 1
+            or json.loads(prepared[0][0]) != {"path": plan.path, "body": json.loads(plan.body)}
+        ):
+            raise LiveOrderError("live_cancel_submission_integrity_failed")
+        receipt = self._receipt(conn, client_id)
+        if receipt is not None:
+            self._check_receipt_evidence(receipt, evidence)
+        if (
+            not claimed
+            and conn.execute(
+                "SELECT 1 FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'", (client_id,)
+            ).fetchone()
+        ):
+            raise LiveOrderError("live_cancel_already_claimed")
+        return cancel_request(evidence.root_order_id), evidence
+
+    def cancel_request(self, client_id):
+        with self._transaction() as conn:
+            now = self._clock(self.clock())
+            self._authorize(conn, now)
+            return self._cancel_plan(conn, client_id, now)[0]
+
     def begin_cancel(self, client_id):
-        raise LiveOrderError("live_cancel_transport_not_connected")
+        with self._mutation(), self._transaction() as conn:
+            now = self._clock(self.clock())
+            self._authorize(conn, now)
+            plan, evidence = self._cancel_plan(conn, client_id, now)
+            digest = hashlib.sha256(plan.body).hexdigest()
+            claim = self.posts.require_operation("cancel", digest)
+            conn.execute("UPDATE orders SET state='CANCEL_PENDING' WHERE client_id=?", (client_id,))
+            self._event(
+                conn,
+                client_id,
+                "CANCEL_CLAIMED",
+                {
+                    "post_claim": claim,
+                    "request_sha256": digest,
+                    "root_order_id": evidence.root_order_id,
+                    "order_id": evidence.order_id,
+                    "evidence_sha256": _hash(evidence.model_dump_json()),
+                },
+            )
+            return plan
+
+    def _cancel_claim(self, conn, client_id, plan, evidence):
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'",
+            (client_id,),
+        ).fetchall()
+        post = self.posts.snapshot()
+        expected = {
+            "post_claim": post["claim"],
+            "request_sha256": hashlib.sha256(plan.body).hexdigest(),
+            "root_order_id": evidence.root_order_id,
+            "order_id": evidence.order_id,
+            "evidence_sha256": _hash(evidence.model_dump_json()),
+        }
+        if (
+            len(rows) != 1
+            or json.loads(rows[0][0]) != expected
+            or post["operation"] != "cancel"
+            or post["claim"] is None
+            or post["request_sha256"] != expected["request_sha256"]
+        ):
+            raise LiveOrderError("live_cancel_claim_integrity_failed")
+
+    def validate_cancel_dispatch(self, client_id, plan):
+        with self._transaction() as conn:
+            now = self._clock(self.clock())
+            self._authorize(conn, now)
+            current, evidence = self._cancel_plan(conn, client_id, now, claimed=True)
+            if current != plan:
+                raise LiveOrderError("live_cancel_plan_changed")
+            self.posts.require_operation("cancel", hashlib.sha256(plan.body).hexdigest())
+            self._cancel_claim(conn, client_id, plan, evidence)
+
+    @staticmethod
+    def _cancel_receipt(conn, client_id):
+        rows = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='CANCEL_RECEIPT'",
+            (client_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise LiveOrderError("live_cancel_receipt_conflict")
+        receipt = CancellationReceipt.model_validate_json(rows[0][0])
+        if receipt.client_id != client_id:
+            raise LiveOrderError("live_cancel_receipt_conflict")
+        return receipt
+
+    def acknowledge_cancel(self, receipt):
+        receipt = CancellationReceipt.model_validate(receipt.model_dump())
+        with self._mutation(), self._transaction() as conn:
+            saved = self._cancel_receipt(conn, receipt.client_id)
+            if saved is not None:
+                if saved != receipt:
+                    raise LiveOrderError("live_cancel_receipt_conflict")
+                return
+            plan, evidence = self._cancel_plan(conn, receipt.client_id, claimed=True)
+            self._cancel_claim(conn, receipt.client_id, plan, evidence)
+            if not self.posts.owns_operation() or receipt.root_order_id != evidence.root_order_id:
+                raise LiveOrderError("live_cancel_receipt_mismatch")
+            self._event(conn, receipt.client_id, "CANCEL_RECEIPT", receipt.model_dump(mode="json"))
+
+    def cancellation_response(self, client_id, response):
+        raise LiveOrderError("explicit_live_cancel_receipt_required")
 
     def halt(self):
         # Emergency stop may be persisted while another thread is sending.
@@ -608,6 +802,9 @@ class LiveOrderJournal(OrderJournal):
         with self._transaction() as conn:
             state = self._live_state(conn)
             now = self._clock(self.clock())
+            for row in result["orders"]:
+                receipt = self._cancel_receipt(conn, row["client_id"])
+                row["cancellation_receipt"] = receipt.model_dump(mode="json") if receipt else None
         result["live_control"] = state.model_dump(mode="json")
         try:
             implementation_matches = state.implementation_sha256 == self._current_implementation()

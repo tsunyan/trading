@@ -1,6 +1,7 @@
 """One-shot GMO order transport using an enabled, bound live journal and risk gate."""
 
 import hashlib
+import json
 import math
 import threading
 import time
@@ -12,7 +13,11 @@ from pydantic import SecretStr
 from trading.broker_contracts import OrderIntent, sign_request
 from trading.live_journal import LiveOrderJournal
 from trading.order_journal import OrderBlocked
-from trading.order_receipts import MAX_RECEIPT_BYTES, parse_submission_receipt
+from trading.order_receipts import (
+    MAX_RECEIPT_BYTES,
+    parse_cancellation_receipt,
+    parse_submission_receipt,
+)
 from trading.post_control import PostControlError
 
 ENDPOINT = "https://forex-api.coin.z.com/private"
@@ -140,7 +145,11 @@ class PrivateOrderClient:
             started = self._mono()
             if type(started) not in {int, float} or not math.isfinite(started) or started < 0:
                 raise OrderTransportError("invalid_order_transport_clock")
-            self.journal.validate_dispatch(client_id, plan)
+            is_cancel = plan.path == "/v1/cancelOrders"
+            if is_cancel:
+                self.journal.validate_cancel_dispatch(client_id, plan)
+            else:
+                self.journal.validate_dispatch(client_id, plan)
             if self._elapsed(started) > 1:
                 raise OrderTransportError("order_dispatch_deadline_exceeded")
             response = self._client.send(request, stream=True, follow_redirects=False)
@@ -174,6 +183,15 @@ class PrivateOrderClient:
             self._client.cookies.clear()
             for header in ("API-KEY", "API-SIGN"):
                 request.headers.pop(header, None)
+            if is_cancel:
+                return parse_cancellation_receipt(
+                    client_id,
+                    json.loads(plan.body)["rootOrderIds"][0],
+                    bytes(content),
+                    started_at=started_at,
+                    received_at=received_at,
+                    clock_skew_ms=self._skew,
+                )
             with self.journal._transaction() as conn:
                 intent = OrderIntent.model_validate_json(
                     self.journal._row(conn, client_id)["intent_json"]
@@ -257,3 +275,48 @@ class PrivateOrderClient:
                 if not isinstance(error, Exception):
                     raise
                 raise OrderTransportError("order_submission_unknown") from None
+
+    def cancel(self, client_id):
+        """One cancellation attempt for a positively identified active order."""
+        with self._lock:
+            if self._closed:
+                raise OrderTransportError("order_client_closed")
+            try:
+                plan = self.journal.cancel_request(client_id)
+            except Exception:
+                raise OrderTransportError("cancel_preflight_refused") from None
+            entered = claimed = refused = False
+            try:
+                with self.posts.operation(
+                    "cancel", request_sha256=hashlib.sha256(plan.body).hexdigest()
+                ):
+                    entered = True
+                    try:
+                        current = self.journal.begin_cancel(client_id)
+                    except OrderBlocked:
+                        refused = True  # Known refusal before consuming a cancel attempt or HTTP.
+                    else:
+                        claimed = True
+                        if current != plan:
+                            raise OrderTransportError("cancel_plan_changed")
+                        receipt = self._http(client_id, current)
+                        self.journal.acknowledge_cancel(receipt)
+                if refused:
+                    raise OrderTransportError("cancel_preflight_refused")
+                return receipt
+            except OrderTransportError:
+                if entered and not refused:
+                    self._unknown(client_id)
+                raise
+            except PostControlError:
+                if entered and not refused:
+                    self._unknown(client_id)
+                raise OrderTransportError(
+                    "cancel_submission_unknown" if claimed else "cancel_post_control_refused"
+                ) from None
+            except BaseException as error:
+                if entered and not refused:
+                    self._unknown(client_id)
+                if not isinstance(error, Exception):
+                    raise
+                raise OrderTransportError("cancel_submission_unknown") from None

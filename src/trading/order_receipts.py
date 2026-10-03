@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, TypeAdapter, model_validator
 
-from trading.broker_contracts import Contract, OrderIntent
+from trading.broker_contracts import ClientId, Contract, OrderIntent
 from trading.wire_validation import (
     clock_skew,
     decimal_string,
@@ -60,8 +60,79 @@ class SubmissionReceipt(Contract):
         return self
 
 
+class CancellationReceipt(Contract):
+    """One requested root was accepted for cancellation; no terminal proof."""
+
+    client_id: ClientId
+    root_order_id: int = Field(strict=True, gt=0, lt=2**63)
+    accepted: bool = Field(default=True, strict=True)
+    response_at: AwareDatetime = Field(strict=True)
+    started_at: AwareDatetime = Field(strict=True)
+    received_at: AwareDatetime = Field(strict=True)
+    clock_skew_ms: int = Field(default=0, strict=True, ge=0, le=1000)
+    payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def coherent(self):
+        skew = clock_skew(self.clock_skew_ms)
+        if (
+            self.accepted is not True
+            or self.started_at > self.received_at
+            or not self.started_at - skew <= self.response_at <= self.received_at + skew
+        ):
+            raise ValueError("invalid_cancellation_receipt")
+        return self
+
+
 def _reject_constant(_):
     raise ReceiptError("invalid_submission_receipt")
+
+
+def parse_cancellation_receipt(
+    client_id, root_order_id, payload, *, started_at, received_at, clock_skew_ms=0
+) -> CancellationReceipt:
+    """Only exact documented positive acceptance. Missing success proves nothing."""
+    try:
+        if not isinstance(started_at, datetime) or not isinstance(received_at, datetime):
+            raise ValueError
+        if type(payload) is not bytes or not 0 < len(payload) <= MAX_RECEIPT_BYTES:
+            raise ValueError
+        envelope = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=_reject_constant,
+        )
+        if (
+            not isinstance(envelope, dict)
+            or set(envelope) != {"status", "data", "responsetime"}
+            or type(envelope["status"]) is not int
+            or envelope["status"] != 0
+            or not isinstance(envelope["data"], dict)
+            or set(envelope["data"]) != {"success"}
+            or not isinstance(envelope["data"]["success"], list)
+            or len(envelope["data"]["success"]) != 1
+        ):
+            raise ValueError
+        row = envelope["data"]["success"][0]
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"rootOrderId", "clientOrderId"}
+            or row["clientOrderId"] != client_id
+            or positive_id(row["rootOrderId"]) != root_order_id
+            or type(root_order_id) is not int
+        ):
+            raise ValueError
+        return CancellationReceipt(
+            client_id=client_id,
+            root_order_id=root_order_id,
+            response_at=timestamp_string(envelope["responsetime"]),
+            started_at=TIME.validate_python(started_at),
+            received_at=TIME.validate_python(received_at),
+            clock_skew_ms=clock_skew_ms,
+            payload_sha256=hashlib.sha256(payload).hexdigest(),
+        )
+    except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError, RecursionError):
+        raise ReceiptError("invalid_cancellation_receipt") from None
 
 
 def parse_submission_receipt(
