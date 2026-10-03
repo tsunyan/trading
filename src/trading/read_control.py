@@ -289,6 +289,52 @@ class PersistentReadLimiter(AccountReadLimiter):
                     raise
                 self._wait(0.05)
 
+    def _stream_binding(self, conn):
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stream_binding'"
+        ).fetchone()
+        if present is None:
+            return None
+        rows = conn.execute("SELECT id,supervisor_id FROM stream_binding LIMIT 2").fetchall()
+        if (
+            len(rows) != 1
+            or rows[0][0] != 1
+            or not isinstance(rows[0][1], str)
+            or re.fullmatch(r"[a-f0-9]{32}", rows[0][1]) is None
+        ):
+            self._failed = True
+            raise PrivateReadError("stream_binding_integrity_failed")
+        return rows[0][1]
+
+    def stream_binding(self):
+        """Read the permanent local supervisor association; never creates it."""
+        with self._transaction() as conn:
+            self._state(conn)
+            return self._stream_binding(conn)
+
+    def bind_stream(self, supervisor_id):
+        """One supervisor per GET domain. No reset/rebind, even after clean close.
+
+        An additive table keeps existing GET controls compatible. Association is
+        explicit, local, and not proof of broker identity or a cross-PC lock.
+        """
+        if not isinstance(supervisor_id, str) or not re.fullmatch(r"[a-f0-9]{32}", supervisor_id):
+            raise PrivateReadError("invalid_stream_binding")
+        with self._transaction() as conn:
+            state = self._state(conn)
+            if state["stopped"] or state["in_flight"]:
+                raise PrivateReadError("stream_binding_control_blocked")
+            bound = self._stream_binding(conn)
+            if bound is not None:
+                if bound != supervisor_id:
+                    raise PrivateReadError("stream_supervisor_already_bound")
+                return
+            conn.execute(
+                "CREATE TABLE stream_binding ("
+                "id INTEGER PRIMARY KEY CHECK(id=1),supervisor_id TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO stream_binding VALUES(1,?)", (supervisor_id,))
+
     def status(self):
         with self._transaction() as conn:
             row = self._state(conn)
