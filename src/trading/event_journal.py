@@ -22,6 +22,7 @@ ZERO = "0" * 64
 MAX_BYTES = 32_000_000
 BUSY_TIMEOUT_SECONDS = 1
 BUSY_ATTEMPTS = 3
+ACK_RESERVE_BYTES = 1024  # An ACK body is a few hundred bytes.
 TIME = TypeAdapter(AwareDatetime)
 SCHEMA = """
 CREATE TABLE journal (
@@ -393,6 +394,16 @@ class EventJournal:
 
         return self._retry_busy(attempt)
 
+    def head(self):
+        """O(1) current head for change detection only; never a verification."""
+
+        def attempt():
+            with self._transaction() as conn:
+                rows = conn.execute("SELECT head FROM journal LIMIT 2").fetchall()
+            return rows[0][0] if len(rows) == 1 and isinstance(rows[0][0], str) else None
+
+        return self._retry_busy(attempt)
+
     def current(self, session):
         meta, _, state = self._read()
         self._current(state, session)
@@ -460,6 +471,14 @@ class EventJournal:
                     if payload is not None or sequence is not None:
                         raise JournalError("invalid_capture_fields")
                     entry = Entry(kind=kind, **fields)
+                if entry.kind in {"EVENT", "HEARTBEAT"} and (
+                    meta["count"] + 2 > meta["max_records"]
+                    or meta["bytes"] + len(_entry_body(entry).encode()) + ACK_RESERVE_BYTES
+                    > MAX_BYTES
+                ):
+                    # Keep room for the ACK, so reaching capacity never leaves a
+                    # delivery outcome unknown. Nothing is recorded or delivered.
+                    raise JournalError("journal_capacity_exceeded")
                 index = self._append(conn, meta, entry)
             return index, error
 
@@ -484,8 +503,10 @@ class EventJournal:
                     target=record_id,
                 )
                 self._append(conn, meta, entry)
+                return conn.execute("SELECT head FROM journal").fetchone()[0]
 
-        self._retry_busy(attempt)
+        # The new head lets a capture detect any later writer cheaply (head()).
+        return self._retry_busy(attempt)
 
     def fail_delivery(self, session):
         def attempt():

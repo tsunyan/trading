@@ -330,9 +330,9 @@ def frame(**changes):
     ).encode()
 
 
-def setup(tmp_path, *, handler=None):
+def setup(tmp_path, *, handler=None, max_records=10_000):
     clock = Clock()
-    journal = EventJournal.create(tmp_path / "journal", "synthetic")
+    journal = EventJournal.create(tmp_path / "journal", "synthetic", max_records=max_records)
     capture = JournaledEventCapture(
         journal, clock=lambda: clock.wall, monotonic_ns=lambda: int(clock.mono * 1e9)
     )
@@ -475,6 +475,63 @@ def test_event_receipt_continues_during_rest_collection_and_invalidates_it(tmp_p
         with pytest.raises(SyncError, match="changed_during_collection"):
             future.result(timeout=5)
     receiver.close()
+
+
+def test_event_after_capture_fence_withholds_stale_assessment(tmp_path, monkeypatch):
+    clock, journal, capture, _, sock, receiver, _ = setup(tmp_path)
+    start(journal, receiver)
+    original = capture.resync
+
+    def resync(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # step() delivers between the capture's final fence and the receiver's.
+        sock.messages.append(frame())
+        assert receiver.step()
+        return result
+
+    monkeypatch.setattr(capture, "resync", resync)
+    with pytest.raises(SyncError, match="capture_changed_during_collection"):
+        receiver.resync(lambda: replay(demo_transcript(clock.wall)))
+    assert receiver.status()["stream_running"]
+    receiver.close()
+
+
+def test_quiet_steps_check_the_journal_head_without_full_verification(tmp_path, monkeypatch):
+    _, journal, _, _, sock, receiver, _ = setup(tmp_path)
+    start(journal, receiver)
+    assert not receiver.step()  # The first check verifies the started session fully.
+    checks, original = [], EventJournal._check
+
+    def check(self, meta, rows):
+        checks.append(len(rows))
+        return original(self, meta, rows)
+
+    monkeypatch.setattr(EventJournal, "_check", check)
+    for _ in range(5):
+        assert not receiver.step()
+    assert checks == []
+    sock.messages.append(frame())
+    assert receiver.step()
+    assert len(checks) == 2  # Record and ACK each verify inside their write.
+    checks.clear()
+    assert not receiver.step()
+    assert checks == []
+    receiver.close()
+
+
+def test_heartbeats_reaching_capacity_end_stream_without_unknown_outcome(tmp_path):
+    clock, journal, _, _, sock, receiver, _ = setup(tmp_path, max_records=6)
+    start(journal, receiver)
+    with pytest.raises(StreamError):
+        for _ in range(3):
+            clock.advance(31)
+            assert not receiver.step()
+            sock.pongs[-1].set()
+            receiver.step()
+    view = journal.inspect()
+    assert view["records"] == 5  # BEGIN + two HEARTBEAT/ACK pairs; no third heartbeat.
+    assert view["unacknowledged_records"] == ()
+    assert sock.closed and not receiver.status()["stream_running"]
 
 
 def test_expiry_during_rest_never_returns_usable_assessment(tmp_path):

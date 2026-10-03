@@ -227,15 +227,24 @@ def test_clock_reversal_is_durably_closed(journal, clock):
     assert journal.replay()["outcomes"][-1]["kind"] == "FAULT"
 
 
-def test_capacity_does_not_prune_or_ack_silently(tmp_path):
+def test_capacity_keeps_room_for_ack_and_never_prunes(tmp_path):
     journal = EventJournal.create(tmp_path / "journal", "synthetic", max_records=4)
     session = start(journal)
     journal.acknowledge(session, event(journal, session))
-    pending = event(journal, session, 2)
-    with pytest.raises(JournalError, match="capacity"):
-        journal.acknowledge(session, pending)
+    # A record without room for its ACK would leave a delivery outcome unknown.
+    for kind in ("EVENT", "HEARTBEAT"):
+        with pytest.raises(JournalError, match="journal_capacity_exceeded"):
+            if kind == "EVENT":
+                event(journal, session, 2)
+            else:
+                journal.record(session, kind, at=NOW, monotonic_ns=0)
+    assert journal.inspect()["records"] == 3
+    assert journal.inspect()["unacknowledged_records"] == ()
+    journal.record(session, "END", at=NOW, monotonic_ns=0)  # END needs no ACK.
     assert journal.inspect()["records"] == 4
-    assert journal.inspect()["unacknowledged_records"] == (pending,)
+    with pytest.raises(JournalError, match="journal_capacity_exceeded"):
+        start(journal)
+    assert journal.inspect()["records"] == 4
 
 
 def test_sql_failure_rolls_back_capture_and_head(journal):

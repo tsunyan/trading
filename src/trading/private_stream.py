@@ -11,7 +11,9 @@ import time
 from pydantic import SecretStr
 from websockets.sync.client import connect
 
+from trading.account_sync import SyncError
 from trading.event_capture import JournaledEventCapture
+from trading.event_journal import JournalError
 from trading.private_stream_token import STREAM_ENDPOINT, PrivateTokenClient, StreamError
 
 CHANNELS = ("executionEvents", "orderEvents", "positionEvents")
@@ -145,9 +147,13 @@ class PrivateStreamReceiver:
                     self._pong = self._socket.ping(ack_on_close=False)
                     self._ping_at = now
                 # Check journal ownership, storage health, and monitor liveness
-                # even on an otherwise quiet connection.
-                current = self._capture.status()
-                if current["capture_failed"] or current["phase"] == "DISCONNECTED":
+                # even on an otherwise quiet connection. check_live() verifies the
+                # whole journal only when its head changed; status() always would.
+                try:
+                    current = self._capture.check_live()
+                except JournalError:
+                    raise StreamError("private_stream_capture_invalid") from None
+                if current["phase"] == "DISCONNECTED":
                     raise StreamError("private_stream_capture_invalid")
                 try:
                     payload = self._socket.recv(timeout=1, decode=False)
@@ -223,10 +229,20 @@ class PrivateStreamReceiver:
                 raise StreamError("private_stream_not_running")
             try:
                 self._tokens.connection_url()
-            except StreamError:
-                self._reason = "private_stream_token_invalid"
+                current = self._capture.check_live()
+            except (StreamError, JournalError) as error:
+                self._reason = (
+                    "private_stream_token_invalid"
+                    if isinstance(error, StreamError)
+                    else "private_stream_capture_invalid"
+                )
                 self._shutdown()
                 raise StreamError(self._reason) from None
+            # step() may deliver an event after the capture's own final fence and
+            # before this lock. A committed cash posting stays safe to repeat; only
+            # the stale assessment is withheld.
+            if (current["epoch"], current["revision"]) != (result.epoch, result.revision):
+                raise SyncError("capture_changed_during_collection")
         return result
 
     def run(self, stop_event: threading.Event):

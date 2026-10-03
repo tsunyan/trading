@@ -36,6 +36,8 @@ class JournaledEventCapture:
         self._session = self._monitor_session = None
         self._failed = False
         self._ended = False
+        # Journal head after this capture's own last write or full verification.
+        self._live_head = None
         self._lock = threading.RLock()
 
     def _poison(self):
@@ -62,7 +64,9 @@ class JournaledEventCapture:
     def _ready(self):
         self._check_ready()
         try:
-            return self._journal.current(self._session)
+            view = self._journal.current(self._session)
+            self._live_head = view["head"]
+            return view
         except _JournalBusy:
             raise  # Lock contention after retries; nothing was observed to be wrong.
         except JournalError:
@@ -113,7 +117,7 @@ class JournaledEventCapture:
                     self._monitor.disconnect(self._monitor_session)
                     self._ended = True
                 if kind != "END":
-                    self._journal.acknowledge(self._session, record_id)
+                    self._live_head = self._journal.acknowledge(self._session, record_id)
             except BaseException as error:
                 self._poison()
                 try:
@@ -132,6 +136,26 @@ class JournaledEventCapture:
 
     def disconnect(self):
         self._deliver("END")
+
+    def check_live(self):
+        """Cheap fence for each receive-loop iteration; status() stays the full audit.
+
+        An unchanged journal head means nothing was appended since this capture's
+        own last write or full verification, so its session is still current.
+        Any other head, such as another process's new epoch, gets the full check.
+        Returns the in-memory monitor status (phase, epoch, revision).
+        """
+        with self._lock:
+            self._check_ready()
+            try:
+                if self._live_head is None or self._journal.head() != self._live_head:
+                    self._ready()
+            except _JournalBusy:
+                pass  # Contention is not a fault; the next write verifies fully.
+            except JournalError:
+                self._poison()
+                raise
+            return self._monitor.status()
 
     def status(self):
         with self._lock:
