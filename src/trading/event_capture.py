@@ -91,7 +91,7 @@ class JournaledEventCapture:
                 self._poison()
                 raise
 
-    def _deliver(self, kind, *, sequence=None, payload=None):
+    def _deliver(self, kind, *, sequence=None, payload=None, expected_head=None):
         with self._lock:
             # record() verifies the journal and session within its transaction.
             self._check_ready()
@@ -104,6 +104,7 @@ class JournaledEventCapture:
                     monotonic_ns=mono,
                     sequence=sequence,
                     payload=payload,
+                    expected_head=expected_head,
                 )
             except BaseException:
                 self._poison()
@@ -136,6 +137,18 @@ class JournaledEventCapture:
 
     def disconnect(self):
         self._deliver("END")
+
+    def end_for_rollover(self, cash_book=None):
+        """Clean boundary with all received fills durably booked and all ACKs known."""
+        with self._lock:
+            if cash_book is not None:
+                self._check_cash_book(cash_book)
+            view = self._ready()
+            if view["unacknowledged_records"]:
+                raise JournalError("capture_delivery_unresolved")
+            self._monitor.assert_rollover_ready(self._monitor_session, cash_book)
+            self._deliver("END", expected_head=view["head"])
+            return self._journal.inspect()["head"]
 
     def check_live(self):
         """Cheap fence for each receive-loop iteration; status() stays the full audit.
@@ -193,6 +206,11 @@ class JournaledEventCapture:
         return (
             "journal_is_not_broker_history_proof",
             *(("journal_epoch_gap_not_repaired",) if view and view["epoch"] > 1 else ()),
+            *(
+                ("journal_rollover_gap_not_repaired",)
+                if view and view.get("archived_segments")
+                else ()
+            ),
             *(
                 ("journal_delivery_outcome_unknown",)
                 if view and view["unacknowledged_records"]

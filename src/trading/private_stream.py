@@ -287,6 +287,26 @@ class PrivateStreamReceiver:
             if self._cleanup_failed:
                 raise StreamError("private_stream_cleanup_failed")
 
+    def close_for_rollover(self, cash_book=None):
+        """Close a clean receipted boundary. Failure never starts a new connection."""
+        with self._lock:
+            if not self._running or self._closed:
+                raise StreamError("private_stream_not_running")
+            try:
+                head = self._capture.end_for_rollover(cash_book)
+                self._capture_started = False  # END has already invalidated the monitor.
+                self._reason = "planned_rollover"
+                self._shutdown()
+                if self._cleanup_failed or self._tokens.status()["token_cleanup_unknown"]:
+                    raise StreamError("private_stream_cleanup_failed")
+                return head
+            except BaseException as error:
+                self._reason = "private_stream_rollover_failed"
+                self._shutdown()
+                if not isinstance(error, Exception):
+                    raise
+                raise StreamError(self._reason) from None
+
     def status(self):
         with self._lock:
             return {

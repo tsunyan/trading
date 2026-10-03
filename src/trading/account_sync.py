@@ -295,6 +295,32 @@ class AccountSyncMonitor:
             *(("execution_accounting_not_applied",) if self._executions else ()),
         )
 
+    def assert_rollover_ready(self, session, book: ExecutionCashBook | None):
+        """Only discard process-local execution notices after durable receipt matching.
+
+        This permits a planned observation boundary, not restoration of account
+        proof or repair of the broker history gap. A collection in flight must
+        finish first. Partial orders may cross the boundary if every received
+        fill is booked; the next connection still requires fresh account reads.
+        """
+        with self._lock:
+            self._current(session)
+            if self._ticket is not None:
+                raise SyncError("rollover_collection_in_progress")
+            revision = self._revision
+            events = tuple(self._executions.values())
+            if book is not None and book.snapshot()["halted"]:
+                raise SyncError("rollover_cash_book_halted")
+            if events:
+                if not isinstance(book, ExecutionCashBook):
+                    raise SyncError("rollover_execution_cash_book_required")
+                receipt = book.match_booked_events(events)
+                if set(receipt["booked_execution_ids"]) != set(self._executions):
+                    raise SyncError("rollover_execution_not_booked")
+            self._current(session)
+            if revision != self._revision or self._ticket is not None:
+                raise SyncError("stream_changed_during_collection")
+
     def apply_execution_cash(self, session, book: ExecutionCashBook, *, expected_revision):
         """Explicitly book this accepted observation's individual fills, never totals.
 
