@@ -20,6 +20,8 @@ from trading.read_control import PersistentReadLimiter
 from trading.wire_validation import unique_object
 
 PREFIX = "TradingLab/GMOFX/ReadOnly/v1/"
+ORDER_PREFIX = "TradingLab/GMOFX/Orders/v1/"
+NAMESPACES = {PREFIX: "TradingLab read-only", ORDER_PREFIX: "TradingLab orders"}
 MAX_BLOB = 2560
 
 
@@ -44,16 +46,20 @@ class CREDENTIALW(ctypes.Structure):
     ]
 
 
-def _target(reference):
+def _target(reference, namespace=PREFIX):
+    if namespace not in NAMESPACES:
+        raise CredentialError("invalid_credential_namespace")
     if not isinstance(reference, str) or not re.fullmatch(r"[a-f0-9]{32}", reference):
         raise CredentialError("invalid_credential_reference")
-    return PREFIX + reference
+    return namespace + reference
 
 
 class WindowsCredentialBackend:
     """Lazy native boundary. Injected API is for trusted tests only."""
 
-    def __init__(self, *, api=None, error_code=None):
+    def __init__(self, *, api=None, error_code=None, namespace=PREFIX):
+        _target("0" * 32, namespace)
+        self._namespace = namespace
         self._api = api
         self._error_code = error_code
 
@@ -80,7 +86,7 @@ class WindowsCredentialBackend:
         return self._api
 
     def read(self, reference):
-        target = _target(reference)
+        target = _target(reference, self._namespace)
         api = self._native()
         pointer = ctypes.POINTER(CREDENTIALW)()
         if not api.CredReadW(target, 1, 0, ctypes.byref(pointer)):
@@ -107,7 +113,7 @@ class WindowsCredentialBackend:
             api.CredFree(pointer)
 
     def write_new(self, reference, blob):
-        target = _target(reference)
+        target = _target(reference, self._namespace)
         if type(blob) is not bytes or not 0 < len(blob) <= MAX_BLOB:
             raise CredentialError("invalid_credential_blob")
         # Random revision targets; refuse a detected collision. CredWrite has no CAS.
@@ -118,7 +124,7 @@ class WindowsCredentialBackend:
         record = CREDENTIALW()
         record.Type, record.Persist = 1, 2  # GENERIC, LOCAL_MACHINE (current user).
         record.TargetName = target
-        record.UserName = "TradingLab read-only"
+        record.UserName = NAMESPACES[self._namespace]
         record.CredentialBlobSize = len(blob)
         record.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
         try:

@@ -227,11 +227,18 @@ class PrivateOrderClient:
         except Exception:
             pass  # Missing/corrupt storage still refuses future dispatch.
 
-    def submit(self, client_id, *, quote):
+    def submit(self, client_id, *, quote, expected_execution_sha256=None):
         with self._lock:
             if self._closed:
                 raise OrderTransportError("order_client_closed")
             try:
+                if expected_execution_sha256 is not None:
+                    from trading.live_execution import require_checkpoint
+
+                    require_checkpoint(
+                        self.journal.execution_context(client_id, quote=quote),
+                        expected_execution_sha256,
+                    )
                 plan = self.journal.request(client_id)
             except Exception:
                 raise OrderTransportError("order_preflight_refused") from None
@@ -245,8 +252,13 @@ class PrivateOrderClient:
                 ):
                     entered = True
                     try:
+                        options = (
+                            {}
+                            if expected_execution_sha256 is None
+                            else {"expected_execution_sha256": expected_execution_sha256}
+                        )
                         current = self.journal.begin_submission(
-                            client_id, quote=quote, now=self._now()
+                            client_id, quote=quote, now=self._now(), **options
                         )
                     except OrderBlocked:
                         # No HTTP call occurred. The local risk refusal is known;
@@ -278,12 +290,21 @@ class PrivateOrderClient:
                     raise
                 raise OrderTransportError("order_submission_unknown") from None
 
-    def cancel(self, client_id, *, authorization_sha256=None):
+    def cancel(self, client_id, *, authorization_sha256=None, expected_execution_sha256=None):
         """One cancellation attempt for a positively identified active order."""
         with self._lock:
             if self._closed:
                 raise OrderTransportError("order_client_closed")
             try:
+                if expected_execution_sha256 is not None:
+                    from trading.live_execution import require_checkpoint
+
+                    require_checkpoint(
+                        self.journal.execution_context(
+                            client_id, operation="cancel", authorization_sha256=authorization_sha256
+                        ),
+                        expected_execution_sha256,
+                    )
                 plan = self.journal.cancel_request(
                     client_id, authorization_sha256=authorization_sha256
                 )
@@ -296,13 +317,14 @@ class PrivateOrderClient:
                 ):
                     entered = True
                     try:
-                        current = (
-                            self.journal.begin_cancel(client_id)
-                            if authorization_sha256 is None
-                            else self.journal.begin_cancel(
-                                client_id, authorization_sha256=authorization_sha256
-                            )
+                        options = (
+                            {}
+                            if expected_execution_sha256 is None
+                            else {"expected_execution_sha256": expected_execution_sha256}
                         )
+                        if authorization_sha256 is not None:
+                            options["authorization_sha256"] = authorization_sha256
+                        current = self.journal.begin_cancel(client_id, **options)
                     except OrderBlocked:
                         refused = True  # Known refusal before consuming a cancel attempt or HTTP.
                     else:

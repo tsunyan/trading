@@ -33,6 +33,7 @@ from trading.broker_contracts import (
     validate_evidence,
 )
 from trading.known_orders import KnownOrder
+from trading.live_execution import credential_binding, execution_context, require_checkpoint
 from trading.live_operations import LiveOperations, LiveOperationsError, OperationsBinding
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
 from trading.order_receipts import CancellationReceipt, SubmissionReceipt
@@ -112,6 +113,10 @@ CODE_FILES = (
     "execution_cash_book.py",
     "event_journal.py",
     "segmented_journal.py",
+    "live_execution.py",
+    "credential_store.py",
+    "order_credentials.py",
+    "order_runtime.py",
 )
 
 
@@ -882,9 +887,33 @@ class LiveOrderJournal(OrderJournal):
                 snapshot, quote, now=now if now is not None else self.clock()
             )
 
-    def begin_submission(self, client_id, *, quote=None, now=None):
+    def credential_binding(self):
+        with self._transaction() as conn:
+            return credential_binding(self, self._live_state(conn))
+
+    def execution_context(
+        self, client_id, *, operation="submit", quote=None, authorization_sha256=None
+    ):
+        with self._transaction() as conn:
+            return execution_context(
+                self,
+                conn,
+                client_id,
+                operation=operation,
+                quote=quote,
+                authorization_sha256=authorization_sha256,
+            )
+
+    def begin_submission(self, client_id, *, quote=None, now=None, expected_execution_sha256=None):
         now = self._clock(now if now is not None else self.clock())
         with self._mutation(), self._transaction() as conn:
+            if expected_execution_sha256 is not None:
+                require_checkpoint(
+                    execution_context(
+                        self, conn, client_id, operation="submit", quote=quote, after_claim=True
+                    ),
+                    expected_execution_sha256,
+                )
             self._authorize(conn, now)
             row = self._row(conn, client_id)
             plan = order_request(OrderIntent.model_validate_json(row["intent_json"]), self.limits)
@@ -1548,8 +1577,20 @@ class LiveOrderJournal(OrderJournal):
             self._authorize_cancel(conn, client_id, now, authorization_sha256)
             return self._cancel_plan(conn, client_id, now)[0]
 
-    def begin_cancel(self, client_id, *, authorization_sha256=None):
+    def begin_cancel(self, client_id, *, authorization_sha256=None, expected_execution_sha256=None):
         with self._mutation(), self._transaction() as conn:
+            if expected_execution_sha256 is not None:
+                require_checkpoint(
+                    execution_context(
+                        self,
+                        conn,
+                        client_id,
+                        operation="cancel",
+                        authorization_sha256=authorization_sha256,
+                        after_claim=True,
+                    ),
+                    expected_execution_sha256,
+                )
             now = self._clock(self.clock())
             self._authorize_cancel(conn, client_id, now, authorization_sha256)
             plan, evidence = self._cancel_plan(conn, client_id, now)
