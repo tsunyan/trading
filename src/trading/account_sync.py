@@ -41,6 +41,7 @@ class SyncAssessment(Contract):
     blockers: tuple[str, ...]
     execution_reconciliation: ExecutionReconciliation | None = None
     execution_cash: dict | None = None
+    account_inventory: dict | None = None
     position_reservations: dict | None = None
     account_valuation: dict | None = None
     previously_booked_execution_ids: tuple[int, ...] = ()
@@ -117,6 +118,8 @@ class AccountSyncMonitor:
         self._baseline = None
         self._cash_batch = None
         self._cash_observed_at = None
+        self._inventory_input = None
+        self._inventory_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
         self._valuation_input = None
@@ -135,6 +138,8 @@ class AccountSyncMonitor:
         self._booked_executions.clear()
         self._cash_batch = None
         self._cash_observed_at = None
+        self._inventory_input = None
+        self._inventory_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
         self._valuation_input = None
@@ -167,6 +172,10 @@ class AccountSyncMonitor:
             or (
                 self._cash_batch is not None
                 and mono - self._cash_observed_at > self._observation_limit
+            )
+            or (
+                self._inventory_input is not None
+                and mono - self._inventory_observed_at > self._observation_limit
             )
             or (
                 self._reservation_input is not None
@@ -394,6 +403,66 @@ class AccountSyncMonitor:
         if self._baseline is not None and report.assets.balance != self._baseline.assets.balance:
             problems.append("balance_change_unverified")
         return tuple(problems)
+
+    def compare_account_inventory(self, session, book: ExecutionCashBook, *, expected_revision):
+        """Compare current cash and declared positions against one stable book head."""
+        with self._lock:
+            self._current(session)
+            if type(expected_revision) is not int or expected_revision != self._revision:
+                raise SyncError("stale_inventory_sync_revision")
+            if self._ticket is not None or self._inventory_input is None:
+                raise SyncError("inventory_requires_current_collection")
+            if not isinstance(book, ExecutionCashBook):
+                raise SyncError("execution_cash_book_required")
+            report = self._inventory_input
+            epoch, sequence = self._epoch, self._sequence
+            try:
+                before = book.snapshot()
+                balance = book.compare_balance(report, clock_skew_ms=self._clock_skew_ms)
+                positions = (
+                    book.compare_positions(report, clock_skew_ms=self._clock_skew_ms)
+                    if before.get("position_accounting_applied")
+                    else None
+                )
+                after = book.snapshot()
+                if any(
+                    item["head"] != before["head"]
+                    for item in (balance, after, *((positions,) if positions else ()))
+                ):
+                    raise SyncError("cash_book_changed_during_inventory_comparison")
+                self._current(session)
+                if self._inventory_input is not report or expected_revision != self._revision:
+                    raise SyncError("inventory_sync_changed_during_comparison")
+            except BaseException as error:
+                self._invalidate("account_inventory_comparison_failed")
+                if not isinstance(error, Exception):
+                    raise
+                raise SyncError("account_inventory_comparison_failed") from None
+            return {
+                "balance": balance,
+                "positions": positions,
+                "head": after["head"],
+                "halted": after["halted"]
+                or balance["halted"]
+                or bool(positions and positions["halted"]),
+                "epoch": epoch,
+                "revision": expected_revision,
+                "received_sequence": sequence,
+                "blockers": tuple(
+                    dict.fromkeys(
+                        (
+                            *balance["blockers"],
+                            *(
+                                positions["blockers"]
+                                if positions
+                                else ("cash_book_position_basis_required",)
+                            ),
+                        )
+                    )
+                ),
+                "complete": False,
+                "live_enabled": False,
+            }
 
     def compare_position_reservations(self, session, book: ExecutionCashBook, *, expected_revision):
         """Compare only internally retained, current evidence; never returned dicts."""
@@ -690,6 +759,9 @@ class AccountSyncMonitor:
                     booked_cash_head=lookup["head"] if lookup is not None else None,
                     blockers=tuple(dict.fromkeys((*self._blockers(), *report.blockers))),
                 )
+                # Keep an independent validated copy: returned diagnostics are not proof.
+                self._inventory_input = AccountReadReport.model_validate(report.model_dump())
+                self._inventory_observed_at = mono
                 if reservation_reports is not None:
                     self._reservation_input = (report, reservation_reports)
                     self._reservation_observed_at = mono

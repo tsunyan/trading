@@ -15,6 +15,7 @@ from test_private_stream import NOW, Clock, FakeSocket, client, frame, response
 from trading.account_sync import SyncError
 from trading.event_capture import JournaledEventCapture
 from trading.execution_cash_book import ExecutionCashBook, OpeningCash
+from trading.execution_positions import OpeningPosition, PositionBasis
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_supervisor import PrivateStreamSupervisor, SupervisorError, SupervisorPolicy
 from trading.segmented_journal import SegmentedEventJournal
@@ -38,7 +39,7 @@ class Socket(FakeSocket):
         return pong
 
 
-def setup(tmp_path, *, max_records=8, collect=None, handler=None, policy=None):
+def setup(tmp_path, *, max_records=8, collect=None, handler=None, policy=None, position_basis=None):
     clock = Clock()
     journal = SegmentedEventJournal.create(
         tmp_path / "journal", "synthetic", max_records=max_records
@@ -46,7 +47,9 @@ def setup(tmp_path, *, max_records=8, collect=None, handler=None, policy=None):
     book = ExecutionCashBook.create(
         tmp_path / "cash",
         "synthetic",
-        OpeningCash(balance="1000000", cutoff=NOW - timedelta(seconds=1)),
+        OpeningCash(
+            balance="1000000", cutoff=NOW - timedelta(seconds=1), position_basis=position_basis
+        ),
     )
     control = StreamControl.create(
         tmp_path / "control", journal, book, wall_ns=lambda: int(clock.wall.timestamp() * 1e9)
@@ -111,6 +114,122 @@ def settle(runner):
         runner._worker.join(timeout=3)
         assert not runner._worker.is_alive(), "REST test worker did not finish"
     runner.step()
+
+
+@pytest.mark.parametrize("kind", ["units", "missing", "flat"])
+def test_equal_cash_with_position_difference_stops_without_reconnect(tmp_path, kind):
+    from test_position_reservations import account
+
+    basis = PositionBasis(
+        positions=()
+        if kind == "flat"
+        else (OpeningPosition(position_id=401, side="BUY", units=400, average_price="150"),)
+    )
+    clock, _, _, control, runner, sockets, _, calls, _, _ = setup(
+        tmp_path, max_records=64, position_basis=basis
+    )
+    runner._collect = lambda: account(now=clock.wall, units=None if kind == "missing" else 300)
+    start(runner)
+    with pytest.raises(SupervisorError, match="sync_failed"):
+        settle(runner)
+    assert control.snapshot()["phase"] == "STOPPED"
+    assert control.snapshot()["sync_successes"] == 0 and sockets[0].closed
+    assert [method for method, _ in calls].count("POST") == 1
+
+
+@pytest.mark.parametrize("kind", ["reservation", "valuation"])
+@pytest.mark.parametrize("matches", [True, False])
+def test_supplied_diagnostic_mismatch_is_enforced_even_when_inventory_matches(
+    tmp_path, kind, matches
+):
+    from test_account_valuation_sync import quote
+    from test_position_reservations import account, order
+
+    from trading.account_valuation_lab import synthetic_account, synthetic_policy
+
+    basis = PositionBasis(
+        positions=(OpeningPosition(position_id=401, side="BUY", units=400, average_price="150"),)
+    )
+    clock, _, book, control, runner, _, _, _, _, _ = setup(
+        tmp_path, max_records=64, position_basis=basis
+    )
+    if kind == "reservation":
+        runner._collect = lambda: account(
+            order(now=clock.wall), now=clock.wall, ordered=300 if matches else 100
+        )
+        runner._options.update(
+            collect_reservations=lambda: (order(now=clock.wall),), reservation_book=book
+        )
+    else:
+        runner._collect = lambda: synthetic_account(
+            clock.wall, equity="999960" if matches else "999950"
+        )
+        runner._options.update(
+            collect_quote=lambda: quote(clock.wall),
+            valuation_policy=synthetic_policy(),
+            valuation_book=book,
+        )
+    start(runner)
+    if matches:
+        settle(runner)
+        assert control.snapshot()["sync_successes"] == 1
+        assert runner._last_result.account_inventory["positions"]["position_match"]
+        runner.close()
+    else:
+        with pytest.raises(SupervisorError, match="sync_failed"):
+            settle(runner)
+        assert control.snapshot()["phase"] == "STOPPED"
+        assert control.snapshot()["sync_successes"] == 0
+
+
+@pytest.mark.parametrize("kind", ["notification", "expiry"])
+def test_result_invalidated_after_worker_finishes_is_retried_before_success(tmp_path, kind):
+    clock, _, _, control, runner, _, receivers, _, _, _ = setup(tmp_path, max_records=64)
+    start(runner)
+    runner._worker.join(timeout=3)
+    assert not runner._worker.is_alive()
+    if kind == "notification":
+        receivers[0]._capture.heartbeat()
+    else:
+        clock.advance(31)
+    # A heartbeat retains observations; use a position notification to invalidate.
+    if kind == "notification":
+        from test_account_sync import position
+
+        receivers[0]._capture.ingest(1, position(timestamp=clock.wall))
+    runner.step()
+    assert control.snapshot()["sync_successes"] == 0
+    assert control.snapshot()["sync_retries"] == 1
+    assert runner._last_result is None and not receivers[0].status()["stream_closed"]
+    clock.advance(1)
+    runner._collect = lambda: (
+        report(clock, orders=False, balance="1000000")
+        if kind == "notification"
+        else report(clock, units=None, orders=False, balance="1000000")
+    )
+    runner.step()
+    settle(runner)
+    assert control.snapshot()["sync_successes"] == 1
+    runner.close()
+
+
+def test_position_failure_after_cash_commit_preserves_receipt(tmp_path):
+    clock, _, book, control, runner, sockets, _, _, rows, _ = setup(
+        tmp_path, max_records=64, position_basis=PositionBasis(positions=())
+    )
+    start(runner)
+    settle(runner)
+    rows.append(fill(clock, 0))
+    sockets[0].messages.append(raw(rows[0]))
+    runner.step()
+    clock.advance(1)
+    runner._next_sync = clock.mono
+    runner.step()
+    with pytest.raises(SupervisorError, match="sync_failed"):
+        settle(runner)
+    assert control.snapshot()["phase"] == "STOPPED"
+    assert book.snapshot()["execution_ids"] == (501,)
+    assert Decimal(book.snapshot()["balance"]) == 999998
 
 
 def fill(clock, index):

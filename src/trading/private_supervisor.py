@@ -224,6 +224,12 @@ class PrivateStreamSupervisor:
         kind, result = outcome
         if kind == "failed":
             raise SupervisorError("sync_failed")
+        if kind == "ok":
+            current = stream._capture.check_live()
+            if current["phase"] == "DISCONNECTED":
+                raise SupervisorError("sync_failed")
+            if current["epoch"] != result.epoch or current["revision"] != result.revision:
+                kind = "retry"  # A later notification/expiry invalidated this queued result.
         if kind == "retry":
             self._retries += 1
             self.control.update(self._owner, retry=True)
@@ -234,12 +240,38 @@ class PrivateStreamSupervisor:
         else:
             if any(m != "balance_change_unverified" for m in result.mismatches):
                 raise SupervisorError("sync_failed")
-            balance = self.cash_book.compare_balance(result.report)
-            if balance["halted"] or not balance["balance_match"]:
+            inventory = stream._capture.compare_account_inventory(
+                self.cash_book, expected_revision=result.revision
+            )
+            if (
+                inventory["halted"]
+                or not inventory["balance"]["balance_match"]
+                or (
+                    inventory["positions"] is not None
+                    and not inventory["positions"]["position_match"]
+                )
+            ):
+                raise SupervisorError("sync_failed")
+            for diagnostic, match in (
+                (result.position_reservations, "reservation_match"),
+                (result.account_valuation, "diagnostics_match"),
+            ):
+                if diagnostic is not None and (
+                    diagnostic["head"] != inventory["head"]
+                    or not diagnostic[match]
+                    or diagnostic.get("halted", False)
+                ):
+                    raise SupervisorError("sync_failed")
+            prior_head = (
+                result.execution_cash["head"]
+                if result.execution_cash is not None
+                else result.booked_cash_head
+            )
+            if prior_head is not None and prior_head != inventory["head"]:
                 raise SupervisorError("sync_failed")
             self._retries = 0
             self.control.update(self._owner, success=True)
-            self._last_result = result  # Diagnostic only; status checks current stream state.
+            self._last_result = result.model_copy(update={"account_inventory": inventory})
             self._next_sync = now + self.policy.sync_interval_seconds
 
     def step(self):

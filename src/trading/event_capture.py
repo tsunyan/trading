@@ -253,6 +253,19 @@ class JournaledEventCapture:
                 self._poison()
                 raise
 
+    def compare_account_inventory(self, book: ExecutionCashBook, *, expected_revision):
+        with self._lock:
+            self._check_cash_book(book)
+            self._ready()
+            try:
+                with self._journal.guard_session(self._session):
+                    return self._monitor.compare_account_inventory(
+                        self._monitor_session, book, expected_revision=expected_revision
+                    )
+            except BaseException:
+                self._poison()
+                raise
+
     def compare_position_reservations(self, book: ExecutionCashBook, *, expected_revision):
         with self._lock:
             self._check_cash_book(book)
