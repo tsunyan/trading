@@ -70,6 +70,15 @@ LABELS = {
     "interrupted": "模擬観測の実行中断を検出しました",
     "risk_halted": "模擬口座の損失停止を検出しました",
     "recovered": "模擬観測の障害から復旧しました",
+    "private_notification_test": "実口座同期のWindows通知テストです（通信・売買は実行しません）",
+    "private_sync_stopped": "実口座同期が停止しています。明示的な確認・復旧が必要です",
+    "private_sync_owner_missing": "実口座同期の処理中断を検出しました。自動再開は行いません",
+    "private_sync_stale": "実口座同期で照合成功が長時間記録されていません",
+    "private_reads_blocked": "実口座のGET読取が停止しています",
+    "private_cash_halted": "実口座の現金台帳が停止しています",
+    "private_journal_unresolved": "実口座の受信記録に未解消の処理が残っています",
+    "private_sync_unavailable": "実口座同期の保存状態を確認できません",
+    "private_condition_cleared": "実口座同期の監視で障害条件の解消を確認しました",
 }
 
 
@@ -80,14 +89,18 @@ def send_toast(alert, observer_id):
     binding = SubElement(SubElement(toast, "visual"), "binding", template="ToastGeneric")
     SubElement(binding, "text").text = "Trading Lab"
     SubElement(binding, "text").text = LABELS.get(alert["kind"], "模擬観測の通知")
+    private = alert["kind"].startswith("private_")
     SubElement(binding, "text").text = (
-        f"口座 {observer_id[:12]} / 通知 {alert['id']}\n"
+        f"同期 {observer_id[:12]} / 通知 {alert['id']}\n"
+        "private_operations status / alerts で詳細を確認してください。"
+        if private
+        else f"口座 {observer_id[:12]} / 通知 {alert['id']}\n"
         "operations.sqlite または paper_runner status で詳細を確認してください。"
     )
     environment = {
         **os.environ,
         "TRADINGLAB_TOAST_XML": base64.b64encode(tostring(toast, encoding="utf-8")).decode(),
-        "TRADINGLAB_TOAST_TAG": f"{observer_id[:6]}-{alert['id']}"[:16],
+        "TRADINGLAB_TOAST_TAG": f"{'p-' if private else ''}{observer_id[:6]}-{alert['id']}"[:16],
     }
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     result = subprocess.run(
