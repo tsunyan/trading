@@ -37,8 +37,13 @@ def _tick(value, tick, rounding):
     return (value / tick).to_integral_value(rounding=rounding) * tick
 
 
-def decide(frame, quote, cfg, *, positions, pending, units, max_slippage, limits, now):
-    """A hold, open or close decision with its exact intent. Pure; no I/O."""
+def decide(
+    frame, quote, cfg, *, positions, pending, units, max_slippage, limits, now, flatten=False
+):
+    """A hold, open or close decision with its exact intent. Pure; no I/O.
+
+    `flatten` ignores the strategy and bars and proposes closing every held lot.
+    """
     if cfg.market != "fx" or cfg.symbol != "USD_JPY":
         raise LiveSignalError("live_signal_supports_usd_jpy_only")
     if not isinstance(quote, AccountQuote) or now.tzinfo is None:
@@ -49,22 +54,28 @@ def decide(frame, quote, cfg, *, positions, pending, units, max_slippage, limits
     age = (now - quote.observed_at).total_seconds()
     if not -cfg.max_future_quote_seconds <= age <= cfg.max_quote_age_seconds:
         raise LiveSignalError("stale_or_future_quote")
-    frame = validate_bars(frame, cfg)
-    boundary = min(pd.Timestamp(now), pd.Timestamp(quote.observed_at))
-    completed = frame.loc[frame.timestamp + pd.Timedelta(seconds=cfg.bar_seconds) <= boundary]
-    if len(completed) < cfg.warmup_bars:
-        raise LiveSignalError("not_enough_completed_bars")
-    signal_time = completed.timestamp.iloc[-1] + pd.Timedelta(seconds=cfg.bar_seconds)
-    latest = max(pd.Timestamp(now), pd.Timestamp(quote.observed_at))
-    if (latest - signal_time).total_seconds() > cfg.max_signal_age_seconds:
-        raise LiveSignalError("stale_signal_data")
-    target = signal_direction(completed.close.tolist(), cfg)
+    if type(flatten) is not bool:
+        raise LiveSignalError("invalid_flatten_option")
+    if flatten:
+        signal_time, target = None, 0
+    else:
+        frame = validate_bars(frame, cfg)
+        boundary = min(pd.Timestamp(now), pd.Timestamp(quote.observed_at))
+        completed = frame.loc[frame.timestamp + pd.Timedelta(seconds=cfg.bar_seconds) <= boundary]
+        if len(completed) < cfg.warmup_bars:
+            raise LiveSignalError("not_enough_completed_bars")
+        signal_time = completed.timestamp.iloc[-1] + pd.Timedelta(seconds=cfg.bar_seconds)
+        latest = max(pd.Timestamp(now), pd.Timestamp(quote.observed_at))
+        if (latest - signal_time).total_seconds() > cfg.max_signal_age_seconds:
+            raise LiveSignalError("stale_signal_data")
+        target = signal_direction(completed.close.tolist(), cfg)
     held = {side: [p for p in positions if p.side == side] for side in ("BUY", "SELL")}
     if held["BUY"] and held["SELL"]:
         raise LiveSignalError("both_sides_held")
     current = 1 if held["BUY"] else -1 if held["SELL"] else 0
     decision = {
-        "signal_time": signal_time.isoformat(),
+        "signal_time": None if signal_time is None else signal_time.isoformat(),
+        "flatten": flatten,
         "target": target,
         "current": current,
         "intent": None,
@@ -73,7 +84,12 @@ def decide(frame, quote, cfg, *, positions, pending, units, max_slippage, limits
         return {**decision, "action": "hold", "reason": "unsettled_local_order"}
     if current == target:
         return {**decision, "action": "hold", "reason": "at_target"}
-    stamp = signal_time.strftime("%Y%m%d%H")
+    # One proposal per signal bar (or flatten minute) and direction; repeats are refused.
+    prefix, stamp = (
+        ("F", pd.Timestamp(now).tz_convert("UTC").strftime("%Y%m%d%H%M"))
+        if flatten
+        else ("S", signal_time.strftime("%Y%m%d%H"))
+    )
     if current:
         lots = held["BUY" if current > 0 else "SELL"]
         if len(lots) > 10:
@@ -101,8 +117,7 @@ def decide(frame, quote, cfg, *, positions, pending, units, max_slippage, limits
     if bound <= 0:
         raise LiveSignalError("slippage_exceeds_quote")
     intent = OrderIntent(
-        # One proposal per signal bar and direction; a repeat is refused by the journal.
-        client_id=f"S{stamp}{effect[0]}{side[0]}",
+        client_id=f"{prefix}{stamp}{effect[0]}{side[0]}",
         side=side,
         effect=effect,
         units=size,
@@ -110,7 +125,8 @@ def decide(frame, quote, cfg, *, positions, pending, units, max_slippage, limits
         bound=bound,
         positions=settlements,
     )
-    return {**decision, "action": action, "reason": "signal_changed", "intent": intent}
+    reason = "flatten_requested" if flatten else "signal_changed"
+    return {**decision, "action": action, "reason": reason, "intent": intent}
 
 
 def journal_state(journal, now):
@@ -157,6 +173,7 @@ def main(argv=None):
     parser.add_argument("--units", type=int, required=True)
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--flatten", action="store_true")
     args = parser.parse_args(argv)
     try:
         now = datetime.now(UTC)
@@ -164,7 +181,7 @@ def main(argv=None):
         journal = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         positions, pending, limits = journal_state(journal.journal, now)
         decision = decide(
-            recent_bars(cfg, now),
+            None if args.flatten else recent_bars(cfg, now),
             _quote(args.quote),
             cfg,
             positions=positions,
@@ -173,6 +190,7 @@ def main(argv=None):
             max_slippage=args.max_slippage,
             limits=limits,
             now=now,
+            flatten=args.flatten,
         )
         if decision["intent"] is not None:
             write_intent(decision["intent"], args.output)

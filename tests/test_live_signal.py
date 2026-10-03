@@ -205,3 +205,49 @@ def test_journal_state_requires_a_fresh_proof_and_reports_unsettled_orders(tmp_p
     assert live_signal.journal_state(journal, clock.now)[1] is True
     with pytest.raises(LiveSignalError, match="stale_account_proof"):
         live_signal.journal_state(journal, clock.now + timedelta(seconds=61))
+
+
+def flatten(positions=(), *, pending=False, current=None):
+    return decide(
+        None,
+        current or quote(),
+        settings(),
+        positions=positions,
+        pending=pending,
+        units=1000,
+        max_slippage="0.0205",
+        limits=LIMITS,
+        now=NOW,
+        flatten=True,
+    )
+
+
+def test_flatten_closes_every_lot_without_bars_or_strategy():
+    decision = flatten((long(), long(2000, 402)))
+    intent = decision["intent"]
+    assert decision["action"] == "close" and decision["reason"] == "flatten_requested"
+    assert decision["flatten"] and decision["signal_time"] is None and decision["target"] == 0
+    assert (intent.side, intent.effect, intent.units) == ("SELL", "CLOSE", 3000)
+    assert intent.client_id == "F202610051000CS"
+    short = Position(position_id=501, side="SELL", units=1000, average_price="151")
+    assert flatten((short,))["intent"].side == "BUY"
+
+
+def test_flatten_holds_when_flat_or_unsettled_and_still_checks_the_quote():
+    assert flatten()["reason"] == "at_target"
+    assert flatten((long(),), pending=True)["reason"] == "unsettled_local_order"
+    with pytest.raises(LiveSignalError, match="stale_or_future_quote"):
+        flatten((long(),), current=quote(at=NOW - timedelta(seconds=120)))
+    with pytest.raises(LiveSignalError, match="invalid_flatten_option"):
+        decide(
+            None,
+            quote(),
+            settings(),
+            positions=(),
+            pending=False,
+            units=1000,
+            max_slippage="0.02",
+            limits=LIMITS,
+            now=NOW,
+            flatten=1,
+        )

@@ -50,6 +50,7 @@ class LiveCycle:
         units,
         max_slippage,
         prepare=False,
+        flatten=False,
         bars=None,
         quote=None,
         vault=None,
@@ -98,7 +99,7 @@ class LiveCycle:
         now = self.clock()
         positions, pending, limits = journal_state(self.journal, now)
         decision = decide(
-            bars if bars is not None else recent_bars(cfg, now),
+            None if flatten else bars if bars is not None else recent_bars(cfg, now),
             quote,
             cfg,
             positions=positions,
@@ -107,6 +108,7 @@ class LiveCycle:
             max_slippage=max_slippage,
             limits=limits,
             now=now,
+            flatten=flatten,
         )
         intent = decision["intent"]
         result["decision"] = {
@@ -147,6 +149,7 @@ def main(argv=None):
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--intent-output", type=Path)
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     try:
@@ -158,6 +161,7 @@ def main(argv=None):
             units=args.units,
             max_slippage=args.max_slippage,
             prepare=args.prepare,
+            flatten=args.flatten,
             quote_output=args.quote_output,
             intent_output=args.intent_output,
         )

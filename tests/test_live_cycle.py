@@ -38,7 +38,15 @@ def running(tmp_path):
     yield from flow_running.__wrapped__(tmp_path)
 
 
-def cycle(running, tmp_path, *, prepare, transport=None, confirmations=CYCLE_CONFIRMATIONS):
+def cycle(
+    running,
+    tmp_path,
+    *,
+    prepare,
+    transport=None,
+    confirmations=CYCLE_CONFIRMATIONS,
+    flatten=False,
+):
     values, live, _ = running
     clock = values[0]
     clock.advance(1)
@@ -50,6 +58,7 @@ def cycle(running, tmp_path, *, prepare, transport=None, confirmations=CYCLE_CON
         units=1000,
         max_slippage="0.02",
         prepare=prepare,
+        flatten=flatten,
         bars=rising_bars(clock.wall),
         quote=quote,
         vault=values[4],
@@ -109,7 +118,10 @@ def test_cycle_proposes_then_prepares_and_the_printed_checkpoint_sends_once(runn
     assert len(posts) == 1 and journal.snapshot()["orders"][0]["state"] == "RECONCILING"
 
 
-def test_next_cycle_reconciles_the_accepted_order_and_holds_at_target(running, tmp_path):
+@pytest.mark.parametrize("flatten", [False, True])
+def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(
+    running, tmp_path, flatten
+):
     values, live, _ = running
     clock, journal = values[0], live[3]
     cycle(running, tmp_path, prepare=False)
@@ -183,11 +195,19 @@ def test_next_cycle_reconciles_the_accepted_order_and_holds_at_target(running, t
         running,
         tmp_path,
         prepare=True,
+        flatten=flatten,
         transport=private_get(clock, assets=assets, positions=[held], orders=[order], fills=[fill]),
     )
     assert result["reconciled_orders"] == [{"client_id": prepared["client_id"], "state": "FILLED"}]
     assert result["account"]["positions"] == 1
-    assert result["decision"]["reason"] == "at_target" and result["prepared"] is False
+    if not flatten:
+        assert result["decision"]["reason"] == "at_target" and result["prepared"] is False
+        return
+    # Flatten ignores the still-long strategy and prepares a close of the held lot.
+    assert result["decision"]["reason"] == "flatten_requested" and result["prepared"]
+    assert result["request"]["path"] == "/v1/closeOrder"
+    assert result["request"]["body"]["settlePosition"] == [{"positionId": 401, "size": "1000"}]
+    assert result["risk"]["allowed"]
 
 
 @pytest.mark.parametrize(

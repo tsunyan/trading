@@ -25,6 +25,8 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 確認項目は口座証拠の3項目と`complete-history`の4つです。足りない場合は、何も読まずに拒否します。
 各段階が要求する確認を、運用者がサイクル単位でまとめて与える形です。
 
+`--flatten`を付けると、手順4で戦略の代わりに全建玉の決済を提案します（[手仕舞い](live-signal.md)）。
+
 ## 送信までの時間
 
 実行内容には手順2の気配が含まれます。送信時の口座リスク検査は気配と口座証拠の鮮度
