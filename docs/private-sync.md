@@ -81,6 +81,21 @@ GET制御DBには同期制御の識別子を一度だけ登録します。同じ
 作る操作は、正常終了後も拒否します。停止・旧所有者を新しいディレクトリで迂回できません。
 紐付けの自動解除・差替えはありません。別GET制御・別PC・他アプリの通信を制御するものではありません。
 
+旧形式のGET紐付けに`STREAM_BOUND`履歴がない場合は、通常の`status`や`run`を拒否します。
+元の保存済み同期環境を照合してから、`confirm-read-binding`で同じ紐付けの履歴だけを補完します。
+通常の`status`が使えない場合も、ローカルの`PrivateSyncWorkspace(directory)`を開き、
+`plan_sha256`、`control.snapshot()`のrevisionとinstance、`journal.head()`を確認できます。
+同期設定・現金台帳・通知ジャーナル・同期制御の紐付けはこの開き直しでも検証します。
+
+```powershell
+uv run python -m trading.private_sync confirm-read-binding --directory runs/private-usdjpy --expected-plan-sha256 <saved_plan_sha256> --expected-revision <saved_revision> --expected-head <journal_head> --legacy-binding-confirmed
+```
+
+同期とGETのOS所有権、元の設定SHA-256・revision・ジャーナル末尾・GET制御の識別子を確認します。
+RUNNINGの残存記録、未完了GET claim、紐付けの欠落・別識別子を拒否します。
+元の表と同じ識別子に履歴を追加するだけで、設定・注文・停止・復旧世代を変えません。
+STOPPEDの場合も停止は残り、補完だけでは同期を再開できません。資格情報・HTTPは使いません。
+
 ## 既知注文の追記登録
 
 `status`の`plan_sha256`と`catalog.head`を確認し、上の1注文分のJSONを別ファイルへ保存します。

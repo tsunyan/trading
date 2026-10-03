@@ -305,6 +305,33 @@ class PrivateSyncWorkspace:
             clock=self.clock,
         )
 
+    def confirm_read_binding_history(
+        self,
+        *,
+        expected_plan_sha256,
+        expected_revision,
+        expected_head,
+        legacy_binding_confirmed=False,
+    ):
+        """Explicitly mark the same legacy association; never create, rebind or release a stop."""
+        self._check_plan(expected_plan_sha256)
+        if legacy_binding_confirmed is not True:
+            raise PrivateSyncError("sync_legacy_binding_confirmation_required")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise PrivateSyncError("invalid_sync_revision")
+        with self.control.ownership():
+            self._check_plan(expected_plan_sha256)
+            state = self.control.snapshot()
+            if state["revision"] != expected_revision or self.journal.head() != expected_head:
+                raise PrivateSyncError("sync_checkpoint_changed")
+            if state["phase"] not in {"READY", "STOPPED"}:
+                raise PrivateSyncError("sync_legacy_binding_requires_idle_owner")
+            reads = PersistentReadLimiter(self.plan.read_control_directory, self.plan.scope)
+            if reads.status()["instance_id"] != self.plan.read_control_instance:
+                raise PrivateSyncError("sync_read_control_changed")
+            reads.bind_stream(state["instance"], legacy_binding_confirmed=True)
+        return self.status()
+
     def initialize_catalog(self, *, expected_plan_sha256, expected_revision, expected_head):
         self._check_plan(expected_plan_sha256)
         if type(expected_revision) is not int or expected_revision < 0:
@@ -642,6 +669,7 @@ def main(argv=None):
             "init-orders",
             "register-order",
             "reconcile-stopped",
+            "confirm-read-binding",
         ),
     )
     parser.add_argument("--directory", type=Path, required=True)
@@ -657,6 +685,7 @@ def main(argv=None):
     parser.add_argument("--source-ref")
     parser.add_argument("--intent-confirmed", action="store_true")
     parser.add_argument("--expected-catalog-head")
+    parser.add_argument("--legacy-binding-confirmed", action="store_true")
     args = parser.parse_args(argv)
     stop_event = threading.Event()
     previous = {}
@@ -670,7 +699,14 @@ def main(argv=None):
             if args.plan is not None:
                 raise PrivateSyncError("saved_sync_plan_required")
             workspace = PrivateSyncWorkspace(args.directory)
-            if args.command == "init-orders":
+            if args.command == "confirm-read-binding":
+                result = workspace.confirm_read_binding_history(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_revision=args.expected_revision,
+                    expected_head=args.expected_head,
+                    legacy_binding_confirmed=args.legacy_binding_confirmed,
+                )
+            elif args.command == "init-orders":
                 result = workspace.initialize_catalog(
                     expected_plan_sha256=args.expected_plan_sha256,
                     expected_revision=args.expected_revision,

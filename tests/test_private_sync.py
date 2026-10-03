@@ -3,6 +3,7 @@
 import ctypes
 import json
 import socket
+import sqlite3
 import threading
 from datetime import timedelta
 from decimal import Decimal
@@ -135,6 +136,81 @@ def test_init_status_reopen_never_load_credentials_and_refuse_existing_directory
     with pytest.raises(FileExistsError):
         PrivateSyncWorkspace.create(workspace.directory, workspace.plan)
     assert reopened.control.snapshot() == before
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_cli_explicit_legacy_read_binding_confirmation_preserves_checkpoint_and_stop(
+    setup, capsys, stopped
+):
+    _, _, reads, backend, _, workspace = setup
+    if stopped:
+        with workspace.control.ownership():
+            owner = workspace.control.begin(
+                workspace.journal, expected_revision=0, expected_head=workspace.journal.head()
+            )["owner"]
+            workspace.control.finish(owner, workspace.journal, reason="stream_failed")
+        reads.stop()
+    saved = workspace.control.snapshot()
+    before_reads = reads.status()
+    plan = (workspace.directory / "sync-plan.json").read_bytes()
+    with sqlite3.connect(reads.path) as conn:
+        conn.execute("DELETE FROM events WHERE kind='STREAM_BOUND'")
+    main(
+        [
+            "confirm-read-binding",
+            "--directory",
+            str(workspace.directory),
+            "--expected-plan-sha256",
+            workspace.plan_sha256,
+            "--expected-revision",
+            str(saved["revision"]),
+            "--expected-head",
+            workspace.journal.head(),
+            "--legacy-binding-confirmed",
+        ]
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["control"] == saved
+    assert result["reads"] == before_reads
+    assert result["live_enabled"] is False and result["complete"] is False
+    assert (workspace.directory / "sync-plan.json").read_bytes() == plan
+    assert reads.stream_binding() == saved["instance"] and backend.reads == []
+
+
+@pytest.mark.parametrize(
+    "damage", ["confirmation", "plan", "revision", "head", "running", "missing", "wrong"]
+)
+def test_legacy_read_binding_confirmation_requires_original_idle_checkpoint(setup, damage):
+    _, _, reads, backend, _, workspace = setup
+    with sqlite3.connect(reads.path) as conn:
+        conn.execute("DELETE FROM events WHERE kind='STREAM_BOUND'")
+        if damage == "missing":
+            conn.execute("DROP TABLE stream_binding")
+        elif damage == "wrong":
+            conn.execute("UPDATE stream_binding SET supervisor_id=?", ("b" * 32,))
+    if damage == "running":
+        with workspace.control.ownership():
+            workspace.control.begin(
+                workspace.journal, expected_revision=0, expected_head=workspace.journal.head()
+            )
+    args = {
+        "expected_plan_sha256": workspace.plan_sha256,
+        "expected_revision": workspace.control.snapshot()["revision"],
+        "expected_head": workspace.journal.head(),
+        "legacy_binding_confirmed": True,
+    }
+    if damage == "confirmation":
+        args["legacy_binding_confirmed"] = False
+    elif damage == "plan":
+        args["expected_plan_sha256"] = "b" * 64
+    elif damage == "revision":
+        args["expected_revision"] += 1
+    elif damage == "head":
+        args["expected_head"] = "b" * 64
+    before = reads.path.read_bytes()
+    with pytest.raises(ValueError):
+        workspace.confirm_read_binding_history(**args)
+    assert reads.path.read_bytes() == before and backend.reads == []
 
 
 @pytest.mark.parametrize("changed", ["plan", "revision", "head", "permission", "duration"])

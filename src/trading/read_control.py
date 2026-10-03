@@ -289,11 +289,17 @@ class PersistentReadLimiter(AccountReadLimiter):
                     raise
                 self._wait(0.05)
 
-    def _stream_binding(self, conn):
+    def _stream_binding(self, conn, *, allow_legacy=False):
+        receipts = conn.execute(
+            "SELECT token FROM events WHERE kind='STREAM_BOUND' LIMIT 2"
+        ).fetchall()
         present = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stream_binding'"
         ).fetchone()
         if present is None:
+            if receipts:
+                self._failed = True
+                raise PrivateReadError("stream_binding_integrity_failed")
             return None
         rows = conn.execute("SELECT id,supervisor_id FROM stream_binding LIMIT 2").fetchall()
         if (
@@ -301,9 +307,13 @@ class PersistentReadLimiter(AccountReadLimiter):
             or rows[0][0] != 1
             or not isinstance(rows[0][1], str)
             or re.fullmatch(r"[a-f0-9]{32}", rows[0][1]) is None
+            or len(receipts) > 1
+            or (receipts and receipts[0]["token"] != rows[0][1])
         ):
             self._failed = True
             raise PrivateReadError("stream_binding_integrity_failed")
+        if not receipts and not allow_legacy:
+            raise PrivateReadError("stream_binding_history_confirmation_required")
         return rows[0][1]
 
     def stream_binding(self):
@@ -312,28 +322,42 @@ class PersistentReadLimiter(AccountReadLimiter):
             self._state(conn)
             return self._stream_binding(conn)
 
-    def bind_stream(self, supervisor_id):
+    def bind_stream(self, supervisor_id, *, legacy_binding_confirmed=False):
         """One supervisor per GET domain. No reset/rebind, even after clean close.
 
         An additive table keeps existing GET controls compatible. Association is
         explicit, local, and not proof of broker identity or a cross-PC lock.
         """
-        if not isinstance(supervisor_id, str) or not re.fullmatch(r"[a-f0-9]{32}", supervisor_id):
+        if (
+            not isinstance(supervisor_id, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", supervisor_id)
+            or type(legacy_binding_confirmed) is not bool
+        ):
             raise PrivateReadError("invalid_stream_binding")
-        with self._transaction() as conn:
+        owner = self._owner_lock(required=True) if legacy_binding_confirmed else nullcontext()
+        with owner, self._transaction() as conn:
             state = self._state(conn)
-            if state["stopped"] or state["in_flight"]:
+            if (state["stopped"] and not legacy_binding_confirmed) or state["in_flight"]:
                 raise PrivateReadError("stream_binding_control_blocked")
-            bound = self._stream_binding(conn)
+            bound = self._stream_binding(conn, allow_legacy=legacy_binding_confirmed)
             if bound is not None:
                 if bound != supervisor_id:
                     raise PrivateReadError("stream_supervisor_already_bound")
+                if (
+                    legacy_binding_confirmed
+                    and conn.execute("SELECT 1 FROM events WHERE kind='STREAM_BOUND'").fetchone()
+                    is None
+                ):
+                    self._event(conn, state["last_wall_ns"], "STREAM_BOUND", supervisor_id)
                 return
+            if legacy_binding_confirmed:
+                raise PrivateReadError("legacy_stream_binding_required")
             conn.execute(
                 "CREATE TABLE stream_binding ("
                 "id INTEGER PRIMARY KEY CHECK(id=1),supervisor_id TEXT NOT NULL)"
             )
             conn.execute("INSERT INTO stream_binding VALUES(1,?)", (supervisor_id,))
+            self._event(conn, state["last_wall_ns"], "STREAM_BOUND", supervisor_id)
 
     def status(self):
         with self._transaction() as conn:
