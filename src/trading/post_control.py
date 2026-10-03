@@ -191,7 +191,8 @@ class PersistentPostLimiter(PrivateStreamLimiter):
 
     def _epoch(self, conn):
         return conn.execute(
-            "SELECT COALESCE(MAX(revision),-1) FROM events WHERE kind='TOKEN_RECOVERED'"
+            "SELECT COALESCE(MAX(revision),-1) FROM events "
+            "WHERE kind IN ('TOKEN_RECOVERED','TRADE_RESOLVED')"
         ).fetchone()[0]
 
     def _state(self, conn):
@@ -210,10 +211,137 @@ class PersistentPostLimiter(PrivateStreamLimiter):
             ).fetchone()
             if last != (state.revision, digest):
                 raise ValueError
+            self._resolution_history(conn, state)
             return state
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             self._failed = True
             raise PostControlError("post_control_integrity_failed") from None
+
+    def _resolution_history(self, conn, state):
+        markers = conn.execute(
+            "SELECT revision,digest FROM events WHERE kind='TRADE_RESOLVED' ORDER BY revision"
+        ).fetchall()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_resolutions'"
+        ).fetchone()
+        if not present and not markers:
+            return []
+        if not present:
+            raise ValueError("missing_trade_resolution_history")
+        rows = conn.execute(
+            "SELECT revision,body,digest FROM trade_resolutions ORDER BY revision"
+        ).fetchall()
+        if len(rows) != len(markers):
+            raise ValueError("invalid_trade_resolution_history")
+        results = []
+        for (revision, body, digest), marker in zip(rows, markers, strict=True):
+            item = json.loads(body)
+            before = PostState.model_validate_json(json.dumps(item["post_before"]))
+            after = PostState.model_validate_json(json.dumps(item["post_after"]))
+            reference = item["reference"]
+            expected = before.model_copy(
+                update={
+                    "revision": before.revision + 1,
+                    "phase": "STOPPED",
+                    "claim": None,
+                    "operation": None,
+                    "request_sha256": None,
+                    "wall_ns": after.wall_ns,
+                    "reason": before.reason if before.phase == "STOPPED" else "operation_unknown",
+                }
+            )
+            if (
+                set(item) != {"post_before", "post_after", "reference"}
+                or json.dumps(item, sort_keys=True, separators=(",", ":")) != body
+                or hashlib.sha256(body.encode()).hexdigest() != digest
+                or marker != (revision, _encode(after)[1])
+                or after != expected
+                or after.revision != revision
+                or before.instance != state.instance
+                or conn.execute(
+                    "SELECT digest FROM events WHERE revision=?", (before.revision,)
+                ).fetchone()
+                != (_encode(before)[1],)
+                or before.phase not in {"IN_FLIGHT", "STOPPED"}
+                or before.operation not in {"order", "close_order", "cancel"}
+                or before.claim is None
+                or after.wall_ns < before.wall_ns
+                or set(reference)
+                != {"live_instance", "live_path", "client_id", "prepared_id", "prepared_sha256"}
+                or not isinstance(reference["live_instance"], str)
+                or len(reference["live_instance"]) != 32
+                or any(c not in "0123456789abcdef" for c in reference["live_instance"])
+                or not isinstance(reference["live_path"], str)
+                or str(Path(reference["live_path"]).resolve()) != reference["live_path"]
+                or not isinstance(reference["client_id"], str)
+                or not 1 <= len(reference["client_id"]) <= 36
+                or not reference["client_id"].isascii()
+                or not reference["client_id"].isalnum()
+                or type(reference["prepared_id"]) is not int
+                or reference["prepared_id"] <= 0
+                or not isinstance(reference["prepared_sha256"], str)
+                or len(reference["prepared_sha256"]) != 64
+                or any(c not in "0123456789abcdef" for c in reference["prepared_sha256"])
+            ):
+                raise ValueError("invalid_trade_resolution_history")
+            results.append(item)
+        return results
+
+    def trade_resolutions(self):
+        """Durable references for auditing resolved claims; never a restart permission."""
+        with self._transaction() as conn:
+            state = self._state(conn)
+            return self._resolution_history(conn, state)
+
+    def _resolve_trade(self, *, expected, reference, owner, validate):
+        """Journal coordinator holds the OS owner and a validated live transaction.
+
+        The prior live preparation commit is the durable authorization. This POST
+        commit clears only the claim, records both states, and fences old objects.
+        """
+        with self._transaction() as conn:
+            state = self._state(conn)
+            self._binding(state)
+            self._verify_owner(state, owner)
+            if (
+                state.model_dump() != expected
+                or state.phase not in {"IN_FLIGHT", "STOPPED"}
+                or state.claim is None
+                or state.operation not in {"order", "close_order", "cancel"}
+                or self._execution_binding(conn)
+                != {"instance": reference["live_instance"], "path": reference["live_path"]}
+            ):
+                raise PostControlError("post_trade_resolution_checkpoint_changed")
+            validate()
+            updated = self._write(
+                conn,
+                state,
+                "TRADE_RESOLVED",
+                phase="STOPPED",
+                claim=None,
+                operation=None,
+                request_sha256=None,
+                wall_ns=self._now(state),
+                reason=state.reason if state.phase == "STOPPED" else "operation_unknown",
+            )
+            item = {
+                "post_before": state.model_dump(),
+                "post_after": updated.model_dump(),
+                "reference": reference,
+            }
+            body = json.dumps(item, sort_keys=True, separators=(",", ":"))
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS trade_resolutions (revision INTEGER PRIMARY KEY,"
+                "body TEXT NOT NULL,digest TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO trade_resolutions VALUES(?,?,?)",
+                (updated.revision, body, hashlib.sha256(body.encode()).hexdigest()),
+            )
+            self._resolution_history(conn, updated)
+            validate()
+        self._stopped = True
+        return updated.model_dump()
 
     def _binding(self, state):
         if (

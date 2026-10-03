@@ -1,4 +1,4 @@
-"""Explicit GET investigation of a consumed live order; never resend or resume."""
+"""Explicit GET investigation and accepted terminal claim resolution; never resend or resume."""
 
 import argparse
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from trading.account_reader import AccountReader
 from trading.credential_store import CredentialVault
-from trading.live_journal import LiveOrderJournal
+from trading.live_journal import LiveOrderJournal, OrderResolutionApproval
 from trading.post_control import PersistentPostLimiter
 from trading.private_read import PrivateReadClient
 from trading.read_control import PersistentReadLimiter
@@ -49,6 +49,12 @@ class PrivateOrderRecovery:
 
     def context(self, client_id):
         return self.journal.order_recovery_context(client_id)
+
+    def resolution_context(self, client_id):
+        return self.journal.order_resolution_context(client_id)
+
+    def resolve(self, client_id, approval, *, confirmations):
+        return self.journal.resolve_order_claim(client_id, approval, confirmations=confirmations)
 
     def reconcile(
         self,
@@ -125,7 +131,9 @@ class PrivateOrderRecovery:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("context", "reconcile"))
+    parser.add_argument(
+        "command", choices=("context", "reconcile", "resolution-context", "resolve")
+    )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
@@ -134,11 +142,24 @@ def main(argv=None):
     parser.add_argument("--expected-sha256")
     parser.add_argument("--credential-reference")
     parser.add_argument("--read-only-confirmed", action="store_true")
+    parser.add_argument("--approval", type=Path)
+    parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         recovery = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         if args.command == "context":
             result = recovery.context(args.client_id)
+        elif args.command == "resolution-context":
+            result = recovery.resolution_context(args.client_id)
+        elif args.command == "resolve":
+            if args.approval is None:
+                raise OrderRecoveryError("order_resolution_approval_required")
+            with args.approval.open("rb") as handle:
+                payload = handle.read(64_001)
+            if len(payload) > 64_000:
+                raise OrderRecoveryError("order_resolution_approval_too_large")
+            approval = OrderResolutionApproval.model_validate_json(payload)
+            result = recovery.resolve(args.client_id, approval, confirmations=args.confirm)
         else:
             result = recovery.reconcile(
                 args.client_id,
@@ -148,7 +169,16 @@ def main(argv=None):
                 read_only_confirmed=args.read_only_confirmed,
             )
         print(json.dumps(result, ensure_ascii=False))
-    except (ValueError, OSError, sqlite3.Error):
+    except (
+        ValueError,
+        OSError,
+        sqlite3.Error,
+        KeyError,
+        TypeError,
+        AttributeError,
+        ArithmeticError,
+        RecursionError,
+    ):
         parser.exit(2, "private_order_recovery_failed\n")
 
 

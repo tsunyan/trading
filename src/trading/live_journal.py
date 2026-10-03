@@ -14,7 +14,14 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from trading.account_guard import AccountPolicy
+from trading.account_guard import (
+    AccountPolicy,
+    AccountQuote,
+    AccountSnapshot,
+    fresh,
+    reconcile_account,
+    revision,
+)
 from trading.account_reader import OrderReadReport
 from trading.broker_contracts import (
     Contract,
@@ -53,6 +60,17 @@ CANCEL_CONFIRMATIONS = frozenset(
     }
 )
 CANCEL_EVIDENCE_KINDS = frozenset({"identity", "rules", "read_acceptance"})
+RESOLUTION_CONFIRMATIONS = frozenset(
+    {
+        "terminal-order",
+        "complete-history",
+        "complete-account",
+        "account-identity",
+        "external-writers-paused",
+        "old-clients-closed",
+        "preserve-stops",
+    }
+)
 CODE_FILES = (
     "live_journal.py",
     "private_order.py",
@@ -168,6 +186,26 @@ class CancelApproval(Contract):
             or {e.kind for e in self.evidence} != CANCEL_EVIDENCE_KINDS
         ):
             raise ValueError("invalid_cancel_approval")
+        return self
+
+
+class OrderResolutionApproval(Contract):
+    """Verified terminal history and account acceptance, not a GET completeness shortcut."""
+
+    account_id: str = Field(min_length=1, max_length=100)
+    checkpoint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    accepted_at: AwareDatetime = Field(strict=True)
+    expires_at: AwareDatetime = Field(strict=True)
+    evidence: tuple[AcceptanceEvidence, ...]
+
+    @model_validator(mode="after")
+    def coherent(self):
+        if (
+            not self.accepted_at < self.expires_at <= self.accepted_at + timedelta(minutes=10)
+            or len(self.evidence) != len(EVIDENCE_KINDS)
+            or {e.kind for e in self.evidence} != EVIDENCE_KINDS
+        ):
+            raise ValueError("invalid_order_resolution_approval")
         return self
 
 
@@ -303,6 +341,23 @@ class LiveOrderJournal(OrderJournal):
                 state.approval is not None and state.phase != "STOPPED"
             ):
                 raise ValueError
+            for resolved in self.posts.trade_resolutions():
+                reference = resolved["reference"]
+                prepared = conn.execute(
+                    "SELECT client_id,kind,payload_json FROM events WHERE id=?",
+                    (reference["prepared_id"],),
+                ).fetchone()
+                if (
+                    reference["live_instance"] != state.instance
+                    or reference["live_path"] != str(self.path.parent)
+                    or prepared is None
+                    or prepared["client_id"] != reference["client_id"]
+                    or prepared["kind"] != "ORDER_RESOLUTION_PREPARED"
+                    or self._checkpoint(json.loads(prepared["payload_json"]))
+                    != reference["prepared_sha256"]
+                    or json.loads(prepared["payload_json"])["post"] != resolved["post_before"]
+                ):
+                    raise ValueError
             return state
         except (ValueError, TypeError, KeyError, OSError):
             raise LiveOrderError("live_journal_integrity_or_binding_failed") from None
@@ -507,7 +562,7 @@ class LiveOrderJournal(OrderJournal):
         with self._transaction() as conn:
             return self._order_recovery_context(conn, client_id)
 
-    def _order_recovery_context(self, conn, client_id):
+    def _order_recovery_context(self, conn, client_id, *, event_id=None):
         state = self._live_state(conn)
         row = dict(self._row(conn, client_id))
         intent = OrderIntent.model_validate_json(row["intent_json"])
@@ -575,7 +630,11 @@ class LiveOrderJournal(OrderJournal):
         checkpoint = {
             "live": state.model_dump(mode="json"),
             "order": row,
-            "event_id": conn.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0],
+            "event_id": (
+                conn.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
+                if event_id is None
+                else event_id
+            ),
             "halted": conn.execute("SELECT halted FROM metadata").fetchone()[0],
             "post": {
                 k: v for k, v in post.items() if k not in {"blocked", "live_enabled", "complete"}
@@ -658,6 +717,156 @@ class LiveOrderJournal(OrderJournal):
                 "post_claim_retained": True,
                 "recovery_required": True,
                 "live_enabled": False,
+                "complete": False,
+            }
+
+    def _resolution_context(self, conn, client_id, now, *, event_id=None):
+        recovery = self._order_recovery_context(conn, client_id, event_id=event_id)
+        state = self._live_state(conn)
+        row = self._row(conn, client_id)
+        if (
+            state.phase != "STOPPED"
+            or not conn.execute("SELECT halted FROM metadata").fetchone()[0]
+        ):
+            raise LiveOrderError("order_resolution_stop_required")
+        if row["state"] not in {"FILLED", "CANCELED", "EXPIRED"} or not row["evidence_json"]:
+            raise LiveOrderError("order_resolution_terminal_evidence_required")
+        evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+        validate_evidence(evidence)
+        saved = conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='RECONCILED' "
+            "ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        ).fetchone()
+        if (
+            not evidence.executions_complete
+            or evidence.status not in {"EXECUTED", "CANCELED", "EXPIRED"}
+            or row["state"]
+            != {"EXECUTED": "FILLED", "CANCELED": "CANCELED", "EXPIRED": "EXPIRED"}.get(
+                evidence.status
+            )
+            or evidence.intent != OrderIntent.model_validate_json(row["intent_json"])
+            or (
+                evidence.status == "EXECUTED"
+                and sum(e.units for e in evidence.executions) != evidence.intent.units
+            )
+            or saved is None
+            or json.loads(saved[0])
+            != {"state": row["state"], "evidence": evidence.model_dump(mode="json")}
+        ):
+            raise LiveOrderError("order_resolution_terminal_evidence_required")
+        self._account_proof(conn)
+        proof = json.loads(self._gate(conn)["proof_json"])
+        snapshot = AccountSnapshot.model_validate(proof["snapshot"])
+        quote = AccountQuote.model_validate(proof["quote"])
+        rows = [dict(r) for r in conn.execute("SELECT * FROM orders")]
+        post = self.posts.snapshot()
+        if (
+            self.posts.reads.status()["blocked"]
+            or proof["revision"] != revision(rows)
+            or reconcile_account(state.policy, rows, snapshot, quote, now)
+            or int(snapshot.observed_at.timestamp() * 1_000_000_000) < post["wall_ns"]
+        ):
+            raise LiveOrderError("order_resolution_complete_account_required")
+        context = {
+            "recovery": recovery,
+            "account_id": state.policy.account_id,
+            "implementation_sha256": self._current_implementation(),
+            "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
+            "terminal_state": row["state"],
+            "evidence_sha256": _hash(evidence.model_dump_json()),
+        }
+        return {**context, "checkpoint_sha256": self._checkpoint(context)}
+
+    def order_resolution_context(self, client_id):
+        """Local diagnostic; requires separately established terminal and account completeness."""
+        with self._transaction() as conn:
+            return self._resolution_context(conn, client_id, self._clock(self.clock()))
+
+    def resolve_order_claim(self, client_id, approval, *, confirmations):
+        approval = OrderResolutionApproval.model_validate(approval.model_dump())
+        if frozenset(confirmations) != RESOLUTION_CONFIRMATIONS:
+            raise LiveOrderError("explicit_order_resolution_confirmations_required")
+        with self._lock, self.posts._ownership() as owner:
+            with self._transaction() as conn:
+                now = self._clock(self.clock())
+                context = self._resolution_context(conn, client_id, now)
+                if (
+                    context["checkpoint_sha256"] != approval.checkpoint_sha256
+                    or context["account_id"] != approval.account_id
+                    or not approval.accepted_at <= now < approval.expires_at
+                ):
+                    raise LiveOrderError("order_resolution_acceptance_refused")
+                state = self._live_state(conn)
+                post = {
+                    k: v
+                    for k, v in self.posts.snapshot().items()
+                    if k not in {"blocked", "live_enabled", "complete"}
+                }
+                payload = {
+                    "context": context,
+                    "approval": approval.model_dump(mode="json"),
+                    "post": post,
+                }
+                self._event(conn, client_id, "ORDER_RESOLUTION_PREPARED", payload)
+                prepared_id = conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+            # This commit preserves authorization before any claim can be cleared.
+            # Hold both the OS owner and live DB transaction across the POST commit.
+            with self._transaction() as conn:
+                now = self._clock(self.clock())
+                # Ignore only our own prepared event while comparing the full checkpoint.
+                current = self._resolution_context(
+                    conn, client_id, now, event_id=context["recovery"]["event_id"]
+                )
+                prepared = conn.execute(
+                    "SELECT client_id,kind,payload_json FROM events WHERE id=?", (prepared_id,)
+                ).fetchone()
+                if (
+                    current != context
+                    or conn.execute("SELECT MAX(id) FROM events").fetchone()[0] != prepared_id
+                    or not approval.accepted_at <= now < approval.expires_at
+                    or prepared is None
+                    or prepared["client_id"] != client_id
+                    or prepared["kind"] != "ORDER_RESOLUTION_PREPARED"
+                    or json.loads(prepared["payload_json"]) != payload
+                ):
+                    raise LiveOrderError("order_resolution_checkpoint_changed")
+                proof = json.loads(self._gate(conn)["proof_json"])
+                snapshot = AccountSnapshot.model_validate(proof["snapshot"])
+                quote = AccountQuote.model_validate(proof["quote"])
+
+                def validate_commit():
+                    stamp = self._clock(self.clock())
+                    if (
+                        not approval.accepted_at <= stamp < approval.expires_at
+                        or self._current_implementation() != context["implementation_sha256"]
+                        or not fresh(
+                            snapshot.observed_at, stamp, state.policy.max_snapshot_age_seconds
+                        )
+                        or not fresh(quote.observed_at, stamp, state.policy.max_quote_age_seconds)
+                        or self.posts.reads.status()["blocked"]
+                    ):
+                        raise LiveOrderError("order_resolution_checkpoint_changed")
+
+                updated = self.posts._resolve_trade(
+                    expected=post,
+                    reference={
+                        "live_instance": state.instance,
+                        "live_path": str(self.path.parent),
+                        "client_id": client_id,
+                        "prepared_id": prepared_id,
+                        "prepared_sha256": self._checkpoint(payload),
+                    },
+                    owner=owner,
+                    validate=validate_commit,
+                )
+            return {
+                "client_id": client_id,
+                "post_claim_resolved": True,
+                "post_revision": updated["revision"],
+                "post_phase": "STOPPED",
+                "live_enabled": False,
+                "restart_required": True,
                 "complete": False,
             }
 
