@@ -9,6 +9,7 @@ from trading.account_guard import (
     AccountSnapshot,
     Position,
     WorkingOrder,
+    marked_equity,
     reconcile_account,
 )
 from trading.account_reader import AccountReader, AccountReadReport
@@ -96,6 +97,32 @@ def snapshot_from_report(report, *, account_id, rows):
     )
 
 
+def _valuation_tolerance(value):
+    if value is None:
+        return None
+    try:
+        tolerance = Decimal(str(value))
+    except Exception:
+        raise LiveAccountError("invalid_valuation_tolerance") from None
+    if not tolerance.is_finite() or not 0 < tolerance <= 1:
+        raise LiveAccountError("invalid_valuation_tolerance")
+    return tolerance
+
+
+def revalue(snapshot, quote, *, tolerance, policy):
+    """Mark open positions at the reviewed ticker instead of the broker's valuation instant.
+
+    Only when the broker's equity is within `tolerance` JPY per held unit of the ticker
+    valuation. Available margin never rises above what the lower equity supports.
+    """
+    local = marked_equity(snapshot, quote)
+    units = sum(p.units for p in snapshot.positions)
+    if abs(snapshot.equity - local) > tolerance * units + policy.tolerance_jpy:
+        raise LiveAccountError("valuation_outside_tolerance")
+    available = min(snapshot.available_margin, max(local - snapshot.required_margin, Decimal(0)))
+    return snapshot.model_copy(update={"equity": local, "available_margin": available})
+
+
 class LiveAccountRefresh:
     """Read-only key, two GET sweeps, one public ticker, one local reconciliation. No POST."""
 
@@ -122,11 +149,13 @@ class LiveAccountRefresh:
         vault=None,
         transport=None,
         quote_transport=None,
+        valuation_tolerance=None,
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
         ) != set(ACCOUNT_CONFIRMATIONS):
             raise LiveAccountError("account_confirmations_required")
+        tolerance = _valuation_tolerance(valuation_tolerance)
         binding = self.journal.credential_binding()
         if self.reads.status()["blocked"]:
             raise LiveAccountError("read_control_blocked")
@@ -152,6 +181,10 @@ class LiveAccountRefresh:
             raise LiveAccountError("account_snapshot_invalid") from None
         if quote is None:
             quote = fetch_quote(transport=quote_transport, clock=self.clock)
+        broker_equity, adjusted = snapshot.equity, False
+        if tolerance is not None:
+            snapshot = revalue(snapshot, quote, tolerance=tolerance, policy=policy)
+            adjusted = snapshot.equity != broker_equity
         now = self.clock()
         try:
             errors = set(reconcile_account(policy, rows, snapshot, quote, now))
@@ -168,6 +201,8 @@ class LiveAccountRefresh:
             "positions": len(snapshot.positions),
             "working_orders": len(snapshot.working_orders),
             "quote_observed_at": quote.model_dump(mode="json")["observed_at"],
+            "broker_equity": str(broker_equity),
+            "valuation_adjusted": adjusted,
         }
 
 
@@ -179,6 +214,7 @@ def main(argv=None):
     parser.add_argument("--credential-reference", required=True)
     parser.add_argument("--quote", type=Path)
     parser.add_argument("--confirm", action="append", default=[])
+    parser.add_argument("--valuation-tolerance")
     args = parser.parse_args(argv)
     try:
         refresh = LiveAccountRefresh(args.directory, args.read_control_directory, args.scope)
@@ -186,6 +222,7 @@ def main(argv=None):
             args.credential_reference,
             confirmations=args.confirm,
             quote=_quote(args.quote) if args.quote is not None else None,
+            valuation_tolerance=args.valuation_tolerance,
         )
         print(json.dumps({**result, "network_used": True, "orders_sent": False}))
     except Exception as error:

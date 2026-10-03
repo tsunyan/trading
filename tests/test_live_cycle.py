@@ -16,6 +16,7 @@ from trading import live_cycle, live_setup
 from trading.account_guard import AccountQuote
 from trading.broker_contracts import OrderIntent
 from trading.config import Settings
+from trading.live_account import LiveAccountError
 from trading.live_cycle import CYCLE_CONFIRMATIONS, LiveCycle, LiveCycleError
 from trading.live_journal import CONFIRMATIONS
 from trading.order_credentials import OrderCredentialVault
@@ -46,6 +47,7 @@ def cycle(
     transport=None,
     confirmations=CYCLE_CONFIRMATIONS,
     flatten=False,
+    valuation_tolerance=None,
 ):
     values, live, _ = running
     clock = values[0]
@@ -59,6 +61,7 @@ def cycle(
         max_slippage="0.02",
         prepare=prepare,
         flatten=flatten,
+        valuation_tolerance=valuation_tolerance,
         bars=rising_bars(clock.wall),
         quote=quote,
         vault=values[4],
@@ -118,10 +121,9 @@ def test_cycle_proposes_then_prepares_and_the_printed_checkpoint_sends_once(runn
     assert len(posts) == 1 and journal.snapshot()["orders"][0]["state"] == "RECONCILING"
 
 
-@pytest.mark.parametrize("flatten", [False, True])
-def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(
-    running, tmp_path, flatten
-):
+@pytest.mark.parametrize("mode", ["hold", "flatten", "valuation_drift"])
+def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(running, tmp_path, mode):
+    flatten = mode == "flatten"
     values, live, _ = running
     clock, journal = values[0], live[3]
     cycle(running, tmp_path, prepare=False)
@@ -190,15 +192,49 @@ def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(
         "positionLossGain": "-10",
         "transferableAmount": "993986.6",
     }
+    tolerance = None
+    if mode == "valuation_drift":
+        # The broker valued the lot 2 JPY lower than the ticker: refused unless tolerated.
+        assets = {
+            **assets,
+            "equity": "999985",
+            "positionLossGain": "-12",
+            "availableAmount": "993984.6",
+            "transferableAmount": "993984.6",
+        }
+        held = {**held, "lossGain": "-12"}
+        with pytest.raises(LiveAccountError, match="valuation_time_mismatch"):
+            cycle(
+                running,
+                tmp_path,
+                prepare=False,
+                transport=private_get(
+                    clock, assets=assets, positions=[held], orders=[order], fills=[fill]
+                ),
+            )
+        assert not journal.snapshot()["halted"]
+        with pytest.raises(LiveAccountError, match="valuation_outside_tolerance"):
+            cycle(
+                running,
+                tmp_path,
+                prepare=False,
+                valuation_tolerance="0.001",
+                transport=private_get(clock, assets=assets, positions=[held]),
+            )
+        tolerance = "0.01"
     clock.advance(1)
     result = cycle(
         running,
         tmp_path,
         prepare=True,
         flatten=flatten,
+        valuation_tolerance=tolerance,
         transport=private_get(clock, assets=assets, positions=[held], orders=[order], fills=[fill]),
     )
-    assert result["reconciled_orders"] == [{"client_id": prepared["client_id"], "state": "FILLED"}]
+    assert result["account"]["valuation_adjusted"] is (mode == "valuation_drift")
+    # A refused refresh keeps the order reconciliation it completed before it.
+    reconciled = [{"client_id": prepared["client_id"], "state": "FILLED"}]
+    assert result["reconciled_orders"] == ([] if mode == "valuation_drift" else reconciled)
     assert result["account"]["positions"] == 1
     if not flatten:
         assert result["decision"]["reason"] == "at_target" and result["prepared"] is False

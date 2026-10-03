@@ -7,7 +7,7 @@ POST・発注用キー・注文の状態は使いません。
 
 ```powershell
 uv run python -m trading.live_quote --output runs/live-orders/quote.json
-uv run python -m trading.live_account --directory runs/live-orders --read-control-directory runs/private-reads --scope <scope> --credential-reference <read_only_reference> --quote runs/live-orders/quote.json --confirm complete-account --confirm account-identity --confirm external-writers-paused
+uv run python -m trading.live_account --directory runs/live-orders --read-control-directory runs/private-reads --scope <scope> --credential-reference <read_only_reference> --quote runs/live-orders/quote.json --confirm complete-account --confirm account-identity --confirm external-writers-paused --valuation-tolerance 0.05
 ```
 
 `--quote`を省くと、公開tickerから[気配](live-quote.md)を1回取得します。
@@ -47,10 +47,27 @@ uv run python -m trading.live_account --directory runs/live-orders --read-contro
 残高・建玉・有効注文と比較します。残高・建玉・有効注文の不一致は台帳に記録して停止します。
 古い口座・古い気配・未解決の注文などの再試行可能な理由では停止せず、記録だけします。
 
-評価額だけが一致しない場合は台帳に渡さず、停止もしません。業者の時価評価の時刻と
-ticker の時刻が違うため、建玉がある間は値動きだけで差が出ます。手元の気配で評価額を作り直して
-業者の値の代わりに使うことはしません。建玉を持つ口座で照合を通すには、業者の評価方法を
-実口座で確認する必要があります（[口座読取](account-reader.md)の`broker_margin_fee_rounding_not_verified`）。
+評価額だけが一致しない場合は台帳に渡さず、停止もしません（`valuation_time_mismatch`）。業者の時価評価の
+時刻とtickerの時刻が違うため、建玉がある間は値動きだけで差が出ます。既定では、手元の気配で評価額を
+作り直して業者の値の代わりに使うことはしません。
+
+## 評価額の許容幅（建玉がある場合）
+
+建玉がある口座で照合を通すため、`--valuation-tolerance`で1通貨あたりの許容幅（円、0より大きく1以下）を
+明示できます。指定した場合だけ、次のとおり評価し直します。
+
+- 手元の評価額 = 残高 + 未決済スワップ + 各建玉の評価損益（買いは買気配、売りは売気配で評価）
+- 業者の評価額との差が「許容幅 × 保有数量 + 方針の`tolerance_jpy`」を超えれば
+  `valuation_outside_tolerance`で拒否し、台帳を変更しません。
+- 範囲内なら、口座証拠の評価額を手元の評価額に置き換えます。余力は業者の値と
+  「手元の評価額 − 拘束証拠金」の小さい方にし、業者の値より増やしません。
+
+損失上限・ドローダウン・余力の検査は、送信時に使う気配と同じ気配で評価した値で行うことになります。
+残高・建玉・有効注文の照合は変わりません。出力の`broker_equity`に業者の評価額、
+`valuation_adjusted`に置き換えの有無を表示します。値動きの速い時間帯に許容幅を広げると、
+業者と手元の評価の差を見逃しやすくなります。実口座の受入で業者の評価方法を確認するまでは、
+小さい値（例: 0.05円）から使ってください（[口座読取](account-reader.md)の
+`broker_margin_fee_rounding_not_verified`）。
 
 照合に成功すると、台帳の口座証拠・peak・損失による新規停止が更新され、
 [確認済み送信](order-runtime.md)の`context`で新しい口座証拠を使えます。
@@ -70,3 +87,4 @@ GETだけの照合成功とその後の送信確認、確認不足・GET停止�
 台帳にない有効注文での停止、評価額だけの差を停止しないこと、受付済み注文の照合、CLIの失敗表示を検証します。
 合成したGET応答・資格情報ストアだけを使い、実通信は行いません。
 追加21試験を含む全2299テストが468.40秒で合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
+評価額の許容幅について追加9試験を含む全2369テストが529.20秒で合格しました。

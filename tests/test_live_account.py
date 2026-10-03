@@ -415,3 +415,37 @@ def test_refresh_right_after_acceptance_asks_for_order_reconciliation_first(setu
     with pytest.raises(LiveAccountError, match="local_order_reconciliation_required"):
         run(setup, [], orders=[wire])
     assert not live[3].snapshot()["halted"]
+
+
+@pytest.mark.parametrize("value", ["0", "-0.01", "1.01", "nan", "inf", "x", True])
+def test_valuation_tolerance_must_be_a_small_positive_jpy_per_unit(value):
+    with pytest.raises(LiveAccountError, match="invalid_valuation_tolerance"):
+        live_account._valuation_tolerance(value)
+    assert live_account._valuation_tolerance(None) is None
+
+
+def test_revalue_marks_at_the_ticker_and_never_raises_available_margin():
+    from test_account_guard import NOW, account, policy
+    from test_account_guard import quote as guard_quote
+
+    from trading.account_guard import Position
+
+    held = (Position(position_id=401, side="BUY", units=1000, average_price="150.01"),)
+    broker = account(
+        NOW,
+        balance="999997",
+        equity="999985",
+        required_margin="6000.4",
+        available_margin="993984.6",
+        positions=held,
+    )
+    marked = guard_quote(NOW)  # bid 150 -> ticker equity 999987.
+    revalued = live_account.revalue(broker, marked, tolerance=Decimal("0.01"), policy=policy())
+    assert revalued.equity == Decimal("999987")
+    assert revalued.available_margin == Decimal("993984.6")
+    lower = guard_quote(NOW, bid="149.99", ask="150")  # ticker equity 999977.
+    revalued = live_account.revalue(broker, lower, tolerance=Decimal("0.01"), policy=policy())
+    assert revalued.equity == Decimal("999977")
+    assert revalued.available_margin == Decimal("993976.6")
+    with pytest.raises(LiveAccountError, match="valuation_outside_tolerance"):
+        live_account.revalue(broker, marked, tolerance=Decimal("0.001"), policy=policy())

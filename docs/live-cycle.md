@@ -26,6 +26,7 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 各段階が要求する確認を、運用者がサイクル単位でまとめて与える形です。
 
 `--flatten`を付けると、手順4で戦略の代わりに全建玉の決済を提案します（[手仕舞い](live-signal.md)）。
+建玉がある間は`--valuation-tolerance`で[評価額の許容幅](live-account.md)を指定します。
 
 ## 送信までの時間
 

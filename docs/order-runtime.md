@@ -48,6 +48,8 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 実行内容には、注文本文とSHA-256、リスク評価、口座ID、台帳の設定・実装・注文行・リスクゲートの
 ハッシュ、最後のイベントID、POST制御のrevision、停止状態、気配、取消許可のSHA-256を含めます。
 別の注文の準備、口座証拠や気配の更新、停止、同期・監視の不健全化、コード変更のいずれでも値が変わります。
+Private同期のトークン操作（取得・更新・削除）もPOST制御のrevisionを進めるため、`context`の後に
+トークン操作が入ると送信はキーを読む前に拒否されます。`context`から取り直してください。
 
 キーを読む前の拒否では資格情報ストアに触れず、HTTPもclaimも使いません。POST枠の取得後の拒否では
 POST枠だけを正常完了し、注文をPREPAREDに残します。SUBMITTING保存後の失敗は従来どおり結果不明・停止とし、

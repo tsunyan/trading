@@ -58,6 +58,7 @@ class LiveCycle:
         quote_transport=None,
         quote_output=None,
         intent_output=None,
+        valuation_tolerance=None,
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
@@ -89,12 +90,14 @@ class LiveCycle:
             quote=quote,
             vault=vault,
             transport=transport,
+            valuation_tolerance=valuation_tolerance,
         )
         result["account"] = {
             "observed_at": account["observed_at"],
             "positions": account["positions"],
             "working_orders": account["working_orders"],
             "entry_halted": account["entry_halted"],
+            "valuation_adjusted": account["valuation_adjusted"],
         }
         now = self.clock()
         positions, pending, limits = journal_state(self.journal, now)
@@ -150,6 +153,7 @@ def main(argv=None):
     parser.add_argument("--intent-output", type=Path)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--flatten", action="store_true")
+    parser.add_argument("--valuation-tolerance")
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     try:
@@ -162,6 +166,7 @@ def main(argv=None):
             max_slippage=args.max_slippage,
             prepare=args.prepare,
             flatten=args.flatten,
+            valuation_tolerance=args.valuation_tolerance,
             quote_output=args.quote_output,
             intent_output=args.intent_output,
         )
