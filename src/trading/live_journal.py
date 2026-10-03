@@ -39,6 +39,20 @@ from trading.post_control import PersistentPostLimiter
 from trading.storage_init import new_storage_directory
 
 MODE = "live-execution-v1"
+MONITOR_STOP_REASONS = frozenset(
+    {
+        "private_sync_stopped",
+        "private_sync_owner_missing",
+        "private_sync_stale",
+        "private_reads_blocked",
+        "private_cash_halted",
+        "private_journal_unresolved",
+        "private_sync_unavailable",
+        "private_posts_stopped",
+        "private_posts_owner_missing",
+        "private_live_unavailable",
+    }
+)
 CONFIRMATIONS = frozenset(
     {
         "live-orders",
@@ -1521,6 +1535,66 @@ class LiveOrderJournal(OrderJournal):
             state = self._live_state(conn)
             self._write_live(conn, state, phase="STOPPED")
             self._event(conn, None, "LIVE_STOPPED", {})
+
+    def monitoring_status(self):
+        """Small local state for monitoring; no amounts, evidence references or order payloads."""
+        with self._transaction() as conn:
+            state = self._live_state(conn)
+            halted = bool(conn.execute("SELECT halted FROM metadata WHERE id=1").fetchone()[0])
+            entry_halted = bool(self._gate(conn)["entry_halted"])
+            try:
+                current = self._current_implementation() == state.implementation_sha256
+                now = self._clock(self.clock())
+                valid = (
+                    current
+                    and state.approval is not None
+                    and (state.approval.accepted_at <= now < state.approval.expires_at)
+                )
+            except (ValueError, OSError):
+                valid = False
+            return {
+                "instance": state.instance,
+                "revision": state.revision,
+                "phase": state.phase,
+                "halted": halted,
+                "entry_halted": entry_halted,
+                "approval_valid": valid,
+                "complete": False,
+                "live_enabled": False,
+            }
+
+    def halt_for_monitor(self, monitor_instance, reasons):
+        if (
+            not isinstance(monitor_instance, str)
+            or len(monitor_instance) != 32
+            or any(c not in "0123456789abcdef" for c in monitor_instance)
+            or not isinstance(reasons, (list, tuple, set, frozenset))
+            or not reasons
+            or any(
+                not isinstance(reason, str) or reason not in MONITOR_STOP_REASONS
+                for reason in reasons
+            )
+        ):
+            raise LiveOrderError("invalid_live_monitor_stop")
+        with self._transaction() as conn:
+            state = self._live_state(conn)
+            if (
+                state.phase == "STOPPED"
+                and conn.execute("SELECT halted FROM metadata").fetchone()[0]
+            ):
+                return {"status": "already_stopped", "changed": False}
+            conn.execute("UPDATE metadata SET halted=1 WHERE id=1")
+            self._write_live(conn, state, phase="STOPPED")
+            self._event(
+                conn,
+                None,
+                "LIVE_MONITOR_STOPPED",
+                {
+                    "monitor_instance": monitor_instance,
+                    "reasons": sorted(set(reasons)),
+                },
+            )
+            return {"status": "stopped", "changed": True}
 
     def snapshot(self):
         result = super().snapshot()

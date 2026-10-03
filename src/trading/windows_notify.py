@@ -78,6 +78,13 @@ LABELS = {
     "private_cash_halted": "実口座の現金台帳が停止しています",
     "private_journal_unresolved": "実口座の受信記録に未解消の処理が残っています",
     "private_sync_unavailable": "実口座同期の保存状態を確認できません",
+    "private_posts_stopped": "実口座のPOST処理が停止しています",
+    "private_posts_owner_missing": "実口座のPOST処理中断を検出しました。送信結果の確認が必要です",
+    "private_live_stopped": "実発注の台帳を停止しました。明示的な確認・再開が必要です",
+    "private_live_approval_invalid": "実発注の許可が失効しています。受入証跡を再確認してください",
+    "private_live_entry_halted": "実発注の損失制限により新規建玉を停止しています",
+    "private_live_unavailable": "実発注の保存状態を確認できません",
+    "private_live_stop_failed": "監視から実発注を停止できませんでした。台帳を確認してください",
     "private_condition_cleared": "実口座同期の監視で障害条件の解消を確認しました",
 }
 

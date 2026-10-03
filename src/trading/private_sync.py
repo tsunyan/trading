@@ -21,8 +21,10 @@ from trading.event_capture import JournaledEventCapture
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
+from trading.live_journal import LiveOrderJournal
+from trading.live_monitor_target import LiveMonitorBinding
 from trading.live_order_catalog import LiveOrderCatalogSource
-from trading.post_control import PersistentPostLimiter
+from trading.post_control import PersistentPostLimiter, PostBusyError
 from trading.private_read import PrivateReadClient
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClient
@@ -430,12 +432,42 @@ class PrivateSyncWorkspace:
         catalog = self.catalog.snapshot() if self.catalog is not None else None
         reads = self._reads()
         posts = self._posts(reads)
+        post, post_owner = None, None
+        live = None
+        if posts is not None:
+            post = posts.snapshot()
+            if post["phase"] == "IN_FLIGHT":
+                try:
+                    with posts._ownership():
+                        post, post_owner = posts.snapshot(), False
+                except PostBusyError:
+                    post, post_owner = posts.snapshot(), True
+            binding = posts.execution_binding()
+            if binding is not None:
+                target = LiveMonitorBinding(
+                    scope=self.plan.scope,
+                    sync_instance=self.control.snapshot()["instance"],
+                    read_instance=self.plan.read_control_instance,
+                    post_instance=post["instance"],
+                    live_instance=binding["instance"],
+                    read_directory=str(reads.path.parent),
+                    post_directory=str(posts.path.parent),
+                    live_directory=binding["path"],
+                )
+                live = {
+                    "binding": target.model_dump(),
+                    "status": LiveOrderJournal(
+                        binding["path"], posts, clock=self.clock
+                    ).monitoring_status(),
+                }
         return {
             "plan_sha256": self.plan_sha256,
             "control": self.control.snapshot(),
             "journal": self.journal.inspect(),
             "reads": reads.status(),
-            "posts": posts.snapshot() if posts is not None else None,
+            "posts": post,
+            "post_owner_present": post_owner,
+            "live": live,
             "cash": self.book.snapshot(),
             "catalog": catalog,
             "catalog_bound": self._catalog_bound,

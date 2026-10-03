@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -16,13 +16,16 @@ from typing import Literal
 from pydantic import AwareDatetime, Field
 
 from trading.broker_contracts import Contract
+from trading.live_monitor_target import LIVE_STOP_REASONS, LiveMonitorBinding, LiveMonitorTarget
 from trading.paper_runner import _process_lock
+from trading.post_control import PostBusyError
 from trading.private_sync import PrivateSyncWorkspace
 from trading.storage_init import new_storage_directory
-from trading.stream_control import StreamControlError
+from trading.stream_control import StreamControl, StreamControlError
 from trading.windows_notify import send_toast
 
 MAX_ALERTS = 10_000
+MAX_MONITOR_BYTES = 16_384
 ARCHIVE_BATCH = 1000
 ZERO = "0" * 64
 ARCHIVE_SCHEMA = (
@@ -43,6 +46,13 @@ CONDITIONS = frozenset(
         "private_cash_halted",
         "private_journal_unresolved",
         "private_sync_unavailable",
+        "private_posts_stopped",
+        "private_posts_owner_missing",
+        "private_live_stopped",
+        "private_live_approval_invalid",
+        "private_live_entry_halted",
+        "private_live_unavailable",
+        "private_live_stop_failed",
     }
 )
 KINDS = CONDITIONS | {"private_notification_test", "private_condition_cleared"}
@@ -80,6 +90,7 @@ class MonitorState(Contract):
     archive_count: int = Field(default=0, strict=True, ge=0, lt=2**63)
     archived_alerts: int = Field(default=0, strict=True, ge=0, lt=2**63)
     archive_head: str = Field(default=ZERO, pattern=r"^[a-f0-9]{64}$")
+    live_binding: LiveMonitorBinding | None = None
 
 
 class Alert(Contract):
@@ -107,7 +118,14 @@ def _body(model):
         for name, default in (("archive_count", 0), ("archived_alerts", 0), ("archive_head", ZERO)):
             if data[name] == default:
                 data.pop(name)
-    return _json(data)
+        if model.live_binding is None:
+            data.pop("live_binding")
+        elif model.live_binding.sync_instance != model.control_instance:
+            raise OperationsError("operations_integrity_failed")
+    body = _json(data)
+    if isinstance(model, MonitorState) and len(body.encode()) > MAX_MONITOR_BYTES:
+        raise OperationsError("operations_monitor_capacity")
+    return body
 
 
 def _json(value):
@@ -129,7 +147,7 @@ def _now(clock):
 
 
 class PrivateOperations:
-    """Independent diagnostics. Nothing here recovers, reconnects, books or sends orders."""
+    """Independent monitoring and bound live stops; no recovery, booking or orders."""
 
     def __init__(self, directory, *, clock=lambda: datetime.now(UTC), monotonic=time.monotonic):
         self.directory = Path(directory).resolve()
@@ -144,7 +162,7 @@ class PrivateOperations:
     @classmethod
     def create(cls, directory, *, stale_seconds=120, retry_seconds=300, **clocks):
         directory = Path(directory).resolve()
-        workspace = PrivateSyncWorkspace(directory)
+        workspace = PrivateSyncWorkspace(directory, **clocks)
         view = workspace.status()
         minimum = (
             workspace.plan.supervisor.sync_interval_seconds
@@ -171,6 +189,7 @@ class PrivateOperations:
                 created_at=_now(clocks.get("clock", lambda: datetime.now(UTC))),
                 stale_seconds=stale_seconds,
                 retry_seconds=retry_seconds,
+                live_binding=view["live"]["binding"] if view.get("live") is not None else None,
             )
             with closing(sqlite3.connect(storage / "operations.sqlite")) as conn:
                 conn.execute("PRAGMA synchronous=FULL")
@@ -198,7 +217,11 @@ class PrivateOperations:
     def _verify(self, conn):
         try:
             rows = conn.execute("SELECT * FROM monitor LIMIT 2").fetchall()
-            if len(rows) != 1 or rows[0]["id"] != 1 or len(rows[0]["body"].encode()) > 4096:
+            if (
+                len(rows) != 1
+                or rows[0]["id"] != 1
+                or len(rows[0]["body"].encode()) > MAX_MONITOR_BYTES
+            ):
                 raise ValueError
             raw = rows[0]["body"]
             state = MonitorState.model_validate_json(raw)
@@ -216,8 +239,13 @@ class PrivateOperations:
                 )
             ):
                 raise ValueError
-            conditions = {row[0] for row in conn.execute("SELECT kind FROM conditions LIMIT 8")}
-            if not conditions <= CONDITIONS:
+            conditions = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT kind FROM conditions LIMIT ?", (len(CONDITIONS) + 1,)
+                )
+            }
+            if len(conditions) > len(CONDITIONS) or not conditions <= CONDITIONS:
                 raise ValueError
             count, minimum, maximum = conn.execute(
                 "SELECT COUNT(*),COALESCE(MIN(id),1),COALESCE(MAX(id),0) FROM alerts"
@@ -497,40 +525,68 @@ class PrivateOperations:
     def _observe(self, state):
         # Reload around legitimate rotation/concurrent updates. A failed sample
         # never clears conditions or guesses state from filenames or old views.
+        def sample(workspace, owner_present):
+            view = workspace.status()
+            if (view["control"]["instance"], view["plan_sha256"]) != (
+                state.control_instance,
+                state.plan_sha256,
+            ):
+                raise ValueError
+            if view["control"]["revision"] != workspace.control.snapshot()["revision"]:
+                raise ValueError
+            if (
+                state.generation is not None and view["control"]["generation"] < state.generation
+            ) or view["control"]["sync_successes"] < state.sync_successes:
+                raise ValueError
+            return view, owner_present
+
         for attempt in range(3):
             try:
-                workspace = PrivateSyncWorkspace(self.directory)
+                workspace = PrivateSyncWorkspace(
+                    self.directory, clock=self.clock, monotonic=self.monotonic
+                )
                 try:
                     with workspace.control.ownership():
-                        view, owner_present = workspace.status(), False
+                        return sample(workspace, False)
                 except StreamControlError as error:
                     if str(error) != "stream_owner_busy":
                         raise
-                    view, owner_present = workspace.status(), True
-                if (view["control"]["instance"], view["plan_sha256"]) != (
-                    state.control_instance,
-                    state.plan_sha256,
-                ):
-                    raise ValueError
+                view, owner_present = sample(workspace, True)
+                # If the worker finished during sampling, resample under the free lease.
+                try:
+                    with workspace.control.ownership():
+                        return sample(workspace, False)
+                except StreamControlError as error:
+                    if str(error) != "stream_owner_busy":
+                        raise
                 if view["control"]["revision"] != workspace.control.snapshot()["revision"]:
                     raise ValueError
-                if (
-                    state.generation is not None
-                    and view["control"]["generation"] < state.generation
-                ) or view["control"]["sync_successes"] < state.sync_successes:
-                    raise ValueError
                 return view, owner_present
-            except (ValueError, OSError):
+            except (ValueError, OSError, sqlite3.Error):
                 if attempt < 2:
                     time.sleep(0.05)
         return None, None
 
-    def check(self):
+    def check(self, *, protect_live=False):
+        protection = {"status": "diagnostic_only", "changed": False}
         with self._owned() as (conn, state, previous, _, now):
             view, owner = self._observe(state)
             active, revision = set(), None
+            if view is not None:
+                live = view.get("live")
+                binding = (
+                    LiveMonitorBinding.model_validate(live["binding"]) if live is not None else None
+                )
+                if state.live_binding is not None and binding != state.live_binding:
+                    view = None
+                elif binding is not None and state.live_binding is None:
+                    state = state.model_copy(update={"live_binding": binding})
+                    self._write(conn, state)
+                    conn.commit()  # Keep the verified target even if the alert outbox is full.
             if view is None:
                 active = previous | {"private_sync_unavailable"}
+                if state.live_binding is not None:
+                    active.add("private_live_unavailable")
             else:
                 control, reads, journal = view["control"], view["reads"], view["journal"]
                 revision = control["revision"]
@@ -557,12 +613,32 @@ class PrivateOperations:
                     active.add("private_reads_blocked")
                 if view["cash"]["halted"]:
                     active.add("private_cash_halted")
+                post, live = view.get("posts"), view.get("live")
+                if post is not None:
+                    if post["phase"] == "STOPPED":
+                        active.add("private_posts_stopped")
+                    elif post["phase"] == "IN_FLIGHT" and view.get("post_owner_present") is False:
+                        active.add("private_posts_owner_missing")
+                if live is not None:
+                    status = live["status"]
+                    if status["phase"] == "STOPPED" or status["halted"]:
+                        active.add("private_live_stopped")
+                    if status["phase"] == "ENABLED" and not status["approval_valid"]:
+                        active.add("private_live_approval_invalid")
+                    if status["entry_halted"]:
+                        active.add("private_live_entry_halted")
                 if (control["phase"] != "RUNNING" or not owner) and (
                     journal["unacknowledged_records"]
                     or journal["session_open"]
                     or journal["rejected_frames"]
                 ):
                     active.add("private_journal_unresolved")
+            if protect_live:
+                protection = self._protect_live(state, view, active)
+                if protection["status"] in {"stopped", "already_stopped"}:
+                    active.add("private_live_stopped")
+                elif protection["status"] == "failed":
+                    active.add("private_live_stop_failed")
             for kind in sorted(active - previous):
                 state = self._alert(conn, state, kind, now, revision=revision)
                 conn.execute("INSERT INTO conditions VALUES(?)", (kind,))
@@ -581,7 +657,62 @@ class PrivateOperations:
                 )
             state = state.model_copy(update={"last_check_at": now})
             self._write(conn, state)
-        return self.status()
+        result = self.status()
+        if protect_live:
+            result["live_protection"] = protection
+        return result
+
+    def _protect_live(self, state, view, conditions):
+        reasons = conditions & LIVE_STOP_REASONS
+        if state.live_binding is None or not reasons:
+            return {"status": "unnecessary", "changed": False}
+        try:
+            target = LiveMonitorTarget(
+                state.live_binding, clock=self.clock, monotonic=self.monotonic
+            )
+            fresh, _ = self._observe(state)
+            if view is None:
+                if (
+                    fresh is not None
+                    and fresh.get("live") is not None
+                    and LiveMonitorBinding.model_validate(fresh["live"]["binding"])
+                    == state.live_binding
+                ):
+                    return {"status": "checkpoint_changed", "changed": False}
+                # An unavailable manifest/control cannot redirect a previously verified target.
+                return target.stop(state.instance, reasons)
+            if fresh != view:
+                return {"status": "checkpoint_changed", "changed": False}
+            control = StreamControl(self.directory / "control")
+
+            def stop_if_current():
+                with control._transaction() as conn:
+                    current = control._state(conn).model_dump()
+                    expected = {
+                        k: v
+                        for k, v in view["control"].items()
+                        if k not in {"complete", "live_enabled"}
+                    }
+                    if current != expected or target.posts.snapshot() != view["posts"]:
+                        return {"status": "checkpoint_changed", "changed": False}
+                    return target.stop(state.instance, reasons)
+
+            try:
+                # OS leases precede the SQLite guard; their acquisition validates DBs itself.
+                with ExitStack() as leases:
+                    if "private_sync_owner_missing" in reasons:
+                        leases.enter_context(control.ownership())
+                    if "private_posts_owner_missing" in reasons:
+                        leases.enter_context(target.posts._ownership())
+                    return stop_if_current()
+            except PostBusyError:
+                return {"status": "checkpoint_changed", "changed": False}
+            except StreamControlError as error:
+                if str(error) == "stream_owner_busy":
+                    return {"status": "checkpoint_changed", "changed": False}
+                raise
+        except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
+            return {"status": "failed", "changed": False}
 
     def status(self):
         with self._store() as conn:
@@ -599,6 +730,9 @@ class PrivateOperations:
             "last_progress_at": state.last_progress_at,
             "stale_seconds": state.stale_seconds,
             "retry_seconds": state.retry_seconds,
+            "live_binding": state.live_binding.model_dump()
+            if state.live_binding is not None
+            else None,
             "conditions": sorted(conditions),
             "alert_count": state.alert_count,
             "active_alerts": len(rows),
@@ -751,7 +885,7 @@ class PrivateOperations:
     def watchdog(self, *, send=send_toast):
         """A full pending outbox must still drain; a failed sample never clears conditions."""
         try:
-            result = self.check()
+            result = self.check(protect_live=True)
         except OperationsError as error:
             if str(error) != "operations_alert_capacity":
                 raise
