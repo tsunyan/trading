@@ -29,6 +29,7 @@ REASONS = {
     "completed",
     "operator_stop",
     "operation_unknown",
+    "order_cleanup_failed",
     "clock_invalid",
     "token_failed",
     "token_recovered",
@@ -313,7 +314,13 @@ class PersistentPostLimiter(PrivateStreamLimiter):
         return updated
 
     def stop(self, reason="operator_stop"):
-        if reason not in {"operator_stop", "operation_unknown", "clock_invalid", "token_failed"}:
+        if reason not in {
+            "operator_stop",
+            "operation_unknown",
+            "clock_invalid",
+            "token_failed",
+            "order_cleanup_failed",
+        }:
             raise PostControlError("invalid_post_stop_reason")
         self._stopped = True
         with self._transaction() as conn:

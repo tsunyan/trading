@@ -637,6 +637,57 @@ def test_foreign_thread_cannot_reuse_same_limiter_object_owner(setup):
     assert journal.snapshot()["orders"] == []
 
 
+@pytest.mark.parametrize(
+    "stage", ["ready", "completed", "operation_unknown", "operator_stop", "clock_invalid"]
+)
+def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(setup, stage):
+    from trading.post_control import TOKEN_CONFIRMATIONS, TOKEN_QUIET_SECONDS
+
+    clock, reads, posts, journal = setup
+    order = ready(setup)
+    sender = client(
+        setup,
+        lambda request: (
+            httpx.Response(500) if stage == "operation_unknown" else response(clock, request)
+        ),
+    )
+    if stage == "completed":
+        sender.submit(order.client_id, quote=quote(clock.now))
+    elif stage == "operation_unknown":
+        with pytest.raises(OrderTransportError):
+            sender.submit(order.client_id, quote=quote(clock.now))
+    elif stage in {"operator_stop", "clock_invalid"}:
+        posts.stop(stage)
+    saved, before = posts.snapshot(), journal.snapshot()
+    sender._client.close = lambda: (_ for _ in ()).throw(RuntimeError("remote secret"))
+    with pytest.raises(OrderTransportError, match="^order_client_cleanup_failed$"):
+        sender.close()
+    state = posts.snapshot()
+    assert state["phase"] == "STOPPED" and state["claim"] == saved["claim"]
+    assert state["reason"] == ("order_cleanup_failed" if stage in {"ready", "completed"} else stage)
+    assert (
+        sender._closed
+        and sender._api_key.get_secret_value() == sender._secret.get_secret_value() == ""
+    )
+    assert (
+        journal.snapshot()["orders"] == before["orders"] and not journal.snapshot()["live_enabled"]
+    )
+    assert b"remote secret" not in posts.path.read_bytes()
+    reopened = PersistentPostLimiter(posts.path.parent, reads, **clock.post_args())
+    assert reopened.snapshot() == state
+    with pytest.raises(PostControlError), reopened.token_slot("POST"):
+        pass
+    clock.advance(TOKEN_QUIET_SECONDS)
+    with pytest.raises(PostControlError, match="post_token_recovery_refused"):
+        reopened.recover_token(
+            expected_revision=state["revision"],
+            expected_reason=state["reason"],
+            expected_claim=state["claim"],
+            confirmations=TOKEN_CONFIRMATIONS,
+        )
+    assert reopened.snapshot() == state
+
+
 def test_unowned_direct_claim_is_refused_and_stop_cannot_be_reactivated(setup):
     clock, _, posts, journal = setup
     order = ready(setup)

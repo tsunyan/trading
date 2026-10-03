@@ -95,7 +95,7 @@ class PrivateOrderClient:
             try:
                 self._client.close()
             except Exception:
-                self.posts.stop()
+                self.posts.stop("order_cleanup_failed")
                 raise OrderTransportError("order_client_cleanup_failed") from None
             finally:
                 self._api_key, self._secret = SecretStr(""), SecretStr("")
