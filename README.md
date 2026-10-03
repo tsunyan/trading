@@ -49,7 +49,8 @@ USD/JPYの実用化に向けた進行中の作業は [docs/fx-practical-plan.md]
 未確認ACK・未計上約定を拒否して明示的な接続更新ができます。
 [同期の所有権・永続停止・手動復旧](docs/stream-control.md)では、OSロックと保存した状態で二重起動・自動再開を拒否します。
 [Private同期の継続実行](docs/private-supervisor.md)では、定期REST照合と容量・時間・イベント数による予定切替を合成検証できます。
-ライブラリAPIでの提供で、実口座CLI・Windows通知との接続と実口座受入は残っています。
+[明示開始の実口座読取CLI](docs/private-sync.md)はWindows資格情報・永続GET制御・継続同期を組み合わせます。
+合成通信で起動・終了・約定計上・停止を検証済みで、Windows通知との接続と実口座受入は残っています。
 [約定からの建玉会計](docs/execution-positions.md)では、開始建玉を宣言した台帳で数量・取得価格・決済損益を検証します。
 部分決済と再起動に対応し、RESTとの差を補正せず表示します。
 [建玉拘束数量の照合](docs/position-reservations.md)では、決済割当から計上済み約定を引き、RESTの拘束数量と比較します。

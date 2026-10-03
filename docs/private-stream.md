@@ -85,7 +85,7 @@ version 2の[区間保存と明示的な接続切替](segmented-journal.md)も�
 同じDB内に旧区間を保存して新しい区間へ移れます。新接続はREST再取得が必要で、
 通知の連続性は未証明のままです。[Private同期Supervisor](private-supervisor.md)では、
 容量・時間・イベント数による予定切替と、受信を続けながらの定期REST取得を合成検証しています。
-ライブラリAPIでの提供で、実口座CLI・Windowsタスク・障害通知との接続は残っています。
+[実口座読取CLI](private-sync.md)も合成検証済みで、Windowsタスク・障害通知との接続と実口座受入は残っています。
 
 ## 明示的な開始と終了
 
