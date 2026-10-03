@@ -8,7 +8,7 @@
 `run`は明示指定したWindows資格情報を読み、GET口座取得とWebSocket用のトークン操作・購読を行います。
 `reconcile-stopped`は保存済み約定について既知注文のGET照合・計上を行います。
 注文送信や戦略判断はありません。[独立監視とWindows障害通知](private-operations.md)を利用できます。
-Windowsの監視タスク登録は次の工程です。
+Windowsへの監視タスク登録手順も同文書に記載しています。
 
 ## 事前に用意するもの
 
@@ -174,7 +174,7 @@ ACK不明・未計上約定・FAULT区間の強制解除はありません。
 
 口座の全履歴、外部操作、業者の丸め・証拠金式、接続間の履歴欠損は引き続き未確認です。
 CLI成功も`complete=false`、`live_enabled=false`で、実注文や戦略の昇格へ変換しません。
-実Windowsストア・実REST/WebSocketの受入、全口座照合、Windows監視タスク、実発注は残工程です。
+実Windowsストア・実REST/WebSocketの受入、全口座照合、実口座用の監視設置、実発注は残工程です。
 
 検証: `uv run pytest tests/test_private_sync.py tests/test_known_orders.py tests/test_stopped_reconciliation.py -q`。ネイティブ資格情報APIと実ソケットを禁止し、
 境界だけを合成通信へ置き換えて、実際のGETクライアント・Reader・TokenClient・Supervisorを通します。

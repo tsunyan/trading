@@ -61,11 +61,47 @@ uv run python -m trading.private_operations ack --directory runs/private-sync --
 通知記録は最大10,000件で自動削除しません。`alerts`は未確認の最新100件を表示します。
 DBは暗号化しておらず、ローカルの整合性検査は悪意ある書換えやバックアップ巻戻しを防ぐ仕組みではありません。
 
+## Windowsでの定期監視
+
+監視DBを初期化した後、登録内容を確認してからスクリプトを実行します。
+
+```powershell
+uv run python -m trading.private_tasks plan --directory runs/private-sync
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-private-watchdog.ps1 -Directory runs/private-sync -PlanOnly
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-private-watchdog.ps1 -Directory runs/private-sync
+```
+
+例の実行ポリシー指定は起動したPowerShellプロセスにだけ適用し、ユーザー・システムの設定は変更しません。
+リポジトリの`.venv`を先に用意してください。登録スクリプトはその環境から定義を生成し、
+実体のPythonインタープリターと依存ライブラリの検索パスをアクションへ固定します。
+空白・日本語を含むパスにも対応します。
+
+登録するのは`TradingLab-Private-<同期識別子の先頭12文字>-Watchdog`の1タスクです。
+ログイン時と既定60秒ごとに`private_operations watchdog`を実行します。
+間隔は`-IntervalSeconds`で30秒から停滞閾値まで指定できます。
+同時起動はIgnoreNew、実行上限は90秒です。ログイン中の同じユーザーで、管理者権限を要求せずに動きます。
+同期の開始は[読取CLI](private-sync.md)から別に行います。タスクは監視・通知を担当します。
+
+同じ名前のタスクを更新する際は、保存した監視識別子を含む説明とユーザーSIDを照合します。
+無関係なタスクや別ユーザーのタスクは上書きしません。Windowsがユーザー名を別表記で保存しても、
+同じユーザーなら更新できます。監視DBや固定設定が確認できない場合はタスク定義を生成しません。
+
+登録した実際のタスク名を使って、実行・確認できます。
+
+```powershell
+Start-ScheduledTask -TaskName <task_name>
+Get-ScheduledTask -TaskName <task_name> | Get-ScheduledTaskInfo
+```
+
+一時的な合成環境で登録・同一タスクの更新・実行を確認しました。
+2026-10-03 16:38 JSTの実行は終了コード0で、監視時刻の保存・障害条件なしを確認し、
+試験後にタスクを削除しました。実口座用のタスクは口座準備後に設置します。
+
 障害条件または通知送信失敗がある場合、監視CLIは終了コード1を返します。
 通知先はログイン中の同じWindowsユーザーのデスクトップです。
 実口座・長時間の実REST/WebSocket受入は未実施です。
 
-検証: `uv run pytest tests/test_private_operations.py tests/test_paper_runner.py -q`。
+検証: `uv run pytest tests/test_private_operations.py tests/test_private_tasks.py tests/test_paper_runner.py -q`。
 実プロセス終了とOS所有権解放、停止・停滞・確認不能、同じ通知の再試行、既読と停止の分離を
 合成環境で検証しています。
 一時的な合成環境からのPrivateテストtoastは実Windowsでも受け付け1件・失敗0件を確認しました。
