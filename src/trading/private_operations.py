@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import time
 import uuid
@@ -91,6 +92,17 @@ class MonitorState(Contract):
     archived_alerts: int = Field(default=0, strict=True, ge=0, lt=2**63)
     archive_head: str = Field(default=ZERO, pattern=r"^[a-f0-9]{64}$")
     live_binding: LiveMonitorBinding | None = None
+    generation_start_successes: int | None = Field(default=None, strict=True, ge=0)
+    watchdog_checkpoint: "WatchdogCheckpoint | None" = None
+
+
+class WatchdogCheckpoint(Contract):
+    live_instance: str = Field(pattern=r"^[a-f0-9]{32}$")
+    checked_at: AwareDatetime
+    generation: int = Field(strict=True, gt=0)
+    generation_start_successes: int = Field(strict=True, ge=0)
+    sync_successes: int = Field(strict=True, ge=0)
+    control_revision: int = Field(strict=True, ge=0)
 
 
 class Alert(Contract):
@@ -122,6 +134,9 @@ def _body(model):
             data.pop("live_binding")
         elif model.live_binding.sync_instance != model.control_instance:
             raise OperationsError("operations_integrity_failed")
+        for name in ("generation_start_successes", "watchdog_checkpoint"):
+            if data[name] is None:
+                data.pop(name)
     body = _json(data)
     if isinstance(model, MonitorState) and len(body.encode()) > MAX_MONITOR_BYTES:
         raise OperationsError("operations_monitor_capacity")
@@ -225,12 +240,34 @@ class PrivateOperations:
                 raise ValueError
             raw = rows[0]["body"]
             state = MonitorState.model_validate_json(raw)
+            checkpoint = state.watchdog_checkpoint
             if (
                 _body(state) != raw
                 or _hash(raw) != rows[0]["digest"]
                 or state.workspace != str(self.directory)
                 or (self._instance is not None and state.instance != self._instance)
                 or (state.last_check_at is not None and state.last_check_at < state.created_at)
+                or (
+                    state.generation_start_successes is not None
+                    and (
+                        state.generation is None
+                        or state.generation_start_successes > state.sync_successes
+                    )
+                )
+                or (
+                    checkpoint is not None
+                    and (
+                        state.live_binding is None
+                        or checkpoint.live_instance != state.live_binding.live_instance
+                        or state.generation is None
+                        or checkpoint.generation > state.generation
+                        or checkpoint.sync_successes > state.sync_successes
+                        or checkpoint.checked_at < state.created_at
+                        or state.last_check_at is None
+                        or checkpoint.checked_at > state.last_check_at
+                        or checkpoint.generation_start_successes > checkpoint.sync_successes
+                    )
+                )
                 or (
                     state.last_progress_at is not None
                     and (
@@ -596,13 +633,24 @@ class PrivateOperations:
                     if not owner:
                         active.add("private_sync_owner_missing")
                     if state.generation != control["generation"] or state.last_progress_at is None:
-                        state = state.model_copy(update={"last_progress_at": now})
+                        state = state.model_copy(
+                            update={
+                                "last_progress_at": now,
+                                "generation_start_successes": control["sync_successes"],
+                            }
+                        )
                     elif control["sync_successes"] > state.sync_successes:
                         state = state.model_copy(update={"last_progress_at": now})
+                    if state.generation_start_successes is None:
+                        state = state.model_copy(
+                            update={"generation_start_successes": control["sync_successes"]}
+                        )
                     if (now - state.last_progress_at).total_seconds() >= state.stale_seconds:
                         active.add("private_sync_stale")
                 else:
-                    state = state.model_copy(update={"last_progress_at": None})
+                    state = state.model_copy(
+                        update={"last_progress_at": None, "generation_start_successes": None}
+                    )
                 state = state.model_copy(
                     update={
                         "generation": control["generation"],
@@ -639,6 +687,27 @@ class PrivateOperations:
                     active.add("private_live_stopped")
                 elif protection["status"] == "failed":
                     active.add("private_live_stop_failed")
+                if (
+                    view is not None
+                    and owner
+                    and view["control"]["phase"] == "RUNNING"
+                    and not active
+                    & (LIVE_STOP_REASONS | {"private_live_stopped", "private_live_stop_failed"})
+                    and state.generation_start_successes is not None
+                    and state.live_binding is not None
+                ):
+                    state = state.model_copy(
+                        update={
+                            "watchdog_checkpoint": WatchdogCheckpoint(
+                                live_instance=state.live_binding.live_instance,
+                                checked_at=now,
+                                generation=view["control"]["generation"],
+                                generation_start_successes=state.generation_start_successes,
+                                sync_successes=view["control"]["sync_successes"],
+                                control_revision=view["control"]["revision"],
+                            )
+                        }
+                    )
             for kind in sorted(active - previous):
                 state = self._alert(conn, state, kind, now, revision=revision)
                 conn.execute("INSERT INTO conditions VALUES(?)", (kind,))
@@ -714,9 +783,18 @@ class PrivateOperations:
         except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
             return {"status": "failed", "changed": False}
 
-    def status(self):
+    def status(self, *, require_lock=False):
         with self._store() as conn:
             state, conditions, rows, _ = self._verify(conn)
+            if require_lock:
+                identity = self.lock_path.lstat()
+                if (
+                    not stat.S_ISREG(identity.st_mode)
+                    or identity.st_size != 1
+                    or (str(identity.st_dev), str(identity.st_ino))
+                    != (state.lock_device, state.lock_inode)
+                ):
+                    raise OperationsError("operations_lock_changed")
             unread, waiting = conn.execute(
                 "SELECT COUNT(*) FILTER (WHERE acknowledged_at IS NULL),"
                 "COUNT(*) FILTER (WHERE acknowledged_at IS NULL AND resolved_at IS NULL "
@@ -730,6 +808,9 @@ class PrivateOperations:
             "last_progress_at": state.last_progress_at,
             "stale_seconds": state.stale_seconds,
             "retry_seconds": state.retry_seconds,
+            "watchdog_checkpoint": state.watchdog_checkpoint.model_dump()
+            if state.watchdog_checkpoint is not None
+            else None,
             "live_binding": state.live_binding.model_dump()
             if state.live_binding is not None
             else None,

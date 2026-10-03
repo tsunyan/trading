@@ -33,6 +33,7 @@ from trading.broker_contracts import (
     validate_evidence,
 )
 from trading.known_orders import KnownOrder
+from trading.live_operations import LiveOperations, LiveOperationsError, OperationsBinding
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
 from trading.order_receipts import CancellationReceipt, SubmissionReceipt
 from trading.post_control import PersistentPostLimiter
@@ -102,6 +103,15 @@ CODE_FILES = (
     "private_stream_token.py",
     "read_control.py",
     "storage_init.py",
+    "live_operations.py",
+    "private_operations.py",
+    "private_sync.py",
+    "stream_control.py",
+    "live_monitor_target.py",
+    "known_orders.py",
+    "execution_cash_book.py",
+    "event_journal.py",
+    "segmented_journal.py",
 )
 
 
@@ -110,7 +120,10 @@ class LiveOrderError(OrderBlocked):
 
 
 def _body(value):
-    return json.dumps(value.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    data = value.model_dump(mode="json")
+    if isinstance(value, LiveState) and value.operations is None:
+        data.pop("operations")
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
 def _hash(value):
@@ -185,6 +198,7 @@ class LiveState(Contract):
     phase: Literal["DISABLED", "ENABLED", "STOPPED"] = "DISABLED"
     approval: LiveApproval | None = None
     revision: int = Field(default=0, strict=True, ge=0)
+    operations: OperationsBinding | None = None
 
 
 class CancelApproval(Contract):
@@ -241,22 +255,25 @@ class LiveRestartApproval(Contract):
 
 
 def _configuration(state):
+    configuration = {
+        key: state.model_dump(mode="json")[key]
+        for key in (
+            "mode",
+            "instance",
+            "post_instance",
+            "read_instance",
+            "scope",
+            "post_path",
+            "limits",
+            "policy",
+            "implementation_sha256",
+        )
+    }
+    if state.operations is not None:
+        configuration["operations"] = state.operations.model_dump(mode="json")
     return _hash(
         json.dumps(
-            {
-                key: state.model_dump(mode="json")[key]
-                for key in (
-                    "mode",
-                    "instance",
-                    "post_instance",
-                    "read_instance",
-                    "scope",
-                    "post_path",
-                    "limits",
-                    "policy",
-                    "implementation_sha256",
-                )
-            },
+            configuration,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -335,6 +352,17 @@ class LiveOrderJournal(OrderJournal):
             if len(rows) != 1 or rows[0]["id"] != 1:
                 raise ValueError
             state = LiveState.model_validate_json(rows[0]["body"])
+            bindings = conn.execute(
+                "SELECT payload_json FROM events WHERE kind='LIVE_OPERATIONS_BOUND' LIMIT 2"
+            ).fetchall()
+            if (state.operations is None and bindings) or (
+                state.operations is not None
+                and (
+                    len(bindings) != 1
+                    or json.loads(bindings[0][0]) != state.operations.model_dump(mode="json")
+                )
+            ):
+                raise ValueError
             meta = conn.execute("SELECT * FROM metadata").fetchall()
             gate = conn.execute("SELECT * FROM account_gate").fetchall()
             if (
@@ -722,7 +750,85 @@ class LiveOrderJournal(OrderJournal):
             or conn.execute("SELECT halted FROM metadata").fetchone()[0]
         ):
             raise LiveOrderError("live_orders_not_enabled")
+        if state.operations is not None:
+            try:
+                LiveOperations(
+                    state.operations,
+                    self._operations_target(state, state.operations.sync_instance),
+                    clock=self.clock,
+                    monotonic=self.posts._mono,
+                ).require_healthy(now)
+            except LiveOperationsError as error:
+                raise LiveOrderError(str(error)) from None
         return state
+
+    def _operations_target(self, state, sync_instance):
+        return {
+            "scope": state.scope,
+            "sync_instance": sync_instance,
+            "read_instance": state.read_instance,
+            "post_instance": state.post_instance,
+            "live_instance": state.instance,
+            "read_directory": str(self.posts.reads.path.parent),
+            "post_directory": str(self.posts.path.parent),
+            "live_directory": str(self.path.parent),
+        }
+
+    def bind_operations(
+        self,
+        directory,
+        *,
+        expected_revision,
+        expected_plan_sha256,
+        expected_monitor_instance,
+        max_sync_age_seconds=120,
+        max_watchdog_age_seconds=120,
+        operations_confirmed=False,
+    ):
+        if operations_confirmed is not True or type(expected_revision) is not int:
+            raise LiveOrderError("explicit_live_operations_confirmation_required")
+        with self._transaction() as conn:
+            initial = self._live_state(conn)
+        binding = LiveOperations.capture(
+            directory,
+            self._operations_target(initial, "0" * 32),
+            expected_plan_sha256=expected_plan_sha256,
+            expected_monitor_instance=expected_monitor_instance,
+            max_sync_age_seconds=max_sync_age_seconds,
+            max_watchdog_age_seconds=max_watchdog_age_seconds,
+            clock=self.clock,
+            monotonic=self.posts._mono,
+        )
+        with self._mutation(), self._transaction() as conn:
+            state = self._live_state(conn)
+            if (
+                state.revision != expected_revision
+                or state.phase != "DISABLED"
+                or state.approval is not None
+                or state.operations is not None
+                or conn.execute("SELECT halted FROM metadata WHERE id=1").fetchone()[0]
+                or self.posts.snapshot()["blocked"]
+                or conn.execute(
+                    "SELECT 1 FROM events WHERE kind IN ('SUBMITTING','CANCEL_REQUESTED') LIMIT 1"
+                ).fetchone()
+            ):
+                raise LiveOrderError("live_operations_registration_refused")
+            LiveOperations(
+                binding,
+                self._operations_target(state, binding.sync_instance),
+                clock=self.clock,
+                monotonic=self.posts._mono,
+            ).enrollment_check()
+            candidate = self._activation_state(state.model_copy(update={"operations": binding}))
+            self._write_live(
+                conn,
+                state,
+                operations=binding,
+                implementation_sha256=candidate.implementation_sha256,
+                configuration_sha256=candidate.configuration_sha256,
+            )
+            self._event(conn, None, "LIVE_OPERATIONS_BOUND", binding.model_dump(mode="json"))
+        return self.activation_context()
 
     def request(self, client_id):
         with self._transaction() as conn:
