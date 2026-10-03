@@ -117,6 +117,7 @@ CODE_FILES = (
     "credential_store.py",
     "order_credentials.py",
     "order_runtime.py",
+    "live_account.py",
 )
 
 
