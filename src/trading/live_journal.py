@@ -42,6 +42,17 @@ CONFIRMATIONS = frozenset(
     }
 )
 EVIDENCE_KINDS = frozenset({"identity", "rules", "read_acceptance", "account_baseline", "history"})
+CANCEL_CONFIRMATIONS = frozenset(
+    {
+        "cancel-only",
+        "account-identity",
+        "broker-rules",
+        "read-acceptance",
+        "external-writers-paused",
+        "preserve-stops",
+    }
+)
+CANCEL_EVIDENCE_KINDS = frozenset({"identity", "rules", "read_acceptance"})
 CODE_FILES = (
     "live_journal.py",
     "private_order.py",
@@ -138,6 +149,26 @@ class LiveState(Contract):
     phase: Literal["DISABLED", "ENABLED", "STOPPED"] = "DISABLED"
     approval: LiveApproval | None = None
     revision: int = Field(default=0, strict=True, ge=0)
+
+
+class CancelApproval(Contract):
+    """Operator acceptance for one exact cancellation, never a live activation."""
+
+    account_id: str = Field(min_length=1, max_length=100)
+    checkpoint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    accepted_at: AwareDatetime = Field(strict=True)
+    expires_at: AwareDatetime = Field(strict=True)
+    evidence: tuple[AcceptanceEvidence, ...]
+
+    @model_validator(mode="after")
+    def coherent(self):
+        if (
+            not self.accepted_at < self.expires_at <= self.accepted_at + timedelta(minutes=10)
+            or len(self.evidence) != len(CANCEL_EVIDENCE_KINDS)
+            or {e.kind for e in self.evidence} != CANCEL_EVIDENCE_KINDS
+        ):
+            raise ValueError("invalid_cancel_approval")
+        return self
 
 
 def _configuration(state):
@@ -697,16 +728,106 @@ class LiveOrderJournal(OrderJournal):
             raise LiveOrderError("live_cancel_already_claimed")
         return cancel_request(evidence.root_order_id), evidence
 
-    def cancel_request(self, client_id):
-        with self._transaction() as conn:
-            now = self._clock(self.clock())
-            self._authorize(conn, now)
-            return self._cancel_plan(conn, client_id, now)[0]
+    def _cancel_context(self, conn, client_id, now, *, claimed=False):
+        state = self._live_state(conn)
+        plan, evidence = self._cancel_plan(conn, client_id, now, claimed=claimed)
+        row = dict(self._row(conn, client_id))
+        row.pop("state")  # The durable cancel claim changes only this column.
+        post = self.posts.snapshot()
+        return {
+            "client_id": client_id,
+            "account_id": state.policy.account_id,
+            "implementation_sha256": self._current_implementation(),
+            "live_sha256": _hash(_body(state)),
+            "order_sha256": _hash(json.dumps(row, sort_keys=True, separators=(",", ":"))),
+            "gate_sha256": _hash(json.dumps(dict(self._gate(conn)), sort_keys=True)),
+            "halted": conn.execute("SELECT halted FROM metadata").fetchone()[0],
+            "event_id": conn.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0],
+            "post_instance": post["instance"],
+            "post_revision": post["revision"],
+            "root_order_id": evidence.root_order_id,
+            "order_id": evidence.order_id,
+            "request_sha256": hashlib.sha256(plan.body).hexdigest(),
+        }
 
-    def begin_cancel(self, client_id):
+    @staticmethod
+    def _checkpoint(context):
+        return _hash(json.dumps(context, sort_keys=True, separators=(",", ":")))
+
+    def cancel_context(self, client_id):
+        """Inspect a restricted cancellation checkpoint without changing any permission."""
+        with self._transaction() as conn:
+            context = self._cancel_context(conn, client_id, self._clock(self.clock()))
+            return {**context, "checkpoint_sha256": self._checkpoint(context)}
+
+    def authorize_cancel(self, client_id, approval, *, confirmations):
+        approval = CancelApproval.model_validate(approval.model_dump())
+        if frozenset(confirmations) != CANCEL_CONFIRMATIONS:
+            raise LiveOrderError("explicit_cancel_acceptance_confirmations_required")
         with self._mutation(), self._transaction() as conn:
             now = self._clock(self.clock())
-            self._authorize(conn, now)
+            context = self._cancel_context(conn, client_id, now)
+            self.posts.check()
+            if (
+                self.posts.snapshot()["blocked"]
+                or self.posts.reads.status()["blocked"]
+                or approval.account_id != context["account_id"]
+                or approval.checkpoint_sha256 != self._checkpoint(context)
+                or not approval.accepted_at <= now < approval.expires_at
+            ):
+                raise LiveOrderError("live_cancel_authorization_refused")
+            payload = {"context": context, "approval": approval.model_dump(mode="json")}
+            self._event(conn, client_id, "CANCEL_AUTHORIZED", payload)
+            # The event is durable before this capability is returned. No state or stop changes.
+            return self._checkpoint(payload)
+
+    def _authorize_cancel(self, conn, client_id, now, authorization_sha256, *, claimed=False):
+        if authorization_sha256 is None:
+            return self._authorize(conn, now)
+        saved = conn.execute(
+            "SELECT id,payload_json FROM events WHERE client_id=? AND kind='CANCEL_AUTHORIZED' "
+            "ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        ).fetchone()
+        if saved is None:
+            raise LiveOrderError("live_cancel_authorization_refused")
+        payload = json.loads(saved["payload_json"])
+        approval = CancelApproval.model_validate_json(json.dumps(payload["approval"]))
+        context = payload["context"]
+        current = self._cancel_context(conn, client_id, now, claimed=claimed)
+        post = self.posts.snapshot()
+        # Issuance appends one event; claiming appends one more and advances the
+        # shared POST revision once. Any intervening operation or journal mutation fences it.
+        in_flight = post["phase"] == "IN_FLIGHT"
+        expected_head = saved["id"] + int(claimed)
+        expected_revision = context["post_revision"] + int(in_flight)
+        if (
+            self._checkpoint(payload) != authorization_sha256
+            or approval.checkpoint_sha256 != self._checkpoint(context)
+            or approval.account_id != context["account_id"]
+            or not approval.accepted_at <= now < approval.expires_at
+            or current["event_id"] != expected_head
+            or current["post_revision"] != expected_revision
+            or post["phase"] not in {"READY", "IN_FLIGHT"}
+            or (in_flight and not self.posts.owns_operation())
+            or (claimed and not in_flight)
+            or self.posts.reads.status()["blocked"]
+        ):
+            raise LiveOrderError("live_cancel_authorization_refused")
+        current.update(event_id=context["event_id"], post_revision=context["post_revision"])
+        if current != context:
+            raise LiveOrderError("live_cancel_checkpoint_changed")
+
+    def cancel_request(self, client_id, *, authorization_sha256=None):
+        with self._transaction() as conn:
+            now = self._clock(self.clock())
+            self._authorize_cancel(conn, client_id, now, authorization_sha256)
+            return self._cancel_plan(conn, client_id, now)[0]
+
+    def begin_cancel(self, client_id, *, authorization_sha256=None):
+        with self._mutation(), self._transaction() as conn:
+            now = self._clock(self.clock())
+            self._authorize_cancel(conn, client_id, now, authorization_sha256)
             plan, evidence = self._cancel_plan(conn, client_id, now)
             digest = hashlib.sha256(plan.body).hexdigest()
             claim = self.posts.require_operation("cancel", digest)
@@ -747,10 +868,10 @@ class LiveOrderJournal(OrderJournal):
         ):
             raise LiveOrderError("live_cancel_claim_integrity_failed")
 
-    def validate_cancel_dispatch(self, client_id, plan):
+    def validate_cancel_dispatch(self, client_id, plan, *, authorization_sha256=None):
         with self._transaction() as conn:
             now = self._clock(self.clock())
-            self._authorize(conn, now)
+            self._authorize_cancel(conn, client_id, now, authorization_sha256, claimed=True)
             current, evidence = self._cancel_plan(conn, client_id, now, claimed=True)
             if current != plan:
                 raise LiveOrderError("live_cancel_plan_changed")

@@ -8,7 +8,8 @@
 
 既存の`LiveOrderJournal`と、その台帳に永久登録したPOST制御を使います。
 発注と同じ期限付きの有効化、現在コードの識別子、元のGET制御の使用可能状態を確認します。
-停止・許可失効・コード変更では送信を拒否します。停止済み台帳の取消を特別に許可する経路は未実装です。
+通常の経路は停止・許可失効・コード変更で送信を拒否します。
+対象を指定した明示的な取消許可は、下記の別手続きで保存します。
 キーの自動読込、CLI発注、一括検索による全注文取消はありません。
 
 取消前に、保存済み注文が`WORKING`、`PARTIAL`、またはGET証拠を持つ`RECONCILING`であることを
@@ -19,7 +20,56 @@
 GET証拠の`executions_complete=false`を完全性の証明へ変換せず、そのまま取消に使えます。
 この操作は新しい注文を作らないため、新規発注用の気配・最新全口座証拠を要求しません。
 損失による新規停止`entry_halted`も保持したまま取消できます。注文・現金・建玉の予約を
-取消受付だけで解放しません。口座全体の不整合や明示停止では送信を許可しません。
+取消受付だけで解放しません。口座全体の不整合や明示停止では通常の送信を許可しません。
+
+## 停止を保持した対象限定の取消許可
+
+`cancel_context(client_id)`で、対象注文、GET証拠、台帳の識別子・許可・停止・口座ゲート、
+現在コード、履歴末尾、POST世代と本文を含むcheckpoint SHA-256を確認します。
+この取得はローカルのみで、資格情報や通信を使いません。
+`authorize_cancel`は口座本人性・業者条件・読取受入の参照とSHA-256、確認事項、
+期限付きの`CancelApproval`を受け取り、`CANCEL_AUTHORIZED`をcommitします。
+参照は運用者が確認した証拠であり、コードが口座本人性を自動証明するものではありません。
+
+```python
+from trading.live_journal import CancelApproval
+
+context = journal.cancel_context(client_id)
+approval = CancelApproval(
+    account_id=context["account_id"],
+    checkpoint_sha256=context["checkpoint_sha256"],
+    accepted_at=accepted_at,  # timezone付きdatetime
+    expires_at=expires_at,  # accepted_atから最大10分
+    evidence=verified_cancel_evidence,  # identity / rules / read_acceptanceを各一件
+)
+permission = journal.authorize_cancel(
+    client_id,
+    approval,
+    confirmations={
+        "cancel-only",
+        "account-identity",
+        "broker-rules",
+        "read-acceptance",
+        "external-writers-paused",
+        "preserve-stops",
+    },
+)
+receipt = client.cancel(client_id, authorization_sha256=permission)
+```
+
+この許可で`STOPPED`の台帳、期限切れ・コード更新後の通常許可に紐付いた残注文を取消できます。
+台帳の停止、旧発注許可、損失停止、口座証拠、消費済み送信を保持し、新規・決済の許可は更新しません。
+口座全体が未確認でも、対象の正しい業者IDと履歴、鮮度は通常取消と同じ基準で検査します。
+GET制御が停止中、POSTが停止中・使用中・結果不明なら許可を保存・送信できません。
+未解決POST claimを解放して取消する経路ではありません。
+
+送信前、1.1秒の待機後、HTTP直前に同じ許可を検査します。許可保存以降の照合・口座更新・
+緊急停止・コード変更・別POST操作・新たな取消許可は古い許可を無効にします。
+GET証拠の鮮度期限も維持し、長い許可期限で延長しません。
+変更があればcontextを取得し直し、証拠を確認して改めて許可します。
+取消claimを消費した後は、再承認しても同じ注文を再送できません。
+送信後に許可失効や緊急停止が起きても、正しい受付記録は保存して停止を維持します。
+未使用の許可は再起動後も保存済みcheckpointを検査して使えます。自動送信は行いません。
 
 ## 送信と受付
 
@@ -56,7 +106,7 @@ HTTPの固定ホスト・TLS・無再試行・期限・サイズ制限と認証�
 中断した取消は[GET照合CLI](order-recovery.md)で調べられます。
 元の注文の業者IDを指定し、取消claim・要求ハッシュ・元の証拠を含むcontextを確認します。
 後続GETで部分約定が増えても、取消を開始した時点の証拠を履歴から検証します。
-調査後もPOST claimと停止を保持します。取消受付の不在、停止後の取消許可、claim解放と
+調査後もPOST claimと停止を保持します。取消受付の不在、claim解放と
 明示再開、再試行の可否は別の運用工程です。
 
 ## 検証
@@ -68,3 +118,9 @@ HTTPの固定ホスト・TLS・無再試行・期限・サイズ制限と認証�
 再送拒否と同じGET制御での調査、停止とclaimの保持を確認しました。
 実口座への取消、実資格情報の読込、Windowsタスクの変更は行っていません。
 全1942テストとRuffの検査・整形確認が合格しました。
+
+対象限定の取消許可は追加41試験で、停止・通常許可失効・コード更新、参照・期限の検査、
+待機後とHTTP直前の変更、送信後の失効・停止、結果不明POSTの保持を検証しました。
+実プロセスを許可commit後・取消claim後・受付commit後に終了させ、保存済み許可の検査、
+一度だけの試行、GET調査との互換性を確認しています。
+追加後の全1983テストとRuffの検査・整形確認が合格しました。

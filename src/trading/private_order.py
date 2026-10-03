@@ -121,7 +121,7 @@ class PrivateOrderClient:
             raise OrderTransportError("order_response_deadline_exceeded")
         return elapsed
 
-    def _http(self, client_id, plan):
+    def _http(self, client_id, plan, *, cancellation_authorization=None):
         request = response = None
         try:
             started_at = self._now()
@@ -147,7 +147,9 @@ class PrivateOrderClient:
                 raise OrderTransportError("invalid_order_transport_clock")
             is_cancel = plan.path == "/v1/cancelOrders"
             if is_cancel:
-                self.journal.validate_cancel_dispatch(client_id, plan)
+                self.journal.validate_cancel_dispatch(
+                    client_id, plan, authorization_sha256=cancellation_authorization
+                )
             else:
                 self.journal.validate_dispatch(client_id, plan)
             if self._elapsed(started) > 1:
@@ -276,13 +278,15 @@ class PrivateOrderClient:
                     raise
                 raise OrderTransportError("order_submission_unknown") from None
 
-    def cancel(self, client_id):
+    def cancel(self, client_id, *, authorization_sha256=None):
         """One cancellation attempt for a positively identified active order."""
         with self._lock:
             if self._closed:
                 raise OrderTransportError("order_client_closed")
             try:
-                plan = self.journal.cancel_request(client_id)
+                plan = self.journal.cancel_request(
+                    client_id, authorization_sha256=authorization_sha256
+                )
             except Exception:
                 raise OrderTransportError("cancel_preflight_refused") from None
             entered = claimed = refused = False
@@ -292,14 +296,22 @@ class PrivateOrderClient:
                 ):
                     entered = True
                     try:
-                        current = self.journal.begin_cancel(client_id)
+                        current = (
+                            self.journal.begin_cancel(client_id)
+                            if authorization_sha256 is None
+                            else self.journal.begin_cancel(
+                                client_id, authorization_sha256=authorization_sha256
+                            )
+                        )
                     except OrderBlocked:
                         refused = True  # Known refusal before consuming a cancel attempt or HTTP.
                     else:
                         claimed = True
                         if current != plan:
                             raise OrderTransportError("cancel_plan_changed")
-                        receipt = self._http(client_id, current)
+                        receipt = self._http(
+                            client_id, current, cancellation_authorization=authorization_sha256
+                        )
                         self.journal.acknowledge_cancel(receipt)
                 if refused:
                     raise OrderTransportError("cancel_preflight_refused")
