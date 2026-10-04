@@ -24,6 +24,7 @@ from trading.execution_lab import fixture_evidence
 from trading.live_journal import LiveOrderError, LiveOrderJournal
 from trading.paper_runner import python_process_args
 from trading.private_operations import OperationsError, PrivateOperations, _hash, _json
+from trading.stream_control import StreamControlError
 
 
 @pytest.fixture(autouse=True)
@@ -569,3 +570,32 @@ def test_binding_cli_context_and_registration_are_local_and_hide_invalid_argumen
     with pytest.raises(SystemExit):
         private_order_operations.main(["context", *common, "--key=secret-do-not-echo"])
     assert "secret-do-not-echo" not in capsys.readouterr().err
+
+
+def test_restart_and_resolution_hold_an_idle_sync_across_the_generation_change(setup):
+    values, live, _, _, _ = setup
+    journal, workspace = live[3], values[5]
+    # A running sync would be refused by the new POST generation, then the watchdog
+    # would stop the restarted orders, so both procedures refuse while it runs.
+    with pytest.raises(LiveOrderError, match="live_sync_running"):
+        with journal._sync_idle():
+            pass
+    workspace.control.finish(
+        workspace.control.snapshot()["owner"], workspace.journal, reason="closed"
+    )
+    release(setup)
+    with journal._sync_idle():
+        # While held, no sync process can start with handles from the old generation.
+        with pytest.raises(StreamControlError, match="stream_owner_busy"):
+            with workspace.control.ownership():
+                pass
+    with workspace.control.ownership():
+        pass  # Released afterwards.
+
+
+def test_an_interrupted_sync_must_be_recovered_before_restart_or_resolution(setup):
+    live = setup[1]
+    release(setup)  # The owner is gone, but the saved phase is still RUNNING.
+    with pytest.raises(LiveOrderError, match="live_sync_recovery_required"):
+        with live[3]._sync_idle():
+            pass

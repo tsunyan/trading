@@ -1,6 +1,7 @@
 """Original sync/watchdog prerequisites for a registered live dispatch environment."""
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -105,6 +106,41 @@ class LiveOperations:
             and stamp.utcoffset() is not None
             and 0 <= (now - stamp).total_seconds() <= limit
         )
+
+    @contextmanager
+    def sync_idle(self):
+        """Hold the sync's OS lease so no sync process runs, or can start, meanwhile.
+
+        Restart and claim resolution advance the POST generation, which refuses every
+        older handle, including a running sync's; that sync would stop and the watchdog
+        would then stop the just-restarted orders. The sync must be idle (READY or
+        STOPPED) and is started again, with new handles, afterwards.
+        """
+        from trading.private_sync import PrivateSyncWorkspace
+
+        try:
+            workspace = PrivateSyncWorkspace(
+                self.binding.sync_directory, clock=self.clock, monotonic=self.monotonic
+            )
+            if workspace.control.snapshot()["instance"] != self.binding.sync_instance:
+                raise LiveOperationsError("live_operations_binding_changed")
+            lease = workspace.control.ownership()
+            lease.__enter__()
+        except LiveOperationsError:
+            raise
+        except StreamControlError as error:
+            if str(error) == "stream_owner_busy":
+                raise LiveOperationsError("live_sync_running") from None
+            raise LiveOperationsError("live_operations_unavailable") from None
+        except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):
+            raise LiveOperationsError("live_operations_unavailable") from None
+        try:
+            if workspace.control.snapshot()["phase"] == "RUNNING":
+                # RUNNING without an owner is an interrupted sync: recover it first.
+                raise LiveOperationsError("live_sync_recovery_required")
+            yield
+        finally:
+            lease.__exit__(None, None, None)
 
     def require_healthy(self, now):
         from trading.private_operations import CONDITIONS

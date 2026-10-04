@@ -679,10 +679,32 @@ class LiveOrderJournal(OrderJournal):
         with self._transaction() as conn:
             return self._restart_context(conn, self._clock(self.clock()))
 
+    @contextmanager
+    def _sync_idle(self):
+        """For registered environments: no sync may run across a POST generation change."""
+        with self._transaction() as conn:
+            operations = self._live_state(conn).operations
+        if operations is None:
+            yield
+            return
+        with self._transaction() as conn:
+            target = self._operations_target(self._live_state(conn), operations.sync_instance)
+        try:
+            idle = LiveOperations(
+                operations, target, clock=self.clock, monotonic=self.posts._mono
+            ).sync_idle()
+            idle.__enter__()
+        except LiveOperationsError as error:
+            raise LiveOrderError(str(error)) from None
+        try:
+            yield
+        finally:
+            idle.__exit__(None, None, None)
+
     def restart(self, acceptance, *, confirmations):
         acceptance = LiveRestartApproval.model_validate(acceptance.model_dump())
         approval = acceptance.approval
-        with self._lock, self.posts._ownership() as owner:
+        with self._sync_idle(), self._lock, self.posts._ownership() as owner:
             with self._transaction() as conn:
                 now = self._clock(self.clock())
                 context = self._restart_context(conn, now)
@@ -1455,7 +1477,7 @@ class LiveOrderJournal(OrderJournal):
         confirmations = frozenset(confirmations)
         if confirmations not in {RESOLUTION_CONFIRMATIONS, ACTIVE_RESOLUTION_CONFIRMATIONS}:
             raise LiveOrderError("explicit_order_resolution_confirmations_required")
-        with self._lock, self.posts._ownership() as owner:
+        with self._sync_idle(), self._lock, self.posts._ownership() as owner:
             with self._transaction() as conn:
                 now = self._clock(self.clock())
                 context = self._resolution_context(conn, client_id, now)
