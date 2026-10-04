@@ -26,7 +26,7 @@ from trading.broker_contracts import (
     parse_evidence,
     validate_evidence,
 )
-from trading.order_receipts import SubmissionReceipt, parse_submission_receipt
+from trading.order_receipts import BROKER_CODE, SubmissionReceipt, parse_submission_receipt
 from trading.order_states import TERMINAL
 
 SCHEMA = """
@@ -293,14 +293,18 @@ class OrderJournal:
             self._event(conn, client_id, "SUBMITTING", payload)
         return request, blocked
 
-    def unknown(self, client_id: str):
-        """Timeout/error/malformed response: keep the intent, never free its ID."""
+    def unknown(self, client_id: str, *, broker_codes=()):
+        """Timeout/error/malformed response: keep the intent, never free its ID.
+
+        Fixed broker codes are kept for review; they never settle the outcome.
+        """
+        codes = sorted({c for c in broker_codes if BROKER_CODE.fullmatch(c)})[:5]
         with self._transaction() as conn:
             row = self._row(conn, client_id)
             if row["state"] in TERMINAL or row["state"] == "PREPARED":
                 raise OrderBlocked("order has no ambiguous in-flight operation")
             conn.execute("UPDATE orders SET state='UNKNOWN' WHERE client_id=?", (client_id,))
-            self._event(conn, client_id, "UNKNOWN", {})
+            self._event(conn, client_id, "UNKNOWN", {"broker_error_codes": codes} if codes else {})
 
     def abandon(self, client_id: str):
         """Only a provably never-claimed intent can be locally abandoned."""

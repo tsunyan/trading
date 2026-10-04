@@ -1694,6 +1694,8 @@ class LiveOrderJournal(OrderJournal):
             "implementation_sha256": self._current_implementation(),
             "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
             "absent_state": row["state"],
+            # Reviewed with the approval; a code alone never proves the order was refused.
+            "broker_error_codes": self._broker_codes(conn, client_id),
             "observation_id": observed["id"],
             "observation_sha256": _hash(observed["payload_json"]),
         }
@@ -1876,9 +1878,18 @@ class LiveOrderJournal(OrderJournal):
         with self._mutation():
             return super().acknowledge_submission(receipt)
 
-    def unknown(self, client_id):
+    def unknown(self, client_id, *, broker_codes=()):
         with self._mutation():
-            return super().unknown(client_id)
+            return super().unknown(client_id, broker_codes=broker_codes)
+
+    @staticmethod
+    def _broker_codes(conn, client_id):
+        codes = set()
+        for (payload,) in conn.execute(
+            "SELECT payload_json FROM events WHERE client_id=? AND kind='UNKNOWN'", (client_id,)
+        ):
+            codes.update(json.loads(payload).get("broker_error_codes", []))
+        return sorted(codes)
 
     def abandon(self, client_id):
         with self._mutation():

@@ -16,6 +16,7 @@ from trading.live_journal import LiveOrderJournal
 from trading.order_journal import OrderBlocked
 from trading.order_receipts import (
     MAX_RECEIPT_BYTES,
+    broker_error_codes,
     parse_cancellation_receipt,
     parse_submission_receipt,
 )
@@ -35,6 +36,14 @@ def _credential(value):
     if not text.isascii() or any(ord(c) < 33 or ord(c) == 127 for c in text):
         raise OrderTransportError("invalid_order_credentials")
     return value
+
+
+class BrokerCodes(OrderTransportError):
+    """A non-zero broker status with fixed codes; the submission outcome stays unknown."""
+
+    def __init__(self, codes):
+        super().__init__(f"order_submission_unknown:broker_codes={','.join(codes)}")
+        self.codes = codes
 
 
 class NotSent(Exception):
@@ -218,13 +227,20 @@ class PrivateOrderClient:
                 intent = OrderIntent.model_validate_json(
                     self.journal._row(conn, client_id)["intent_json"]
                 )
-            return parse_submission_receipt(
-                intent,
-                bytes(content),
-                started_at=started_at,
-                received_at=received_at,
-                clock_skew_ms=self._skew,
-            )
+            try:
+                return parse_submission_receipt(
+                    intent,
+                    bytes(content),
+                    started_at=started_at,
+                    received_at=received_at,
+                    clock_skew_ms=self._skew,
+                )
+            except ValueError:
+                codes = broker_error_codes(bytes(content))
+                if not codes:
+                    raise
+                # Still an unknown outcome; the codes only guide the operator's review.
+                raise BrokerCodes(codes) from None
         finally:
             try:
                 if response is not None:
@@ -237,9 +253,9 @@ class PrivateOrderClient:
                         for header in ("API-KEY", "API-SIGN"):
                             request.headers.pop(header, None)
 
-    def _unknown(self, client_id):
+    def _unknown(self, client_id, broker_codes=()):
         try:
-            self.journal.unknown(client_id)
+            self.journal.unknown(client_id, broker_codes=broker_codes)
         except Exception:
             pass  # The committed SUBMITTING claim also refuses replay.
         try:
@@ -303,9 +319,9 @@ class PrivateOrderClient:
                 if not_sent is not None:
                     raise OrderTransportError(f"order_not_sent:{not_sent}")
                 return receipt
-            except OrderTransportError:
+            except OrderTransportError as error:
                 if entered and not refused and not_sent is None:
-                    self._unknown(client_id)
+                    self._unknown(client_id, getattr(error, "codes", ()))
                 raise
             except PostControlError:
                 if entered and not refused:

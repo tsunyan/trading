@@ -270,3 +270,64 @@ def test_absence_approval_builder_and_cli_resolve_without_http(
     result = json.loads(capsys.readouterr().out)
     assert result["order_state"] == "ABANDONED" and result["post_claim_resolved"]
     assert reopen(setup)[3].snapshot()["orders"][0]["state"] == "ABANDONED"
+
+
+def refused_by_broker(setup, codes=("ERR-201",)):
+    clock, _, _, journal = setup
+    order = ready(setup)
+    body = {
+        "status": 1,
+        "messages": [{"message_code": c, "message_string": "SECRET-FREE-TEXT"} for c in codes],
+        "responsetime": clock.now.isoformat(),
+    }
+    with __import__("test_private_order").client(
+        setup, lambda _: httpx.Response(200, json=body)
+    ) as sender:
+        with pytest.raises(ValueError, match="order_submission_unknown:broker_codes=") as raised:
+            sender.submit(order.client_id, quote=quote(clock.now))
+    clock.advance(1)
+    return order, str(raised.value)
+
+
+def test_broker_error_codes_are_kept_for_review_but_the_outcome_stays_unknown(setup):
+    from trading.live_doctor import diagnose
+
+    clock, _, posts, journal = setup
+    order, message = refused_by_broker(setup, ("ERR-201", "ERR-5008"))
+    assert message.endswith("broker_codes=ERR-201,ERR-5008")
+    assert journal.snapshot()["orders"][0]["state"] == "UNKNOWN"
+    assert posts.snapshot()["claim"] is not None  # Never released by a code alone.
+    with sqlite3.connect(journal.path) as conn:
+        dump = "\n".join(conn.iterdump())
+    assert "SECRET-FREE-TEXT" not in dump
+    report = diagnose(journal, clock.now)
+    assert report["orders"][0]["broker_error_codes"] == {
+        "ERR-201": "取引余力不足",
+        "ERR-5008": "リクエスト時刻が遅い",
+    }
+    observe(setup, order)
+    context = journal.order_absence_context(order.client_id)
+    assert context["broker_error_codes"] == ["ERR-201", "ERR-5008"]
+
+
+@pytest.mark.parametrize(
+    "payload,codes",
+    [
+        (b'{"status":1,"messages":[{"message_code":"ERR-201"}]}', ("ERR-201",)),
+        (b'{"status":0,"messages":[{"message_code":"ERR-201"}]}', ()),
+        (b'{"status":1,"messages":[{"message_code":"201; DROP"}]}', ()),
+        (b'{"status":"1","messages":[{"message_code":"ERR-201"}]}', ()),
+        (b'{"status":true,"messages":[{"message_code":"ERR-201"}]}', ()),
+        (b"not json", ()),
+        (
+            b'{"status":5,"messages":['
+            + b",".join(b'{"message_code":"ERR-%d"}' % i for i in range(1, 9))
+            + b"]}",
+            ("ERR-1", "ERR-2", "ERR-3", "ERR-4", "ERR-5"),
+        ),
+    ],
+)
+def test_only_fixed_codes_from_a_nonzero_status_are_extracted(payload, codes):
+    from trading.order_receipts import broker_error_codes
+
+    assert broker_error_codes(payload) == codes
