@@ -60,6 +60,14 @@ def test_open_then_closed_position_reports_realized_net_and_risk_room(tmp_path):
     )
     result = report(journal)
     assert result["totals"] == {"realized": "100", "fees": "6", "settled_swap": "0", "net": "94"}
+    # One closing order: +100 realized minus its own 3 fee; the opening fee stays in totals.
+    assert result["closed_trades"] == {
+        "count": 1,
+        "wins": 1,
+        "losses": 0,
+        "win_rate": "1",
+        "profit_factor": None,
+    }
     assert [o["state"] for o in result["orders"]] == ["FILLED", "FILLED"]
     assert len(result["equity_history"]) == 2 and not result["broker_verified"]
 
@@ -69,6 +77,7 @@ def test_empty_journal_and_history_limits(tmp_path):
     empty = report(journal)
     assert empty["account"] is None and empty["orders"] == [] and empty["equity_history"] == []
     assert empty["totals"]["net"] == "0"
+    assert empty["closed_trades"]["count"] == 0 and empty["closed_trades"]["win_rate"] is None
     for history in (-1, 1001, True):
         with pytest.raises(ValueError):
             report(journal, history=history)
@@ -130,3 +139,18 @@ def test_executions_export_lists_every_fill_once_and_never_overwrites(tmp_path):
     assert rows[0]["fee"] == "3" and rows[0]["effect"] == "OPEN"
     with pytest.raises(FileExistsError):
         write_csv(items, path)
+
+
+def test_trade_stats_count_wins_losses_and_profit_factor():
+    from decimal import Decimal
+
+    from trading.live_report import _trade_stats
+
+    stats = _trade_stats([Decimal("120"), Decimal("-40"), Decimal("-20"), Decimal("0")])
+    assert stats == {
+        "count": 4,
+        "wins": 1,
+        "losses": 2,
+        "win_rate": "0.25",
+        "profit_factor": "2",
+    }

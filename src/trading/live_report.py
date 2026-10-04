@@ -35,6 +35,24 @@ def read_dispatches(path):
     return quotes
 
 
+def _trade_stats(outcomes):
+    """Closing-order outcomes net of their own fees and swaps; opening fees are excluded."""
+    wins = [o for o in outcomes if o > 0]
+    losses = [o for o in outcomes if o < 0]
+    gross_loss = -sum(losses, Decimal(0))
+    return {
+        "count": len(outcomes),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": _money(Decimal(len(wins)) / len(outcomes)) if outcomes else None,
+        "profit_factor": (
+            _money((sum(wins, Decimal(0)) / gross_loss).quantize(Decimal("0.0001")))
+            if gross_loss
+            else None
+        ),
+    }
+
+
 def report(journal, *, history=24, dispatches=None):
     if type(history) is not int or not 0 <= history <= 1000:
         raise ValueError("invalid_history_length")
@@ -53,6 +71,7 @@ def report(journal, *, history=24, dispatches=None):
     peak = Decimal(gate["peak"])
     orders, realized, fees, swaps = [], Decimal(0), Decimal(0), Decimal(0)
     cost, measured = Decimal(0), 0
+    outcomes = []
     dispatches = dispatches or {}
     for row in rows:
         intent = OrderIntent.model_validate_json(row["intent_json"])
@@ -91,6 +110,11 @@ def report(journal, *, history=24, dispatches=None):
                 item["slippage"] = _money(slip)
                 cost += slip * filled
                 measured += 1
+            if intent.effect == "CLOSE":
+                # One closing order is one realized trade outcome, net of its own costs.
+                outcomes.append(
+                    sum((e.loss_gain + e.settled_swap - e.fee for e in fills), Decimal(0))
+                )
             realized += sum((e.loss_gain for e in fills), Decimal(0))
             fees += sum((e.fee for e in fills), Decimal(0))
             swaps += sum((e.settled_swap for e in fills), Decimal(0))
@@ -124,6 +148,7 @@ def report(journal, *, history=24, dispatches=None):
             "settled_swap": _money(swaps),
             "net": _money(realized + swaps - fees),
         },
+        "closed_trades": _trade_stats(outcomes),
         "orders": orders,
         "execution": {"orders_measured": measured, "slippage_cost": _money(cost)},
         "equity_history": [
