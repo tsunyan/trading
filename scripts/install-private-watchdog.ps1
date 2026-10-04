@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Directory,
     [int]$IntervalSeconds = 60,
+    [int]$SyncDurationSeconds = 0,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -12,8 +13,12 @@ if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
 $resolvedDirectory = (Resolve-Path -LiteralPath $Directory).Path
 Push-Location $workspace
 try {
-    $planText = & $python -m trading.private_tasks plan --directory $resolvedDirectory `
-        --interval-seconds $IntervalSeconds
+    $planArguments = @('-m', 'trading.private_tasks', 'plan', '--directory', $resolvedDirectory,
+        '--interval-seconds', $IntervalSeconds)
+    if ($SyncDurationSeconds -gt 0) {
+        $planArguments += @('--sync-duration-seconds', $SyncDurationSeconds)
+    }
+    $planText = & $python @planArguments
     if ($LASTEXITCODE -ne 0) { throw 'Private watchdog plan failed; inspect local saved state.' }
     $plan = ($planText -join "`n") | ConvertFrom-Json
 } finally {

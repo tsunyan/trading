@@ -162,6 +162,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-private-
 間隔は`-IntervalSeconds`で30秒から停滞閾値まで指定できます。
 同時起動はIgnoreNew、実行上限は90秒です。ログイン中の同じユーザーで、管理者権限を要求せずに動きます。
 同期の開始は[読取CLI](private-sync.md)から別に行います。タスクは監視・実発注台帳の停止・通知を担当します。
+
+`-SyncDurationSeconds`（3600〜604800）を指定すると、`TradingLab-Private-<同期識別子>-Sync`も登録します。
+同じ間隔で`private_sync continue`を実行し、同期が正常終了（READY）していれば保存済みの状態から
+指定秒数の同期を始めます。実行中は同時起動しません。STOPPEDや強制終了で残ったRUNNINGからは
+続行せず、資格情報を読む前に失敗します。その場合は監視の通知を確認し、明示復旧を行います。
+実行上限は指定秒数に600秒を加えた値です。
 同じ場所の`pythonw.exe`が利用できるWindows環境では、監視タスクのコンソールを表示しません。
 利用できない場合は従来のインタープリターを使います。既存タスクへの適用は再登録時です。
 

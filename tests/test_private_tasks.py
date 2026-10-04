@@ -139,3 +139,17 @@ def test_cli_emits_valid_plan_and_fixed_failure_codes(workspace, capsys):
         "ok": False,
         "reason": "private_task_plan_failed",
     }
+
+
+def test_optional_sync_task_continues_only_through_the_ready_checkpoint(workspace):
+    plan = task_plan(workspace.directory, sync_duration_seconds=86400)
+    assert len(plan["tasks"]) == 2
+    sync = plan["tasks"][1]
+    assert sync["name"].endswith("-Sync") and sync["execution_limit_seconds"] == 87000
+    assert "trading.private_sync" in sync["arguments"] and " continue " in sync["arguments"]
+    assert "--read-only-confirmed" in sync["arguments"]
+    assert "--expected-revision" not in sync["arguments"]
+    assert "credential_reference" not in json.dumps(plan)
+    for invalid in (True, 3599, 604801):
+        with pytest.raises(OperationsError, match="sync_duration_invalid"):
+            task_plan(workspace.directory, sync_duration_seconds=invalid)

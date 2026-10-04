@@ -160,6 +160,14 @@ uv run python -m trading.private_sync run --directory runs/private-sync --expect
 凍結した設定の項目・ハッシュは変更しません。業者の評価・証拠金式は実確認が必要なため、
 CLIが推測した式で評価診断を有効化することはありません。
 
+正常終了（READY）からの続行は`continue`でも行えます。現在の固定設定のハッシュ・制御のrevision・
+受信記録の末尾を保存済みの状態から読み、`run`と同じ検査で開始します。READY以外の状態や、
+期待値の引数を指定した場合は拒否します。STOPPEDや強制終了後のRUNNINGは引き続き明示復旧が必要です。
+
+```powershell
+uv run python -m trading.private_sync continue --directory runs/private-sync --duration-seconds 86400 --read-only-confirmed
+```
+
 `--duration-seconds`は1〜604,800秒で、購読開始後からの実行上限です。
 時間到達またはCtrl+C/SIGTERMで終了処理に入ります。受信約定・ACK・後片付けが解決している正常終了は
 READYへ戻ります。問題が残る場合はSTOPPEDを保存します。OSによる強制終了はRUNNINGを残し、

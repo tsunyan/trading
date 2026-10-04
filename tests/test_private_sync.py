@@ -842,3 +842,36 @@ def test_cli_failure_shows_only_fixed_local_reason_codes(setup, capsys):
     assert re.fullmatch(
         r"Private sync failed; inspect local control state\. reason=[a-z0-9_]+\n", err
     )
+
+
+def test_cli_continue_runs_from_the_saved_ready_checkpoint_only(setup, monkeypatch, capsys):
+    _, _, _, _, _, workspace = setup
+    calls = []
+
+    def run(stop, **arguments):
+        calls.append(arguments)
+        return {"phase": "READY"}
+
+    monkeypatch.setattr(workspace, "run", run)
+    monkeypatch.setattr(private_sync, "PrivateSyncWorkspace", lambda _: workspace)
+    base = ["continue", "--directory", str(workspace.directory), "--duration-seconds", "60"]
+    main([*base, "--read-only-confirmed"])
+    assert json.loads(capsys.readouterr().out)["ok"]
+    assert calls[-1]["expected_plan_sha256"] == workspace.plan_sha256
+    assert calls[-1]["expected_revision"] == workspace.control.snapshot()["revision"]
+    assert calls[-1]["expected_head"] == workspace.journal.head()
+    assert calls[-1]["read_only_confirmed"] is True
+    with pytest.raises(SystemExit):
+        main([*base, "--read-only-confirmed", "--expected-revision", "0"])
+    assert "reason=continue_uses_saved_checkpoint" in capsys.readouterr().err
+    with workspace.control.ownership():
+        owner = workspace.control.begin(
+            workspace.journal,
+            expected_revision=workspace.control.snapshot()["revision"],
+            expected_head=workspace.journal.head(),
+        )["owner"]
+        workspace.control.finish(owner, workspace.journal, reason="stream_failed")
+    with pytest.raises(SystemExit):
+        main([*base, "--read-only-confirmed"])
+    assert "reason=continue_requires_ready" in capsys.readouterr().err
+    assert len(calls) == 1

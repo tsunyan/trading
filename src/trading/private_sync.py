@@ -756,6 +756,7 @@ def main(argv=None):
             "init",
             "status",
             "run",
+            "continue",
             "recover",
             "init-orders",
             "register-order",
@@ -829,10 +830,28 @@ def main(argv=None):
                     expected_reason=args.expected_reason,
                     read_only_confirmed=args.read_only_confirmed,
                 )
-            elif args.command == "run":
+            elif args.command in {"run", "continue"}:
                 if threading.current_thread() is threading.main_thread():
                     for sig in (signal.SIGINT, signal.SIGTERM):
                         previous[sig] = signal.signal(sig, lambda *_: stop_event.set())
+                if args.command == "continue":
+                    # Only a clean READY end continues on its own saved checkpoint. STOPPED
+                    # and an abandoned RUNNING still require the explicit recovery path.
+                    if any(
+                        value is not None
+                        for value in (
+                            args.expected_plan_sha256,
+                            args.expected_revision,
+                            args.expected_head,
+                        )
+                    ):
+                        raise PrivateSyncError("continue_uses_saved_checkpoint")
+                    control = workspace.control.snapshot()
+                    if control["phase"] != "READY":
+                        raise PrivateSyncError("continue_requires_ready")
+                    args.expected_plan_sha256 = workspace.plan_sha256
+                    args.expected_revision = control["revision"]
+                    args.expected_head = workspace.journal.head()
                 result = workspace.run(
                     stop_event,
                     duration_seconds=args.duration_seconds,
