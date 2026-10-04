@@ -312,6 +312,9 @@ def test_refused_context_abandons_the_order_prepared_in_the_same_run(
     # The abandoned row no longer counts as unsettled for later proposals.
     later = cycle(running, tmp_path, prepare=False)
     assert later["decision"]["reason"] != "unsettled_local_order"
+    # The same bar and direction cannot be prepared again under the abandoned client ID.
+    with pytest.raises(LiveCycleError, match="signal_client_id_already_used"):
+        cycle(running, tmp_path, prepare=True)
 
 
 def test_cycle_sizes_auto_units_from_the_refreshed_proof(running, tmp_path):

@@ -214,3 +214,33 @@ def test_cli_requires_confirmations(setup, capsys):
     assert raised.value.code == 2
     assert "history_confirmations_required" in capsys.readouterr().err
     assert values[3].reads == []
+
+
+def test_working_order_resyncs_from_its_saved_evidence(setup):
+    values, live, _, order, _ = setup
+    accept(setup)
+    clock = values[0]
+    sync(setup, [broker_order(order, clock)])
+    clock.advance(1)
+    result, _ = sync(
+        setup, [broker_order(order, clock, status="EXECUTED")], [execution(order, clock)]
+    )
+    assert result["state"] == "FILLED" and result["order_id"] == 201
+
+
+def test_stopped_reads_or_an_in_flight_post_refuse_before_any_read(setup, monkeypatch):
+    values, live, _, order, _ = setup
+    accept(setup)
+    original = type(live[2]).snapshot
+
+    def in_flight(self):
+        return {**original(self), "claim": "c" * 32}
+
+    monkeypatch.setattr(type(live[2]), "snapshot", in_flight)
+    with pytest.raises(LiveOrderSyncError, match="post_claim_in_flight"):
+        sync(setup, [])
+    monkeypatch.undo()
+    live[1].stop("operator_stop")
+    with pytest.raises(LiveOrderSyncError, match="read_control_blocked"):
+        sync(setup, [])
+    assert values[3].reads == []

@@ -465,3 +465,23 @@ def test_cli_inspection_is_local_and_dispatch_requires_explicit_checkpoint(setup
             ]
         )
     assert raised.value.code == 2
+
+
+def test_load_requires_declaration_and_a_bytes_record(setup):
+    _, live, _, order, _ = setup
+    backend, vault, reference = stored(setup)
+    current = quote(live[0].now)
+    expected = live[3].execution_context(order.client_id, quote=current)["checkpoint_sha256"]
+    with pytest.raises(CredentialError, match="order_permission_declaration_required"):
+        vault.load(live[3], reference, order.client_id, expected_sha256=expected, quote=current)
+    assert backend.reads == []
+    backend.records[reference] = backend.records[reference].decode()
+    with pytest.raises(CredentialError, match="invalid_credential_blob"):
+        vault.load(
+            live[3],
+            reference,
+            order.client_id,
+            expected_sha256=expected,
+            quote=current,
+            order_permission_confirmed=True,
+        )
