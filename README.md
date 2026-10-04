@@ -76,7 +76,7 @@ GETの診断結果を発注許可や完全な口座証拠へ自動変換する�
 USD/JPYの実口座発注は、[実発注台帳の作成から確認済み送信までの手順](docs/live-setup.md)にまとめました。
 台帳の作成・有効化、[口座証拠の更新](docs/live-account.md)、[戦略の提案](docs/live-signal.md)、
 [送信直前までの運用サイクル](docs/live-cycle.md)、[確認済み送信](docs/order-runtime.md)、
-[受付済み注文のGET照合](docs/live-order-sync.md)をCLIで行えます。POSTは実行内容のSHA-256を
+[受付済み注文のGET照合](docs/live-order-sync.md)をCLIで行えます。全コマンドは[早見表](docs/live-commands.md)にあります。POSTは実行内容のSHA-256を
 運用者が指定した場合だけ送ります。GMO口座は未準備で、実口座での受入確認は行っていません。口座準備後は[小額の受入試行](docs/live-first-trial.md)から始めます。
 日本株のブローカー接続とJ-Quants自動取得は次段階です。
 移動平均ルールは配線・会計の確認用で、収益性を検証した戦略ではありません。
