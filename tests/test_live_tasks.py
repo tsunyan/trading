@@ -220,8 +220,6 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
             values["credential_reference"],
             "-Config",
             str(values["config"]),
-            "-Units",
-            "1000",
             "-MaxSlippage",
             "0.02",
             "-QuoteOutput",
@@ -230,6 +228,12 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
             str(values["result_output"]),
             "-Confirm",
             ",".join(sorted(CYCLE_CONFIRMATIONS)),
+            "-HistoryOutput",
+            str(tmp_path / "cycles.jsonl"),
+            "-DashboardOutput",
+            str(tmp_path / "live.html"),
+            "-Units",
+            "auto",
             "-PlanOnly",
         ],
         capture_output=True,
@@ -240,7 +244,9 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
     assert process.returncode == 0, process.stderr
     plan = json.loads(process.stdout)
     assert plan["ok"] and not plan["sends_orders"]
-    assert "--prepare" not in plan["tasks"][0]["arguments"]
+    arguments = plan["tasks"][0]["arguments"]
+    assert "--prepare" not in arguments and "--units auto" in arguments
+    assert "--history-output" in arguments and "--dashboard-output" in arguments
 
 
 class ExpiringCycle(FakeCycle):
