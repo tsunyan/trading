@@ -381,7 +381,7 @@ def main(argv=None, *, send=None):
         try:
             from trading.live_dashboard import render, write_page
             from trading.live_doctor import diagnose
-            from trading.live_report import report
+            from trading.live_report import read_dispatches, report
 
             now = datetime.now(UTC)
             candidate = _candidate(args)
@@ -391,9 +391,11 @@ def main(argv=None, *, send=None):
                 candidate=None if candidate is None else (*candidate, load_settings(args.config)),
                 cycle=result,
             )
+            # The submit command writes its dispatch log next to the quote file.
+            dispatches = read_dispatches(Path(args.quote_output).with_name("dispatch.jsonl"))
             page = render(
                 doctor,
-                report(cycle.journal),
+                report(cycle.journal, dispatches=dispatches),
                 result,
                 generated_at=now.isoformat(),
             )
