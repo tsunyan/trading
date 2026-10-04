@@ -24,7 +24,7 @@ from trading.data import validate_bars
 from trading.gmo import GmoPublic
 from trading.order_runtime import _quote
 from trading.private_order_recovery import PrivateOrderRecovery
-from trading.strategy import signal_direction
+from trading.strategy import entry_units, signal_direction
 
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
 
@@ -118,6 +118,9 @@ def decide(
             return {**decision, "action": "hold", "reason": "entry_loss_halt"}
         if quote.ask - quote.bid > Decimal(str(cfg.max_spread)):
             return {**decision, "action": "hold", "reason": "spread_exceeds_entry_limit"}
+        if units == 0:
+            # Auto sizing found no lot the account and limits allow.
+            return {**decision, "action": "hold", "reason": "size_below_minimum"}
         if (
             type(units) is not int
             or not limits.min_units <= units <= limits.max_units
@@ -144,6 +147,29 @@ def decide(
     )
     reason = "flatten_requested" if flatten else "signal_changed"
     return {**decision, "action": action, "reason": reason, "intent": intent}
+
+
+def resolve_units(value, cfg, journal, quote, limits):
+    """An explicit lot, or `auto`: the paper/backtest sizing rule on the proof's equity.
+
+    Auto sizing marks at the ask, rounds down to the journal's unit step and caps at its
+    maximum; 0 means no allowed lot. The send gate still applies every account risk limit.
+    """
+    if value != "auto":
+        try:
+            units = int(value)
+        except (TypeError, ValueError):
+            raise LiveSignalError("invalid_units") from None
+        if str(units) != str(value).strip() or units <= 0:
+            raise LiveSignalError("invalid_units")
+        return units
+    proof = (journal.snapshot()["account_guard"] or {}).get("last_proof")
+    if not proof:
+        raise LiveSignalError("account_proof_required")
+    account = AccountSnapshot.model_validate(proof["snapshot"])
+    sized = entry_units(float(account.balance), float(account.equity), float(quote.ask), cfg)
+    sized = min(sized // limits.unit_step * limits.unit_step, limits.max_units)
+    return sized if sized >= limits.min_units else 0
 
 
 def entry_halted(journal):
@@ -191,7 +217,7 @@ def main(argv=None):
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
     parser.add_argument("--quote", type=Path, required=True)
-    parser.add_argument("--units", type=int, required=True)
+    parser.add_argument("--units", required=True, help="lot size, or auto")
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--flatten", action="store_true")
@@ -201,13 +227,14 @@ def main(argv=None):
         cfg = load_settings(args.config)
         journal = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         positions, pending, limits = journal_state(journal.journal, now)
+        quote = _quote(args.quote)
         decision = decide(
             None if args.flatten else recent_bars(cfg, now),
-            _quote(args.quote),
+            quote,
             cfg,
             positions=positions,
             pending=pending,
-            units=args.units,
+            units=resolve_units(args.units, cfg, journal.journal, quote, limits),
             max_slippage=args.max_slippage,
             limits=limits,
             now=now,

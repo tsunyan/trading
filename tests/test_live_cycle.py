@@ -48,6 +48,7 @@ def cycle(
     confirmations=CYCLE_CONFIRMATIONS,
     flatten=False,
     valuation_tolerance=None,
+    units=1000,
 ):
     values, live, _ = running
     clock = values[0]
@@ -57,7 +58,7 @@ def cycle(
         values[5].plan.credential_reference,
         confirmations=confirmations,
         cfg=CFG,
-        units=1000,
+        units=units,
         max_slippage="0.02",
         prepare=prepare,
         flatten=flatten,
@@ -309,3 +310,9 @@ def test_refused_context_abandons_the_order_prepared_in_the_same_run(
     # The abandoned row no longer counts as unsettled for later proposals.
     later = cycle(running, tmp_path, prepare=False)
     assert later["decision"]["reason"] != "unsettled_local_order"
+
+
+def test_cycle_sizes_auto_units_from_the_refreshed_proof(running, tmp_path):
+    result = cycle(running, tmp_path, prepare=False, units="auto")
+    # 1,000,000 x 20% at the 150.01 ask, stepped to 100s and capped at the 1000 maximum.
+    assert result["decision"]["intent"]["units"] == 1000

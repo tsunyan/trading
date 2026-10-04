@@ -286,3 +286,31 @@ def test_closed_market_holds_signals_and_flatten():
     closed = quote(market_open=False)
     assert run(RISING, current=closed)["reason"] == "market_closed"
     assert flatten((long(),), current=closed)["reason"] == "market_closed"
+
+
+def test_explicit_units_are_parsed_strictly():
+    for good, expected in (("1000", 1000), (2000, 2000)):
+        assert live_signal.resolve_units(good, settings(), None, quote(), LIMITS) == expected
+    for bad in ("0", "-1000", "1e3", "x", "1000.0", None):
+        with pytest.raises(LiveSignalError, match="invalid_units"):
+            live_signal.resolve_units(bad, settings(), None, quote(), LIMITS)
+
+
+def test_auto_units_follow_the_paper_rule_and_journal_limits(tmp_path):
+    from test_account_guard import account
+    from test_account_guard import quote as guard_quote
+    from test_private_order import setup as order_setup
+
+    clock, _, _, journal = order_setup.__wrapped__(tmp_path)
+    with pytest.raises(LiveSignalError, match="account_proof_required"):
+        live_signal.resolve_units("auto", settings(), journal, quote(), journal.limits)
+    journal.update_account(account(clock.now), guard_quote(clock.now), now=clock.now)
+    # 1,000,000 x 20% / 150.01 = 1333 units, stepped to 100s and capped at the 1000 maximum.
+    assert live_signal.resolve_units("auto", settings(), journal, quote(), journal.limits) == 1000
+    small = settings(allocation=0.0001)  # About 0.67 units: below every allowed lot.
+    assert live_signal.resolve_units("auto", small, journal, quote(), journal.limits) == 0
+
+
+def test_zero_units_hold_instead_of_failing():
+    decision = run(RISING, units=0)
+    assert decision["action"] == "hold" and decision["reason"] == "size_below_minimum"

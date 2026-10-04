@@ -44,7 +44,7 @@ def task_plan(
         r"[a-f0-9]{32}", credential_reference
     ):
         raise LiveTaskError("invalid_credential_reference")
-    if type(units) is not int or units <= 0:
+    if units != "auto" and (type(units) is not int or units <= 0):
         raise LiveTaskError("invalid_units")
     for value in (max_slippage, valuation_tolerance):
         if value is not None and not Decimal(str(value)).is_finite():
@@ -119,7 +119,7 @@ def main(argv=None):
     parser.add_argument("--scope", required=True)
     parser.add_argument("--credential-reference", required=True)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--units", type=int, required=True)
+    parser.add_argument("--units", required=True, help="lot size, or auto")
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--result-output", type=Path, required=True)
@@ -133,7 +133,7 @@ def main(argv=None):
             args.scope,
             credential_reference=args.credential_reference,
             config=args.config,
-            units=args.units,
+            units=args.units if args.units == "auto" else int(args.units),
             max_slippage=args.max_slippage,
             quote_output=args.quote_output,
             result_output=args.result_output,

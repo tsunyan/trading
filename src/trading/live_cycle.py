@@ -28,6 +28,7 @@ from trading.live_signal import (
     entry_halted,
     journal_state,
     recent_bars,
+    resolve_units,
     write_intent,
 )
 from trading.order_journal import OrderBlocked
@@ -113,7 +114,7 @@ class LiveCycle:
             cfg,
             positions=positions,
             pending=pending,
-            units=units,
+            units=resolve_units(units, cfg, self.journal, quote, limits),
             max_slippage=max_slippage,
             limits=limits,
             now=now,
@@ -215,7 +216,7 @@ def main(argv=None, *, send=None):
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
     parser.add_argument("--credential-reference", required=True)
-    parser.add_argument("--units", type=int, required=True)
+    parser.add_argument("--units", required=True, help="lot size, or auto")
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--intent-output", type=Path)

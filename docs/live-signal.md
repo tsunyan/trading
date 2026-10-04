@@ -38,6 +38,12 @@ uv run python -m trading.live_signal --config configs/fx.toml --directory runs/l
 
 反転は2回に分かれます。今回は決済だけを提案し、決済の照合と口座証拠の更新後に新規を提案します。
 
+`--units auto`を指定すると、新規の数量をペーパー取引・バックテストと同じ規則（`strategy.entry_units`）で
+決めます。口座証拠の残高・評価額、設定の`allocation`・`max_leverage`・`commission_rate`・`lot_size`・
+`min_units`・`max_units`を使い、売気配で評価します。結果を台帳の数量単位で切り下げ、台帳の最大数量で
+頭打ちにします。台帳の最小数量に届かなければ`size_below_minimum`で見送ります。数量の妥当性は
+送信時の口座リスク検査（注文額・総建玉額・余力など）でも別に判定します。
+
 注文は成行で、価格保護の上限/下限を付けます。買いは「売気配の上の値＋`--max-slippage`」を
 呼値で切り下げ、売りは「買気配−`--max-slippage`」を呼値で切り上げます。
 新規の数量は台帳の注文上限（最小・最大・単位）を満たす必要があります。口座のリスク上限は

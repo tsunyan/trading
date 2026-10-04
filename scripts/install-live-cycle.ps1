@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Scope,
     [Parameter(Mandatory = $true)][string]$CredentialReference,
     [Parameter(Mandatory = $true)][string]$Config,
-    [Parameter(Mandatory = $true)][int]$Units,
+    [Parameter(Mandatory = $true)][string]$Units,
     [Parameter(Mandatory = $true)][string]$MaxSlippage,
     [Parameter(Mandatory = $true)][string]$QuoteOutput,
     [Parameter(Mandatory = $true)][string]$ResultOutput,
