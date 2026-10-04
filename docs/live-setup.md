@@ -87,6 +87,16 @@ uv run python -m trading.live_setup abandon --directory runs/live-orders --read-
 準備済み（PREPARED）で送信claimを一度も取っていない注文だけを破棄できます。送信された可能性がある
 注文は拒否します。準備したまま送らない注文は、次の提案や準備を止めるため破棄してください。
 
+## 監査用のバックアップ
+
+```powershell
+uv run python -m trading.live_setup backup --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --output audit/live-orders-20261004.sqlite
+```
+
+台帳を検査してから、SQLiteのバックアップ機能で一貫した複製を作り、整合性検査・イベント数・SHA-256を
+表示します。既存のファイルは上書きしません。複製は記録の保存と調査のためのもので、台帳を複製で
+置き換える復旧には使えません（台帳はPOST制御と永久に紐付き、巻戻しを検出しません）。
+
 ## 状態確認と停止
 
 送信を止めている条件をまとめて確認するには[送信前の状態診断](live-doctor.md)、損益とリスクの余裕は

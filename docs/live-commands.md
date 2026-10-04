@@ -7,7 +7,7 @@
 | コマンド | 用途 | 鍵 | 通信 | 台帳の変更 |
 | --- | --- | --- | --- | --- |
 | `trading.live_rules check` | 注文上限と業者の取引ルールの照合（[説明](live-rules.md)） | なし | 公開GET | なし |
-| `trading.live_setup create/prepare/abandon/activation-context/activate/status/stop` | 台帳の作成・注文の準備と破棄・有効化・状態・停止（[説明](live-setup.md)） | なし | なし | あり |
+| `trading.live_setup create/prepare/abandon/activation-context/activate/status/stop/backup` | 台帳の作成・注文の準備と破棄・有効化・状態・停止・監査用の複製（[説明](live-setup.md)） | なし | なし | あり |
 | `trading.private_order_operations context/bind` | 同期・監視の登録、停止中の台帳の移行（[説明](live-operations.md)） | なし | なし | あり |
 | `trading.private_sync run/continue/status` | 継続同期の実行と正常終了からの続行（[説明](private-sync.md)） | 読取専用 | GET・WebSocket・通知用トークンのPOST/PUT/DELETE | 同期側 |
 | `trading.private_operations watchdog` | 独立監視と台帳の停止・通知（[説明](private-operations.md)） | なし | なし | 停止のみ |

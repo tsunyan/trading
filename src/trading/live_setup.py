@@ -5,6 +5,7 @@ expiring operator acceptance; this module only moves validated files into the jo
 """
 
 import argparse
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -67,6 +68,27 @@ def activate(journal, approval, *, expected_revision, confirmations):
     return status(journal)
 
 
+def backup(journal, output):
+    """A consistent read-only copy for audit. Restoring a copy is not a supported recovery."""
+    if output is None:
+        raise LiveSetupError("output_required")
+    output = Path(output)
+    if output.exists():
+        raise LiveSetupError("output_exists")
+    with journal._transaction():  # Validates the live state before copying.
+        pass
+    with sqlite3.connect(f"file:{journal.path}?mode=ro", uri=True) as source:
+        with sqlite3.connect(output) as target:
+            source.backup(target)
+    with sqlite3.connect(output) as copy:
+        check = copy.execute("PRAGMA integrity_check").fetchone()[0]
+        events = copy.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    if check != "ok":
+        raise LiveSetupError("backup_integrity_failed")
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    return {"output": str(output), "events": events, "sha256": digest, "restorable": False}
+
+
 def status(journal):
     """A compact view without account values, order bodies or event payloads."""
     snapshot = journal.snapshot()
@@ -101,6 +123,7 @@ def main(argv=None):
             "activation-context",
             "activate",
             "stop",
+            "backup",
         ),
     )
     parser.add_argument("--directory", type=Path, required=True)
@@ -114,6 +137,7 @@ def main(argv=None):
     parser.add_argument("--confirm-stop", action="store_true")
     parser.add_argument("--client-id")
     parser.add_argument("--confirm-abandon", action="store_true")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "create":
@@ -140,6 +164,8 @@ def main(argv=None):
                     raise LiveSetupError("explicit_abandon_confirmation_required")
                 journal.abandon(args.client_id)
                 result = {"client_id": args.client_id, "state": "ABANDONED"}
+            elif args.command == "backup":
+                result = backup(journal, args.output)
             elif args.command == "activation-context":
                 result = journal.activation_context()
             elif args.command == "activate":

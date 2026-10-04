@@ -219,3 +219,19 @@ def test_abandon_requires_confirmation_and_only_unsent_orders(controls, capsys):
         failure(controls, capsys, "abandon", "--client-id", "Buy001", "--confirm-abandon")
         == "live_setup_failed"
     )
+
+
+def test_backup_is_a_consistent_copy_that_never_overwrites(controls, capsys):
+    import sqlite3
+
+    cli(controls, capsys, "create", "--config", str(controls / "config.json"))
+    (controls / "intent.json").write_text(intent().model_dump_json())
+    cli(controls, capsys, "prepare", "--intent", str(controls / "intent.json"))
+    copy = controls / "audit" / "live-backup.sqlite"
+    copy.parent.mkdir()
+    result = cli(controls, capsys, "backup", "--output", str(copy))
+    assert result["events"] >= 1 and result["restorable"] is False and len(result["sha256"]) == 64
+    with sqlite3.connect(copy) as conn:
+        assert conn.execute("SELECT client_id FROM orders").fetchall() == [("Buy001",)]
+    assert failure(controls, capsys, "backup", "--output", str(copy)) == "output_exists"
+    assert failure(controls, capsys, "backup") == "output_required"
