@@ -153,3 +153,35 @@ def test_optional_sync_task_continues_only_through_the_ready_checkpoint(workspac
     for invalid in (True, 3599, 604801):
         with pytest.raises(OperationsError, match="sync_duration_invalid"):
             task_plan(workspace.directory, sync_duration_seconds=invalid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell boundary")
+def test_install_script_plans_the_optional_sync_task(workspace):
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    script = Path(__file__).resolve().parents[1] / "scripts/install-private-watchdog.ps1"
+    process = subprocess.run(
+        [
+            str(powershell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",  # This test process only; user/machine policy stays unchanged.
+            "-File",
+            str(script),
+            "-Directory",
+            str(workspace.directory),
+            "-SyncDurationSeconds",
+            "86400",
+            "-PlanOnly",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    assert process.returncode == 0, process.stderr
+    tasks = json.loads(process.stdout)["tasks"]
+    assert [task["name"].rsplit("-", 1)[1] for task in tasks] == ["Watchdog", "Sync"]
+    assert tasks[1]["execution_limit_seconds"] == 87000
