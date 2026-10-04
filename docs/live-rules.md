@@ -26,6 +26,8 @@ uv run python -m trading.live_rules check --directory runs/live-orders --read-co
 食い違いがある場合は台帳を作り直します（[手順書](live-setup.md)）。
 
 `--output`は取得したルールと照合結果を新しいファイルに保存します（上書きしません）。
+同じフォルダーの一時ファイルに書いてfsyncし、ハードリンクで出力先に置きます。途中で止まっても
+出力先に書きかけのファイルは残らず、証拠として指紋化されるのは完全に書き終えた内容だけです。
 これを[受入証拠](live-acceptance.md)の`rules`として`file-evidence`で指紋化できます。
 公開APIのルールは業者の告知や約款の代わりではありません。決済注文の扱いや取引時間などは別途確認します。
 

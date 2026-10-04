@@ -8,6 +8,7 @@ an immutable evidence file that `live_acceptance file-evidence --kind rules` can
 import argparse
 import json
 import os
+import tempfile
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -91,11 +92,21 @@ def conflicts(limits, rules):
 
 
 def _write_new(path, body):
+    """Publish complete evidence only: write and fsync a private temporary file, then link it
+    into place. Linking fails instead of replacing a file that exists meanwhile, and a
+    crash never leaves a partial file at the final path."""
     path = Path(path)
-    with path.open("xb") as output:  # Evidence is never overwritten.
-        output.write(body)
-        output.flush()
-        os.fsync(output.fileno())  # Durable before it can be fingerprinted as evidence.
+    if path.exists():
+        raise FileExistsError(path.name)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".rules-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as output:
+            output.write(body)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def main(argv=None):

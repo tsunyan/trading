@@ -140,3 +140,22 @@ def test_transport_error_and_slow_body():
     ok = httpx.Response(200, content=body(row()), headers={"content-type": "application/json"})
     with pytest.raises(LiveRulesError, match="public_symbols_deadline_exceeded"):
         fetch_rules(transport=httpx.MockTransport(lambda r: ok), monotonic=lambda: next(ticks))
+
+
+def test_rules_evidence_is_published_complete_and_never_replaced(tmp_path, monkeypatch):
+    from trading import live_rules
+
+    path = tmp_path / "rules.json"
+    live_rules._write_new(path, b'{"complete": true}')
+    assert path.read_bytes() == b'{"complete": true}'
+    with pytest.raises(FileExistsError):
+        live_rules._write_new(path, b"other")
+
+    def crash(*args):
+        raise OSError("power loss")
+
+    monkeypatch.setattr(live_rules.os, "fsync", crash)
+    with pytest.raises(OSError):
+        live_rules._write_new(tmp_path / "partial.json", b"partial")
+    # A failed write leaves neither the final path nor the temporary file behind.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["rules.json"]
