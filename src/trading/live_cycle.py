@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from trading.live_signal import (
     write_intent,
 )
 from trading.order_journal import OrderBlocked
+from trading.paper_runner import _process_lock
 from trading.promotion import PromotionError, require_live
 from trading.windows_notify import send_toast
 
@@ -198,13 +200,26 @@ def notify(kind, reference, *, send=None):
         return False
 
 
-def append_history(result, path):
-    """One JSON line per run; existing lines are never rewritten."""
+def append_history(result, path, *, wait_seconds=5):
+    """One JSON line per run; existing lines are never rewritten.
+
+    A manual run and the scheduled one may append at once, so each append holds an OS
+    lock on a sibling file; if it stays busy the line is reported as not written.
+    """
+    path = Path(path)
     line = json.dumps(result, default=str, ensure_ascii=False, separators=(",", ":"))
-    with Path(path).open("a", encoding="utf-8", newline="\n") as output:
-        output.write(line + "\n")
-        output.flush()
-        os.fsync(output.fileno())
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        with _process_lock(path.with_name(path.name + ".lock")) as owned:
+            if owned:
+                with path.open("a", encoding="utf-8", newline="\n") as output:
+                    output.write(line + "\n")
+                    output.flush()
+                    os.fsync(output.fileno())
+                return
+        if time.monotonic() >= deadline:
+            raise OSError("history_lock_busy")
+        time.sleep(0.05)
 
 
 def write_result(result, path):

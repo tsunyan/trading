@@ -69,15 +69,46 @@ def _sparkline(points, width=640, height=120):
     )
 
 
+TAIL_CHUNK = 64 * 1024
+MAX_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def tail_lines(path, limit):
+    """The last `limit` complete lines, reading backwards from the end in bounded chunks.
+
+    Cost depends on the lines shown, not on the whole history's size.
+    """
+    with Path(path).open("rb") as handle:
+        handle.seek(0, 2)
+        position, buffer = handle.tell(), b""
+        while position > 0 and buffer.count(b"\n") <= limit and len(buffer) < MAX_TAIL_BYTES:
+            step = min(TAIL_CHUNK, position)
+            position -= step
+            handle.seek(position)
+            buffer = handle.read(step) + buffer
+    lines = buffer.split(b"\n")
+    if position > 0:
+        lines = lines[1:]  # Started mid-line.
+    return [line for line in lines if line.strip()][-limit:]
+
+
 def read_history(path, *, limit=24):
-    """The newest cycle results from a JSON Lines history; broken lines are skipped."""
+    """The newest cycle results from a JSON Lines history.
+
+    A damaged line is shown as its own row rather than silently dropped.
+    """
     if path is None or not Path(path).is_file():
         return []
     items = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines()[-limit:]:
+    for line in tail_lines(path, limit):
         try:
-            item = json.loads(line)
+            item = json.loads(line.decode("utf-8"))
         except ValueError:
+            item = None
+        if not isinstance(item, dict):
+            items.append(
+                {"finished_at": None, "ok": None, "action": None, "reason": "damaged_history_line"}
+            )
             continue
         if isinstance(item, dict):
             decision = item.get("decision") or {}

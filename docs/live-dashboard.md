@@ -10,7 +10,8 @@ uv run python -m trading.live_dashboard --directory runs/live-orders --read-cont
 表示する内容は、[送信前の状態診断](live-doctor.md)の各ゲートと送信可否、許可の期限、
 [損益レポート](live-report.md)の口座・リスクの余裕・合計・注文、照合済みの評価額の推移（折れ線）、
 直近の[運用サイクル](live-cycle.md)の結果と、`--history`（サイクルの`--history-output`）がある場合は
-直近24回のサイクルの履歴（新しい順）です。文字列はすべてHTMLとしてエスケープし、
+直近24回のサイクルの履歴（新しい順）です。履歴はファイルの末尾から必要な行だけを読むため、
+履歴が大きくなってもページの作成時間は変わりません。読めない行は除かず、理由`damaged_history_line`の行として表示します。文字列はすべてHTMLとしてエスケープし、
 ページは外部の資源を読み込みません。明暗どちらの表示設定でも読めます。
 
 定期実行では`live_cycle --dashboard-output`（`install-live-cycle.ps1 -DashboardOutput`）を指定すると、

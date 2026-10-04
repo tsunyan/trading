@@ -545,3 +545,16 @@ def test_plan_refuses_a_warmup_the_live_fetch_cannot_cover(running, tmp_path):
     )
     with pytest.raises(LiveTaskError, match="strategy_warmup_exceeds_live_history"):
         task_plan(**values)
+
+
+def test_history_append_waits_for_and_respects_the_lock(tmp_path):
+    from trading.paper_runner import _process_lock
+
+    path = tmp_path / "cycles.jsonl"
+    live_cycle.append_history({"ok": True}, path)
+    with _process_lock(tmp_path / "cycles.jsonl.lock") as owned:
+        assert owned
+        with pytest.raises(OSError, match="history_lock_busy"):
+            live_cycle.append_history({"ok": False}, path, wait_seconds=0.1)
+    live_cycle.append_history({"ok": False}, path)
+    assert [json.loads(x)["ok"] for x in path.read_text().splitlines()] == [True, False]

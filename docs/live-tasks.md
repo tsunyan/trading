@@ -69,6 +69,8 @@ uv run python -m trading.live_attestation status --directory runs/live-orders --
 失敗時は`ok: false`と固定理由コードを保存し、通知の成否を`notified`に記録します。
 タスクはpythonw.exeで実行するため、画面への出力は残りません。
 `-HistoryOutput`（`--history-output`）を指定すると、各回の結果を1行のJSONとして追記します。
+手動の実行と定期実行が同時に書かないよう、追記ごとに隣の`.lock`ファイルでOSのロックを取ります。
+5秒待っても取れない場合は追記せず、結果ファイルの`history_written`を`false`にします。
 過去の判断・失敗・通知を後から追えます。
 `-DashboardOutput`を指定すると、毎回[状態ページ](live-dashboard.md)を更新します。1回あたり数KBで、1年でおよそ数十MBになります。
 

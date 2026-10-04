@@ -84,7 +84,7 @@ def test_cli_writes_the_page_atomically(setup, tmp_path, capsys):
     assert '"network_used": false' in capsys.readouterr().out
 
 
-def test_history_lists_the_newest_cycles_first_and_skips_broken_lines(tmp_path):
+def test_history_lists_the_newest_cycles_first_and_shows_broken_lines(tmp_path, monkeypatch):
     import json
 
     path = tmp_path / "cycles.jsonl"
@@ -94,8 +94,13 @@ def test_history_lists_the_newest_cycles_first_and_skips_broken_lines(tmp_path):
     ]
     path.write_text("\n".join([*lines[:-1], "{broken", lines[-1]]) + "\n", encoding="utf-8")
     history = live_dashboard.read_history(path)
-    assert history[0]["finished_at"] == "t29" and len(history) == 23
+    assert history[0]["finished_at"] == "t29" and len(history) == 24
+    assert history[1]["reason"] == "damaged_history_line"  # Visible, not dropped.
+    assert history[-1]["finished_at"] == "t7"
     assert live_dashboard.read_history(tmp_path / "missing.jsonl") == []
+    # Only the end of the file is read, in small chunks.
+    monkeypatch.setattr(live_dashboard, "TAIL_CHUNK", 7)
+    assert live_dashboard.read_history(path) == history
     page = live_dashboard.render(
         {
             "send_ready": True,
