@@ -49,6 +49,9 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 
 ## 出力とエラー
 
+`--prepare`で準備した場合は、確認後にそのまま使える`submit_command`も出力します。発注用キーの参照
+（`<order_reference>`）だけを置き換えます。送信ログ（`dispatch.jsonl`）は気配ファイルと同じ場所に書きます。
+
 出力は照合した注文の状態、口座証拠の時刻・建玉数・有効注文数・損失による新規停止、
 提案の内容、準備の有無と実行内容です。`orders_sent`は常に`false`です。
 失敗時は`live_cycle_failed:`の後に、各段階の固定理由コード、それ以外は例外の型名だけを表示します。

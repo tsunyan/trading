@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -270,6 +271,35 @@ def main(argv=None, *, send=None):
             intent_output=args.intent_output,
         )
         result = {**result, "ok": True, "finished_at": finished()}
+        if result.get("prepared"):
+            # Ready to review and paste; only the order key reference is left to the operator.
+            result["submit_command"] = subprocess.list2cmdline(
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "-m",
+                    "trading.order_runtime",
+                    "submit",
+                    "--directory",
+                    str(args.directory),
+                    "--read-control-directory",
+                    str(args.read_control_directory),
+                    "--scope",
+                    args.scope,
+                    "--client-id",
+                    result["client_id"],
+                    "--quote",
+                    str(args.quote_output),
+                    "--expected-sha256",
+                    result["checkpoint_sha256"],
+                    "--credential-reference",
+                    "<order_reference>",
+                    "--order-permission-confirmed",
+                    "--dispatch-log",
+                    str(Path(args.quote_output).with_name("dispatch.jsonl")),
+                ]
+            )
     except Exception as error:
         fixed = (
             LiveCycleError,

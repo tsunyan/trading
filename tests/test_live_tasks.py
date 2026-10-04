@@ -396,3 +396,20 @@ def test_plan_passes_the_history_output(running, tmp_path):
     assert "--history-output" in plan["tasks"][0]["arguments"]
     with pytest.raises(LiveTaskError, match="output_directory_required"):
         task_plan(**inputs(running, tmp_path), history_output=tmp_path / "missing" / "x.jsonl")
+
+
+def test_prepared_cycle_prints_a_submit_command_for_review(tmp_path, monkeypatch, capsys):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    FakeCycle.outcome = {
+        "decision": {"action": "open", "intent": {"client_id": "S2026100510OB"}},
+        "prepared": True,
+        "client_id": "S2026100510OB",
+        "checkpoint_sha256": "c" * 64,
+        "orders_sent": False,
+    }
+    live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: None)
+    command = json.loads(capsys.readouterr().out)["submit_command"]
+    assert "trading.order_runtime submit" in command and "c" * 64 in command
+    assert "--client-id S2026100510OB" in command and "<order_reference>" in command
+    assert "dispatch.jsonl" in command and "--order-permission-confirmed" in command
