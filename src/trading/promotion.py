@@ -164,11 +164,15 @@ def _stage(history):
 
 
 def _forward_advanced(connection, hypothesis_id):
+    criteria = _criteria_rows(connection, hypothesis_id)
+    # With fixed criteria, only an advance that judge() derived from them counts.
+    prefix = "%" if criteria is None else f"fixed criteria {criteria['criteria_sha256'][:12]}:%"
     return connection.execute(
         "SELECT 1 FROM entries e JOIN decisions d ON d.decision_id = ("
         " SELECT max(decision_id) FROM decisions WHERE entry_id = e.entry_id)"
-        " WHERE e.hypothesis_id = ? AND e.period = 'forward_oos' AND d.decision = 'advance'",
-        (hypothesis_id,),
+        " WHERE e.hypothesis_id = ? AND e.period = 'forward_oos' AND d.decision = 'advance'"
+        " AND d.reason LIKE ?",
+        (hypothesis_id, prefix),
     ).fetchone()
 
 

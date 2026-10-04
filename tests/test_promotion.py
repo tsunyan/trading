@@ -155,3 +155,14 @@ def test_judge_refuses_research_entries_and_changed_reports(frozen, tmp_path, ba
     report.write_text(report.read_text().replace("1.5", "9.5"))
     with pytest.raises(PromotionError, match="report_changed_since_recording"):
         judge(frozen, "H001", entry)
+
+
+def test_manual_advance_does_not_bypass_fixed_criteria(frozen, tmp_path, bars, cfg):
+    from trading.promotion import set_criteria
+
+    promote(frozen, "H001", "paper", "start paper")
+    set_criteria(frozen, "H001", CRITERIA)
+    weak = forward_run(frozen, tmp_path, bars, cfg, "weak", profit_factor=1.0, max_drawdown_pct=4)
+    decide(frozen, weak, "advance", "looks fine to me")
+    with pytest.raises(PromotionError, match="advanced_forward_oos_entry_required"):
+        promote(frozen, "H001", "live", "manual override")

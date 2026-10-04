@@ -35,7 +35,8 @@ uv run python -m trading.promotion judge --ledger runs/ledger.sqlite --hypothesi
 登録できるのは凍結後で、その仮説のforward OOSの記録が台帳に1件もない間だけです。登録後は変更できません。
 `judge`は、forward OOSの記録の`report.json`が記録時のSHA-256のままであることを確かめ、すべての条件を
 満たせば`advance`、1つでも満たさない（値がない場合を含む）と`reject`を、条件のSHA-256と各値を理由として
-台帳の判断に追記します。`live`への昇格は、この`advance`があれば行えます。
+台帳の判断に追記します。合否条件を登録した仮説では、`live`への昇格の根拠を`judge`が記録した`advance`
+（理由が条件のSHA-256で始まるもの）に限ります。手で記録した`advance`では昇格できません。
 
 条件の場所は実行の種類（単発のバックテスト、時系列の独立区間など）で報告の構造が違うため、
 実際のforward OOSで使う実行の`report.json`を見て決めてください。
