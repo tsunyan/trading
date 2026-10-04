@@ -177,6 +177,16 @@ uv run trading ledger freeze --id H002-example --entry 12
 uv run trading ledger list --hypothesis H002-example
 ```
 
+凍結後は、forward OOSの結果を見る前に合否条件を固定し、凍結後のデータで同じ候補を評価して判定します。
+判定に通った候補だけを実運用へ昇格できます（[昇格管理](docs/promotion.md)）。
+
+```powershell
+uv run python -m trading.promotion set-criteria --hypothesis H002-example --criteria configs/h002-criteria.json
+uv run python -m trading.promotion promote --hypothesis H002-example --stage paper --reason "凍結後のペーパー運用"
+uv run python -m trading.promotion judge --hypothesis H002-example --entry 31
+uv run python -m trading.promotion promote --hypothesis H002-example --stage live --reason "固定条件に合格"
+```
+
 - `compare`は候補ごとに1件記録します。記録内容は実験ID、データ期間とハッシュ、設定、評価条件、
   コードの版、Gitコミット、判定、目的です。CLIが結果を表示するため、すべて閲覧済みとして扱います。
 - 実行時刻（`run_created_at`、保存レポートの`created_at`）と台帳への登録時刻（`recorded_at`）は別に記録します。
