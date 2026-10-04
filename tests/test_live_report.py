@@ -110,3 +110,23 @@ def test_slippage_against_the_reviewed_quote_from_the_dispatch_log(tmp_path):
     assert result["execution"] == {"orders_measured": 1, "slippage_cost": "10"}
     assert read_dispatches(tmp_path / "missing.jsonl") == {}
     assert report(journal)["execution"] == {"orders_measured": 0, "slippage_cost": "0"}
+
+
+def test_executions_export_lists_every_fill_once_and_never_overwrites(tmp_path):
+    import csv
+
+    from trading.live_report import executions, write_csv
+
+    journal = make_journal(tmp_path)
+    open_position(journal)
+    items = executions(journal)
+    assert [(i["client_id"], i["execution_id"], i["units"], i["price"]) for i in items] == [
+        ("Buy001", 301, 1000, "150.01")
+    ]
+    path = tmp_path / "executions.csv"
+    write_csv(items, path)
+    with path.open(encoding="utf-8", newline="") as source:
+        rows = list(csv.DictReader(source))
+    assert rows[0]["fee"] == "3" and rows[0]["effect"] == "OPEN"
+    with pytest.raises(FileExistsError):
+        write_csv(items, path)

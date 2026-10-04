@@ -6,6 +6,7 @@ beyond what those records already claim, and nothing here changes the journal.
 """
 
 import argparse
+import csv
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -136,6 +137,58 @@ def report(journal, *, history=24, dispatches=None):
     }
 
 
+CSV_COLUMNS = (
+    "timestamp",
+    "client_id",
+    "order_id",
+    "execution_id",
+    "position_id",
+    "side",
+    "effect",
+    "units",
+    "price",
+    "fee",
+    "loss_gain",
+    "settled_swap",
+)
+
+
+def executions(journal):
+    """Every reconciled execution, oldest first, for comparison with the broker history."""
+    with journal._transaction() as conn:
+        rows = [
+            dict(r) for r in conn.execute("SELECT * FROM orders WHERE evidence_json IS NOT NULL")
+        ]
+    items = []
+    for row in rows:
+        evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+        for fill in evidence.executions:
+            items.append(
+                {
+                    "timestamp": fill.timestamp.isoformat(),
+                    "client_id": row["client_id"],
+                    "order_id": evidence.order_id,
+                    "execution_id": fill.execution_id,
+                    "position_id": fill.position_id,
+                    "side": evidence.intent.side,
+                    "effect": evidence.intent.effect,
+                    "units": fill.units,
+                    "price": _money(fill.price),
+                    "fee": _money(fill.fee),
+                    "loss_gain": _money(fill.loss_gain),
+                    "settled_swap": _money(fill.settled_swap),
+                }
+            )
+    return sorted(items, key=lambda item: (item["timestamp"], item["execution_id"]))
+
+
+def write_csv(items, path):
+    with Path(path).open("x", encoding="utf-8", newline="") as output:  # Never overwrite.
+        writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(items)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
@@ -143,6 +196,7 @@ def main(argv=None):
     parser.add_argument("--scope", required=True)
     parser.add_argument("--history", type=int, default=24)
     parser.add_argument("--dispatch-log", type=Path)
+    parser.add_argument("--executions-csv", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -151,6 +205,10 @@ def main(argv=None):
         result = report(
             journal, history=args.history, dispatches=read_dispatches(args.dispatch_log)
         )
+        if args.executions_csv is not None:
+            items = executions(journal)
+            write_csv(items, args.executions_csv)
+            result["executions_csv"] = {"path": str(args.executions_csv), "rows": len(items)}
     except Exception as error:
         parser.exit(2, f"live_report_failed: {type(error).__name__}\n")
     print(json.dumps(result, ensure_ascii=False))
