@@ -78,3 +78,5 @@ uv run python -m trading.private_sync register-live-orders --directory runs/priv
 登録前後で実プロセスを終了させ、再実行による重複登録の拒否を確認しました。
 追加46試験を含む全2138テストとRuffの検査・整形確認、差分チェックが合格しました。
 実口座への通信、実資格情報の読込、Windowsタスク変更は行っていません。
+
+2026-10-04追記: 資格情報からの送信は[確認済み送信](order-runtime.md)、口座証拠と注文状態の更新は[口座証拠の更新](live-account.md)・[受付済み注文のGET照合](live-order-sync.md)、有効なまま残る新規・決済のclaim解消とID発見は[claim解消](order-resolution.md)・[ID発見](order-discovery.md)、停止中の無登録台帳は[明示移行](live-operations.md)、戦略との接続は[提案](live-signal.md)と[昇格管理](promotion.md)で追加しました。現在の残工程は[ロードマップ](roadmap.md)を参照してください。
