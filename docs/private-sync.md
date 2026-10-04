@@ -212,6 +212,10 @@ ACK不明・FAULT/REJECTEDで終了した区間・停止した現金台帳は自
 uv run python -m trading.private_sync recover --directory runs/private-sync --expected-plan-sha256 <plan_sha256> --expected-revision <revision> --expected-head <head> --expected-reason <reason> --acknowledge-token-uncertainty
 ```
 
+業者の定期メンテナンスなどで接続が切れ、同期がSTOPPEDになった場合も、`continue`や監視タスクは
+自動で再開しません。停止理由を`status`で確認し、この手順で復旧します。実発注の送信は、新しい世代で
+照合が成功し監視が確認するまで止まります（[送信前の検査](live-operations.md)）。
+
 [StreamControlの復旧条件](stream-control.md)を満たす場合だけ、世代を進めます。
 トークン不明の扱いを確認した場合にのみ最後のフラグを使います。
 GET制御の停止・claim不明はこのコマンドでは解除しません。[GET復旧](read-recovery.md)・
