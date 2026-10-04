@@ -25,13 +25,29 @@ from trading.gmo import GmoPublic
 from trading.order_runtime import _quote
 from trading.private_order_recovery import PrivateOrderRecovery
 from trading.promotion import PromotionError, require_live
-from trading.strategy import entry_units_exact, signal_direction
+from trading.strategy import signal_direction
 
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
 
 
 class LiveSignalError(ValueError):
     """Fixed local reasons only."""
+
+
+def entry_units_exact(cash: Decimal, equity: Decimal, price: Decimal, cfg: Settings) -> int:
+    """`strategy.entry_units` in exact decimal arithmetic for live money; same rule, no float.
+
+    Config fractions enter by their shortest decimal text (0.2, not the binary 0.2000...01).
+    Kept out of `strategy.py`: forward paper observation pins that file by SHA-256.
+    """
+    if min(cash, equity, price) <= 0:
+        return 0
+    leverage = Decimal(str(cfg.max_leverage))
+    budget = equity * Decimal(str(cfg.allocation)) * leverage
+    budget /= 1 + Decimal(str(cfg.commission_rate)) * leverage
+    units = min(int(budget // price), cfg.max_units)
+    units = units // cfg.lot_size * cfg.lot_size
+    return units if units >= cfg.min_units else 0
 
 
 def _tick(value, tick, rounding):

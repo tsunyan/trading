@@ -407,7 +407,8 @@ def test_history_days_cover_the_warmup_and_closures():
 def test_auto_sizing_uses_exact_decimals_at_a_lot_boundary():
     from decimal import Decimal
 
-    from trading.strategy import entry_units, entry_units_exact
+    from trading.live_signal import entry_units_exact
+    from trading.strategy import entry_units
 
     base = dict(market="fx", symbol="USD_JPY", bar_seconds=3600, lot_size=100, min_units=100)
     cfg = Settings(**base, commission_rate=0)
