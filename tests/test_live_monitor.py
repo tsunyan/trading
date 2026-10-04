@@ -3,6 +3,7 @@
 import base64
 import ctypes
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -590,7 +591,17 @@ def test_monitor_verifies_every_condition_and_original_sync_instance(setup):
         }
     ),
 )
-def test_windows_toast_uses_fixed_live_labels_and_excludes_payload(monkeypatch, kind):
+def test_windows_toast_uses_fixed_live_labels_and_excludes_payload(kind):
+    alert = {"id": 7, "kind": kind, "detail": "secret-key-and-balance"}
+    content, tag = windows_notify.toast_payload(alert, "a" * 32)
+    text = " ".join(t.text for t in fromstring(content).iter("text"))
+    assert windows_notify.LABELS[kind] in text and "private_operations" in text
+    assert "secret-key-and-balance" not in text
+    assert tag == "p-aaaaaa-7"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows notification boundary")
+def test_windows_toast_submission_passes_the_payload_to_hidden_powershell(monkeypatch):
     captured = []
 
     def submit(argv, **kwargs):
@@ -599,13 +610,17 @@ def test_windows_toast_uses_fixed_live_labels_and_excludes_payload(monkeypatch, 
         return subprocess.CompletedProcess(argv, 0, stdout=b"submitted")
 
     monkeypatch.setattr(windows_notify.subprocess, "run", submit)
-    monkeypatch.setenv("SystemRoot", "C:\\Windows")
-    windows_notify.send_toast({"id": 7, "kind": kind, "detail": "secret-key-and-balance"}, "a" * 32)
-    xml = fromstring(base64.b64decode(captured[0]["TRADINGLAB_TOAST_XML"]))
-    text = " ".join(t.text for t in xml.iter("text"))
-    assert windows_notify.LABELS[kind] in text and "private_operations" in text
-    assert "secret-key-and-balance" not in text
-    assert captured[0]["TRADINGLAB_TOAST_TAG"] == "p-aaaaaa-7"
+    alert = {"id": 7, "kind": "private_live_stopped", "detail": "secret"}
+    windows_notify.send_toast(alert, "a" * 32)
+    content, tag = windows_notify.toast_payload(alert, "a" * 32)
+    assert base64.b64decode(captured[0]["TRADINGLAB_TOAST_XML"]) == content
+    assert captured[0]["TRADINGLAB_TOAST_TAG"] == tag
+
+
+def test_windows_toast_submission_refuses_other_platforms(monkeypatch):
+    monkeypatch.setattr(windows_notify.os, "name", "posix")
+    with pytest.raises(OSError, match="require Windows"):
+        windows_notify.send_toast({"id": 1, "kind": "private_live_stopped"}, "a" * 32)
 
 
 def test_sync_free_owner_validation_stays_inside_held_os_lease(setup, monkeypatch):

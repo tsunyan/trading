@@ -1,6 +1,5 @@
 """No key access, persistent condition episodes, independent crash detection and toast retry."""
 
-import base64
 import ctypes
 import json
 import socket
@@ -297,22 +296,12 @@ def test_outbox_is_bounded_and_live_notification_owner_excludes_mutation(setup, 
 def test_native_toast_uses_private_fixed_labels_without_exposing_detail(setup, monkeypatch):
     _, _, _, _, monitor = setup
     monitor.test_notification()
-    captured = []
-
-    def submitted(argv, **kwargs):
-        captured.append(kwargs)
-        assert "-WindowStyle" in argv and "Hidden" in argv
-        return subprocess.CompletedProcess(argv, 0, stdout=b"submitted")
-
-    monkeypatch.setattr(windows_notify.subprocess, "run", submitted)
-    monkeypatch.setenv("SystemRoot", "C:\\Windows")
-    windows_notify.send_toast(
+    content, tag = windows_notify.toast_payload(
         {"id": 1, "kind": "private_sync_stopped", "detail": "secret"}, "a" * 32
     )
-    xml = fromstring(base64.b64decode(captured[0]["env"]["TRADINGLAB_TOAST_XML"]))
-    text = " ".join(t.text for t in xml.iter("text"))
+    text = " ".join(t.text for t in fromstring(content).iter("text"))
     assert "実口座同期が停止" in text and "private_operations" in text
-    assert "secret" not in text and captured[0]["env"]["TRADINGLAB_TOAST_TAG"].startswith("p-")
+    assert "secret" not in text and tag.startswith("p-")
 
 
 def test_actual_process_death_is_detected_after_os_ownership_is_released(setup, tmp_path):

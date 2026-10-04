@@ -96,9 +96,8 @@ LABELS = {
 }
 
 
-def send_toast(alert, observer_id):
-    if os.name != "nt":
-        raise OSError("Windows desktop notifications require Windows")
+def toast_payload(alert, observer_id):
+    """Platform-independent toast XML and tag: fixed labels and identifiers, never the detail."""
     toast = Element("toast")
     binding = SubElement(SubElement(toast, "visual"), "binding", template="ToastGeneric")
     SubElement(binding, "text").text = "Trading Lab"
@@ -117,10 +116,18 @@ def send_toast(alert, observer_id):
             else f"口座 {observer_id[:12]} / 通知 {alert['id']}\n"
             "operations.sqlite または paper_runner status で詳細を確認してください。"
         )
+    tag = f"{'p-' if private else ''}{observer_id[:6]}-{alert['id']}"[:16]
+    return tostring(toast, encoding="utf-8"), tag
+
+
+def send_toast(alert, observer_id):
+    if os.name != "nt":
+        raise OSError("Windows desktop notifications require Windows")
+    xml, tag = toast_payload(alert, observer_id)
     environment = {
         **os.environ,
-        "TRADINGLAB_TOAST_XML": base64.b64encode(tostring(toast, encoding="utf-8")).decode(),
-        "TRADINGLAB_TOAST_TAG": f"{'p-' if private else ''}{observer_id[:6]}-{alert['id']}"[:16],
+        "TRADINGLAB_TOAST_XML": base64.b64encode(xml).decode(),
+        "TRADINGLAB_TOAST_TAG": tag,
     }
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     result = subprocess.run(
