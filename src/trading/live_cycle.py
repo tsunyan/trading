@@ -243,6 +243,7 @@ def main(argv=None, *, send=None):
     parser.add_argument("--intent-output", type=Path)
     parser.add_argument("--result-output", type=Path)
     parser.add_argument("--history-output", type=Path)
+    parser.add_argument("--dashboard-output", type=Path)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--notify", action="store_true")
@@ -333,6 +334,22 @@ def main(argv=None, *, send=None):
             append_history(result, args.history_output)
         except OSError:
             result["history_written"] = False
+    if args.dashboard_output is not None and cycle is not None:
+        try:
+            from trading.live_dashboard import render, write_page
+            from trading.live_doctor import diagnose
+            from trading.live_report import report
+
+            now = datetime.now(UTC)
+            page = render(
+                diagnose(cycle.journal, now),
+                report(cycle.journal),
+                result,
+                generated_at=now.isoformat(),
+            )
+            write_page(page, args.dashboard_output)
+        except Exception:
+            result["dashboard_written"] = False  # A page never changes the cycle outcome.
     if not result["ok"]:
         parser.exit(2, f"live_cycle_failed: {result['reason']}\n")
     print(json.dumps(result, default=str))

@@ -24,6 +24,7 @@
 | `trading.live_acceptance read-evidence/file-evidence/approval/...` | 受入証拠と承認ファイルの作成（[説明](live-acceptance.md)） | 読取専用（read-evidenceのみ） | GET（read-evidenceのみ） | なし |
 | `trading.live_doctor` | 送信を止めている条件の一覧（[説明](live-doctor.md)） | なし | なし | なし |
 | `trading.live_report` | 損益とリスクの余裕（[説明](live-report.md)） | なし | なし | なし |
+| `trading.live_dashboard` | 状態ページの書き出し（[説明](live-dashboard.md)） | なし | なし | なし |
 | `trading.promotion status/promote/revoke/check` | 戦略候補の昇格管理（[説明](promotion.md)） | なし | なし | 実験台帳 |
 | `trading.live_tasks plan` / `scripts/install-live-cycle.ps1` | 毎時サイクルのタスク計画・登録（[説明](live-tasks.md)） | なし | なし | なし |
 | `trading.private_tasks plan` / `scripts/install-private-watchdog.ps1` | 監視・同期続行のタスク計画・登録（[説明](private-operations.md)） | なし | なし | なし |

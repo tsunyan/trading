@@ -10,6 +10,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ResultOutput,
     [string]$ValuationTolerance,
     [string]$HistoryOutput,
+    [string]$DashboardOutput,
     [string]$Ledger,
     [string]$Hypothesis,
     [string[]]$Confirm = @(),
@@ -34,6 +35,7 @@ $arguments = @(
     '--result-output', $ResultOutput
 )
 if ($ValuationTolerance) { $arguments += @('--valuation-tolerance', $ValuationTolerance) }
+if ($DashboardOutput) { $arguments += @('--dashboard-output', $DashboardOutput) }
 if ($HistoryOutput) { $arguments += @('--history-output', $HistoryOutput) }
 if ($Ledger) { $arguments += @('--ledger', (Resolve-Path -LiteralPath $Ledger).Path) }
 if ($Hypothesis) { $arguments += @('--hypothesis', $Hypothesis) }

@@ -39,6 +39,7 @@ def task_plan(
     ledger=None,
     hypothesis=None,
     history_output=None,
+    dashboard_output=None,
 ):
     if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(confirmations) != set(
         CYCLE_CONFIRMATIONS
@@ -93,6 +94,11 @@ def task_plan(
         if not history_output.parent.is_dir():
             raise LiveTaskError("output_directory_required")
         args += ["--history-output", history_output]
+    if dashboard_output is not None:
+        dashboard_output = Path(dashboard_output).resolve()
+        if not dashboard_output.parent.is_dir():
+            raise LiveTaskError("output_directory_required")
+        args += ["--dashboard-output", dashboard_output]
     if (ledger is None) != (hypothesis is None):
         raise LiveTaskError("ledger_and_hypothesis_required_together")
     if ledger is not None:
@@ -140,6 +146,7 @@ def main(argv=None):
     parser.add_argument("--result-output", type=Path, required=True)
     parser.add_argument("--valuation-tolerance")
     parser.add_argument("--history-output", type=Path)
+    parser.add_argument("--dashboard-output", type=Path)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
@@ -160,6 +167,7 @@ def main(argv=None):
             ledger=args.ledger,
             hypothesis=args.hypothesis,
             history_output=args.history_output,
+            dashboard_output=args.dashboard_output,
         )
         print(json.dumps({"ok": True, **plan}))
         return 0

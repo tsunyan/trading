@@ -358,3 +358,45 @@ def test_candidate_gate_allows_only_the_live_promoted_configuration(running, tmp
     else:
         result = cycle(running, tmp_path, prepare=False, candidate=(ledger, "H001"))
         assert result["decision"]["action"] == "open"
+
+
+def test_cycle_cli_writes_the_dashboard_page(running, tmp_path, monkeypatch, capsys):
+    from trading import live_cycle as module
+
+    values, live, _ = running
+    clock = values[0]
+
+    class Bound(LiveCycle):
+        def __init__(self, *args):
+            super().__init__(*args, **options(clock))
+
+        def run(self, *args, **kwargs):
+            return {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
+
+    monkeypatch.setattr(module, "LiveCycle", Bound)
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    page = tmp_path / "live.html"
+    module.main(
+        [
+            "--config",
+            str(tmp_path / "fx.toml"),
+            "--directory",
+            str(live[3].path.parent),
+            "--read-control-directory",
+            str(live[1].path.parent),
+            "--scope",
+            "synthetic",
+            "--credential-reference",
+            values[5].plan.credential_reference,
+            "--units",
+            "1000",
+            "--max-slippage",
+            "0.02",
+            "--quote-output",
+            str(tmp_path / "quote.json"),
+            "--dashboard-output",
+            str(page),
+        ]
+    )
+    capsys.readouterr()
+    assert "実発注の状態" in page.read_text(encoding="utf-8")
