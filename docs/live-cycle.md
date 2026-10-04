@@ -41,8 +41,11 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 
 実行内容には手順2の気配が含まれます。送信時の口座リスク検査は気配と口座証拠の鮮度
 （既定は各60秒）を要求するため、サイクルの出力から送信までに時間がかかると拒否されます。
-その場合は台帳の準備済み注文を残したまま、`order_runtime context --fetch-quote <気配ファイル>`で
+気配だけが古い場合は、台帳の準備済み注文を残したまま`order_runtime context --fetch-quote <気配ファイル>`で
 新しい気配を取って実行内容を作り直し、そのSHA-256と同じ気配ファイルで送信します。
+口座証拠も古い場合は、[口座証拠の更新](live-account.md)（またはサイクルの再実行）から行います。
+確認に時間をかける手動運用では、台帳の作成時に方針の`max_snapshot_age_seconds`と`max_quote_age_seconds`を
+長め（例: 300秒）に設定できます。長くするほど、確認時と送信時の口座・相場の差が大きくなりうる点に注意してください。
 
 同じ足・同じ向きの提案は顧客注文IDが同じになります。以前の注文が取消・失効で終わった後に
 同じ足で別の価格保護の提案を準備しようとすると、`signal_client_id_already_used`で拒否します。
