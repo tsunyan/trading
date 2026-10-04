@@ -27,12 +27,14 @@ if ($PlanOnly) {
     $planText
     return
 }
-# Check both names before registering either, so an unrelated task is never overwritten.
+. (Join-Path $PSScriptRoot 'task-owner.ps1')
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+# Check both names before registering either, so an unrelated or another user's task is
+# never overwritten.
 foreach ($spec in $plan.tasks) {
-    $existing = Get-ScheduledTask -TaskName $spec.name -ErrorAction SilentlyContinue
-    if ($existing -and $existing.Description -ne $spec.description) {
-        throw "An unrelated scheduled task already uses the name $($spec.name)."
-    }
+    $existing = Get-ScheduledTask -TaskPath '\' -TaskName $spec.name -ErrorAction SilentlyContinue
+    Assert-OwnScheduledTask -Existing $existing -Name $spec.name -Description $spec.description `
+        -CurrentSid $currentSid
 }
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
     -LogonType Interactive -RunLevel Limited
@@ -46,7 +48,7 @@ foreach ($spec in $plan.tasks) {
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::FromSeconds($spec.execution_limit_seconds))
-    Register-ScheduledTask -TaskName $spec.name -Action $action -Trigger @($periodic, $logon) `
+    Register-ScheduledTask -TaskPath '\' -TaskName $spec.name -Action $action -Trigger @($periodic, $logon) `
         -Principal $principal -Settings $settings -Description $spec.description -Force | Out-Null
 }
 $plan | ConvertTo-Json -Depth 5
