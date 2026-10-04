@@ -16,6 +16,14 @@ uv run python -m trading.live_report --directory runs/live-orders --read-control
 - 合計: 実現損益・手数料・決済スワップと、その差し引き（実現損益＋スワップ−手数料）
 - 評価額の推移: 直近`--history`件（既定24、最大1000）の照合済み口座証拠の時刻と評価額
 
+## 執行コスト（スリッページ）
+
+`order_runtime submit --dispatch-log runs/live-orders/dispatch.jsonl`で、受付された送信ごとに確認した
+実行内容のSHA-256と気配を1行ずつ記録できます。`live_report --dispatch-log`（`live_dashboard`も同じ）は
+これを約定と突き合わせ、注文ごとに1通貨あたりのスリッページ（買いは平均約定価格−確認時の売気配、
+売りは確認時の買気配−平均約定価格。正の値は確認時の気配より不利）と、合計の執行コストを表示します。
+記録のない注文は計算しません。ログが壊れた行は無視します。台帳の記録は変えません。
+
 金額はすべて台帳の照合済み証拠の値です。業者の取引報告書との照合は行っていないため、
 出力の`broker_verified`は常に`false`です。手数料は支払いを正の値で表します。
 

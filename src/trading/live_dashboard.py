@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from trading.live_doctor import diagnose
-from trading.live_report import report
+from trading.live_report import read_dispatches, report
 from trading.private_order_recovery import PrivateOrderRecovery
 
 STYLE = " ".join(
@@ -118,6 +118,7 @@ def render(doctor, profit, cycle=None, *, generated_at):
             ("約定", "filled_units"),
             ("平均価格", "average_price"),
             ("実現損益", "realized"),
+            ("スリッページ", "slippage"),
         ],
     )
     gates_table = _rows(gates, [("項目", "gate"), ("合格", "ok"), ("理由", "reason")])
@@ -177,6 +178,7 @@ def main(argv=None):
     parser.add_argument("--scope", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycle-result", type=Path)
+    parser.add_argument("--dispatch-log", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -186,7 +188,8 @@ def main(argv=None):
         cycle = None
         if args.cycle_result is not None and args.cycle_result.is_file():
             cycle = json.loads(args.cycle_result.read_text(encoding="utf-8"))
-        page = render(diagnose(journal, now), report(journal), cycle, generated_at=now.isoformat())
+        profit = report(journal, dispatches=read_dispatches(args.dispatch_log))
+        page = render(diagnose(journal, now), profit, cycle, generated_at=now.isoformat())
         write_page(page, args.output)
     except Exception as error:
         parser.exit(2, f"live_dashboard_failed: {type(error).__name__}\n")

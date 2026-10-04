@@ -88,3 +88,25 @@ def test_cli_hides_failures(tmp_path, capsys):
         )
     assert raised.value.code == 2
     assert capsys.readouterr().err.startswith("live_report_failed:")
+
+
+def test_slippage_against_the_reviewed_quote_from_the_dispatch_log(tmp_path):
+    import json as jsonlib
+
+    from trading.live_report import read_dispatches
+    from trading.order_runtime import append_dispatch
+
+    journal = make_journal(tmp_path, max_loss_jpy="20000")
+    open_position(journal)  # Buy001 filled at 150.01.
+    log = tmp_path / "dispatch.jsonl"
+    append_dispatch(log, "Buy001", "submit", "a" * 64, quote(NOW, bid="149.99", ask="150"))
+    with log.open("a", encoding="utf-8") as output:
+        output.write("not json\n")
+        output.write(jsonlib.dumps({"client_id": "X", "operation": "cancel"}) + "\n")
+    dispatches = read_dispatches(log)
+    assert set(dispatches) == {"Buy001"}
+    result = report(journal, dispatches=dispatches)
+    assert result["orders"][0]["slippage"] == "0.01"  # Paid 0.01 above the reviewed ask.
+    assert result["execution"] == {"orders_measured": 1, "slippage_cost": "10"}
+    assert read_dispatches(tmp_path / "missing.jsonl") == {}
+    assert report(journal)["execution"] == {"orders_measured": 0, "slippage_cost": "0"}

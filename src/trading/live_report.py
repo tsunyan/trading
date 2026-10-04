@@ -19,7 +19,22 @@ def _money(value):
     return format(Decimal(value).normalize(), "f")
 
 
-def report(journal, *, history=24):
+def read_dispatches(path):
+    """client_id -> reviewed quote from an order_runtime dispatch log; bad lines are skipped."""
+    quotes = {}
+    if path is None or not Path(path).is_file():
+        return quotes
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        try:
+            item = json.loads(line)
+            if item.get("operation") == "submit" and item.get("quote"):
+                quotes[item["client_id"]] = item["quote"]
+        except (ValueError, AttributeError, KeyError):
+            continue
+    return quotes
+
+
+def report(journal, *, history=24, dispatches=None):
     if type(history) is not int or not 0 <= history <= 1000:
         raise ValueError("invalid_history_length")
     with journal._transaction() as conn:
@@ -36,6 +51,8 @@ def report(journal, *, history=24):
     policy = AccountPolicy.model_validate_json(gate["policy_json"])
     peak = Decimal(gate["peak"])
     orders, realized, fees, swaps = [], Decimal(0), Decimal(0), Decimal(0)
+    cost, measured = Decimal(0), 0
+    dispatches = dispatches or {}
     for row in rows:
         intent = OrderIntent.model_validate_json(row["intent_json"])
         item = {
@@ -61,6 +78,18 @@ def report(journal, *, history=24):
                 realized=_money(sum((e.loss_gain for e in fills), Decimal(0))),
                 settled_swap=_money(sum((e.settled_swap for e in fills), Decimal(0))),
             )
+            sent = dispatches.get(row["client_id"])
+            if filled and sent:
+                # Per unit against the reviewed quote; positive means worse than that quote.
+                average = sum(e.price * e.units for e in fills) / filled
+                slip = (
+                    average - Decimal(sent["ask"])
+                    if intent.side == "BUY"
+                    else Decimal(sent["bid"]) - average
+                )
+                item["slippage"] = _money(slip)
+                cost += slip * filled
+                measured += 1
             realized += sum((e.loss_gain for e in fills), Decimal(0))
             fees += sum((e.fee for e in fills), Decimal(0))
             swaps += sum((e.settled_swap for e in fills), Decimal(0))
@@ -95,6 +124,7 @@ def report(journal, *, history=24):
             "net": _money(realized + swaps - fees),
         },
         "orders": orders,
+        "execution": {"orders_measured": measured, "slippage_cost": _money(cost)},
         "equity_history": [
             {
                 "observed_at": event["snapshot"]["observed_at"],
@@ -112,12 +142,15 @@ def main(argv=None):
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
     parser.add_argument("--history", type=int, default=24)
+    parser.add_argument("--dispatch-log", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
             args.directory, args.read_control_directory, args.scope
         ).journal
-        result = report(journal, history=args.history)
+        result = report(
+            journal, history=args.history, dispatches=read_dispatches(args.dispatch_log)
+        )
     except Exception as error:
         parser.exit(2, f"live_report_failed: {type(error).__name__}\n")
     print(json.dumps(result, ensure_ascii=False))
