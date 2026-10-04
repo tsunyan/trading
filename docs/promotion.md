@@ -23,6 +23,23 @@ uv run python -m trading.promotion revoke --ledger runs/ledger.sqlite --hypothes
 コードSHA-256・実行条件）を各行に保存します。実験台帳には`promotions`表を追加するだけで、
 既存の表とスキーマ版は変えません。昇格は運用者の記録であり、戦略の収益性を保証しません。
 
+## forward OOSの合否条件を先に固定する
+
+```powershell
+uv run python -m trading.promotion set-criteria --ledger runs/ledger.sqlite --hypothesis H001 --criteria configs/h001-forward-criteria.json
+uv run python -m trading.promotion judge --ledger runs/ledger.sqlite --hypothesis H001 --entry <entry_id>
+```
+
+合否条件は`report.json`内の数値の場所（`.`区切り、配列は番号）と比較（`>=`・`<=`・`>`・`<`）と値の組を
+1〜20件並べたJSONです。例: `[{"path": "metrics.profit_factor", "op": ">=", "value": 1.2}]`。
+登録できるのは凍結後で、その仮説のforward OOSの記録が台帳に1件もない間だけです。登録後は変更できません。
+`judge`は、forward OOSの記録の`report.json`が記録時のSHA-256のままであることを確かめ、すべての条件を
+満たせば`advance`、1つでも満たさない（値がない場合を含む）と`reject`を、条件のSHA-256と各値を理由として
+台帳の判断に追記します。`live`への昇格は、この`advance`があれば行えます。
+
+条件の場所は実行の種類（単発のバックテスト、時系列の独立区間など）で報告の構造が違うため、
+実際のforward OOSで使う実行の`report.json`を見て決めてください。
+
 ## 実発注との接続
 
 `live_cycle`・`live_signal`・定期実行の計画（`live_tasks plan`、`install-live-cycle.ps1`）に

@@ -93,3 +93,65 @@ def test_cli_check_reports_fixed_reasons(frozen, tmp_path, cfg, capsys):
             ["check", "--ledger", str(frozen), "--hypothesis", "H001", "--config", str(config)]
         )
     assert capsys.readouterr().err == "promotion_failed: strategy_not_promoted_for_live\n"
+
+
+CRITERIA = [
+    {"path": "metrics.profit_factor", "op": ">=", "value": 1.2},
+    {"path": "metrics.max_drawdown_pct", "op": "<=", "value": 10},
+]
+
+
+def forward_run(database, tmp_path, bars, cfg, name, **metrics):
+    write_comparison(tmp_path / name, bars, cfg, names=("01-sma_cross",), metrics=metrics)
+    (entry,) = record_run(database, tmp_path / name, "H001", name)
+    return entry
+
+
+def test_fixed_criteria_judge_forward_entries_and_gate_live_promotion(frozen, tmp_path, bars, cfg):
+    from trading.promotion import judge, set_criteria
+
+    promote(frozen, "H001", "paper", "start paper")
+    assert set_criteria(frozen, "H001", CRITERIA)["criteria"] == CRITERIA
+    with pytest.raises(PromotionError, match="forward_criteria_already_fixed"):
+        set_criteria(frozen, "H001", CRITERIA)
+    weak = forward_run(frozen, tmp_path, bars, cfg, "weak", profit_factor=1.1, max_drawdown_pct=4)
+    verdict = judge(frozen, "H001", weak)
+    assert verdict["decision"] == "reject"
+    assert [c["passed"] for c in verdict["checks"]] == [False, True]
+    with pytest.raises(PromotionError, match="advanced_forward_oos_entry_required"):
+        promote(frozen, "H001", "live", "rejected")
+    good = forward_run(frozen, tmp_path, bars, cfg, "good", profit_factor=1.5, max_drawdown_pct=6)
+    assert judge(frozen, "H001", good)["decision"] == "advance"
+    assert promote(frozen, "H001", "live", "fixed criteria passed")["stage"] == "live"
+
+
+def test_criteria_must_come_before_forward_results(frozen, tmp_path, bars, cfg):
+    from trading.promotion import set_criteria
+
+    forward_run(frozen, tmp_path, bars, cfg, "early", profit_factor=2.0, max_drawdown_pct=1)
+    with pytest.raises(PromotionError, match="forward_results_already_recorded"):
+        set_criteria(frozen, "H001", CRITERIA)
+
+
+@pytest.mark.parametrize(
+    "criteria",
+    [[], [{"path": "x", "op": "==", "value": 1}], [{"path": "x", "op": ">=", "value": True}]],
+)
+def test_invalid_criteria_are_refused(frozen, criteria):
+    from trading.promotion import set_criteria
+
+    with pytest.raises(PromotionError, match="invalid_forward_criteria"):
+        set_criteria(frozen, "H001", criteria)
+
+
+def test_judge_refuses_research_entries_and_changed_reports(frozen, tmp_path, bars, cfg):
+    from trading.promotion import judge, set_criteria
+
+    set_criteria(frozen, "H001", CRITERIA)
+    with pytest.raises(PromotionError, match="forward_oos_entry_required"):
+        judge(frozen, "H001", 1)  # The frozen research entry.
+    entry = forward_run(frozen, tmp_path, bars, cfg, "fwd", profit_factor=1.5, max_drawdown_pct=6)
+    report = tmp_path / "fwd" / "01-sma_cross" / "report.json"
+    report.write_text(report.read_text().replace("1.5", "9.5"))
+    with pytest.raises(PromotionError, match="report_changed_since_recording"):
+        judge(frozen, "H001", entry)
