@@ -36,6 +36,8 @@ STYLE = " ".join(
 
 
 def _e(value):
+    if isinstance(value, bool):
+        value = "はい" if value else "いいえ"
     return html.escape("" if value is None else str(value), quote=True)
 
 
