@@ -51,8 +51,16 @@ class PromotionError(ValueError):
     """Fixed local reasons only."""
 
 
+def _exists(connection, table):
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+
+
 def _criteria_rows(connection, hypothesis_id):
-    connection.execute(CRITERIA_TABLE)
+    # Reads never add tables to a research ledger; only writes create them.
+    if not _exists(connection, "forward_criteria"):
+        return None
     return connection.execute(
         "SELECT * FROM forward_criteria WHERE hypothesis_id = ?", (hypothesis_id,)
     ).fetchone()
@@ -83,6 +91,7 @@ def set_criteria(database: Path, hypothesis_id: str, criteria, now: datetime | N
         hypothesis = _hypothesis(connection, hypothesis_id)
         if not hypothesis["frozen_at"]:
             raise PromotionError("frozen_candidate_required")
+        connection.execute(CRITERIA_TABLE)
         if _criteria_rows(connection, hypothesis_id) is not None:
             raise PromotionError("forward_criteria_already_fixed")
         if connection.execute(
@@ -149,7 +158,8 @@ def judge(database: Path, hypothesis_id: str, entry_id: int, now: datetime | Non
 
 def _history(connection, hypothesis_id):
     # Additive table: the ledger schema version and its existing tables stay unchanged.
-    connection.execute(TABLE)
+    if not _exists(connection, "promotions"):
+        return []
     return [
         dict(row)
         for row in connection.execute(
@@ -184,6 +194,7 @@ def promote(
     if not isinstance(reason, str) or not reason.strip():
         raise PromotionError("promotion_reason_required")
     with _connect(database) as connection:
+        connection.execute(TABLE)
         hypothesis = _hypothesis(connection, hypothesis_id)
         if not hypothesis["frozen_at"]:
             raise PromotionError("frozen_candidate_required")
@@ -208,6 +219,7 @@ def revoke(database: Path, hypothesis_id: str, reason: str, now: datetime | None
     if not isinstance(reason, str) or not reason.strip():
         raise PromotionError("promotion_reason_required")
     with _connect(database) as connection:
+        connection.execute(TABLE)
         hypothesis = _hypothesis(connection, hypothesis_id)
         if _stage(_history(connection, hypothesis_id)) in {None, "revoked"}:
             raise PromotionError("nothing_to_revoke")
@@ -232,6 +244,9 @@ def status_in(connection, hypothesis_id):
 
 
 def status(database: Path, hypothesis_id: str):
+    if not Path(database).is_file():
+        # Opening a missing path would create an empty ledger; a read must not.
+        raise PromotionError("ledger_not_found")
     with _connect(database) as connection:
         return status_in(connection, hypothesis_id)
 

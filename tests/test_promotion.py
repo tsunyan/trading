@@ -166,3 +166,22 @@ def test_manual_advance_does_not_bypass_fixed_criteria(frozen, tmp_path, bars, c
     decide(frozen, weak, "advance", "looks fine to me")
     with pytest.raises(PromotionError, match="advanced_forward_oos_entry_required"):
         promote(frozen, "H001", "live", "manual override")
+
+
+def test_reads_never_add_tables_to_the_research_ledger(frozen, cfg):
+    def tables():
+        with sqlite3.connect(frozen) as conn:
+            return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    before = tables()
+    assert status(frozen, "H001")["stage"] is None
+    with pytest.raises(PromotionError, match="strategy_not_promoted_for_live"):
+        require_live(frozen, "H001", cfg)
+    assert tables() == before and "promotions" not in before
+
+
+def test_missing_ledger_is_not_created_by_a_read(tmp_path, cfg):
+    missing = tmp_path / "nowhere" / "ledger.sqlite"
+    with pytest.raises(PromotionError, match="ledger_not_found"):
+        require_live(missing, "H001", cfg)
+    assert not missing.exists() and not missing.parent.exists()
