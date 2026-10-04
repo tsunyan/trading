@@ -91,6 +91,12 @@ RESOLUTION_CONFIRMATIONS = frozenset(
 )
 # A still-active accepted order is confirmed as such, never as a terminal one.
 ACTIVE_RESOLUTION_CONFIRMATIONS = (RESOLUTION_CONFIRMATIONS - {"terminal-order"}) | {"active-order"}
+# An unknown submission with no broker trace: the account shows no effect of it at all.
+ABSENCE_RESOLUTION_CONFIRMATIONS = (RESOLUTION_CONFIRMATIONS - {"terminal-order"}) | {
+    "order-absent"
+}
+# A complete account observed this long after the stopped claim; never sufficient alone.
+ABSENCE_MIN_DELAY_SECONDS = 300
 RESTART_CONFIRMATIONS = CONFIRMATIONS | frozenset(
     {"restart-orders", "stop-cause-reviewed", "old-clients-closed", "preserve-loss-stop"}
 )
@@ -447,7 +453,8 @@ class LiveOrderJournal(OrderJournal):
                 state.approval is not None and state.phase != "STOPPED"
             ):
                 raise ValueError
-            for resolved in self.posts.trade_resolutions():
+            resolutions = self.posts.trade_resolutions()
+            for resolved in resolutions:
                 reference = resolved["reference"]
                 prepared = conn.execute(
                     "SELECT client_id,kind,payload_json FROM events WHERE id=?",
@@ -458,10 +465,25 @@ class LiveOrderJournal(OrderJournal):
                     or reference["live_path"] != str(self.path.parent)
                     or prepared is None
                     or prepared["client_id"] != reference["client_id"]
-                    or prepared["kind"] != "ORDER_RESOLUTION_PREPARED"
+                    or prepared["kind"]
+                    not in {"ORDER_RESOLUTION_PREPARED", "ORDER_ABSENCE_PREPARED"}
                     or self._checkpoint(json.loads(prepared["payload_json"]))
                     != reference["prepared_sha256"]
                     or json.loads(prepared["payload_json"])["post"] != resolved["post_before"]
+                ):
+                    raise ValueError
+            # An absent order is ABANDONED only by a POST-committed, approved resolution.
+            resolved_ids = {r["reference"]["prepared_id"]: r["reference"] for r in resolutions}
+            for item in conn.execute(
+                "SELECT client_id,payload_json FROM events WHERE kind='ORDER_ABSENCE_RESOLVED'"
+            ):
+                done = json.loads(item["payload_json"])
+                reference = resolved_ids.get(done["prepared_id"])
+                if (
+                    reference is None
+                    or reference["client_id"] != item["client_id"]
+                    or reference["prepared_sha256"] != done["prepared_sha256"]
+                    or self._row(conn, item["client_id"])["state"] != "ABANDONED"
                 ):
                     raise ValueError
             restarts = self.posts.execution_restarts()
@@ -616,7 +638,9 @@ class LiveOrderJournal(OrderJournal):
             intent = OrderIntent.model_validate_json(row["intent_json"])
             plan = order_request(intent, state.limits)
             if row["state"] in {"PREPARED", "ABANDONED"}:
-                if not self._not_sent(conn, row["client_id"]):
+                if not self._not_sent(conn, row["client_id"]) and not self._absence_resolved(
+                    conn, row["client_id"]
+                ):
                     self._unclaimed(conn, row["client_id"], plan)
                 continue
             evidence = OrderEvidence.model_validate_json(row["evidence_json"])
@@ -1060,6 +1084,17 @@ class LiveOrderJournal(OrderJournal):
             self._event(conn, client_id, "SUBMISSION_NOT_SENT", {"reason": reason})
 
     @staticmethod
+    def _absence_resolved(conn, client_id):
+        """Open-time integrity already bound each such event to a POST resolution."""
+        return (
+            conn.execute(
+                "SELECT COUNT(*) FROM events WHERE client_id=? AND kind='ORDER_ABSENCE_RESOLVED'",
+                (client_id,),
+            ).fetchone()[0]
+            == 1
+        )
+
+    @staticmethod
     def _not_sent(conn, client_id):
         rows = conn.execute(
             "SELECT id,kind,payload_json FROM events WHERE client_id=? "
@@ -1088,7 +1123,7 @@ class LiveOrderJournal(OrderJournal):
             for event in conn.execute(
                 "SELECT id,client_id,kind,payload_json FROM events "
                 "WHERE kind IN ('PREPARED','SUBMITTING','SUBMISSION_ACK','RECONCILED',"
-                "'SUBMISSION_NOT_SENT') ORDER BY id"
+                "'SUBMISSION_NOT_SENT','ORDER_ABSENCE_RESOLVED') ORDER BY id"
             ):
                 history.setdefault(event["client_id"], {}).setdefault(event["kind"], []).append(
                     event
@@ -1123,7 +1158,19 @@ class LiveOrderJournal(OrderJournal):
                     refused = events.get("SUBMISSION_NOT_SENT", [])
                     if receipt is not None or evidence is not None:
                         raise LiveOrderError("live_catalog_order_integrity_failed")
-                    if submitted or refused:
+                    absent = events.get("ORDER_ABSENCE_RESOLVED", [])
+                    if absent:
+                        # A sent claim resolved because the account showed no trace of it.
+                        if (
+                            row["state"] != "ABANDONED"
+                            or len(absent) != 1
+                            or len(submitted) != 1
+                            or refused
+                            or absent[0]["id"] <= submitted[0]["id"]
+                            or not _submitting_payload(json.loads(submitted[0]["payload_json"]))
+                        ):
+                            raise LiveOrderError("live_catalog_order_integrity_failed")
+                    elif submitted or refused:
                         # Only an ABANDONED claim refused before HTTP send may carry these.
                         if (
                             row["state"] != "ABANDONED"
@@ -1578,6 +1625,252 @@ class LiveOrderJournal(OrderJournal):
                 "restart_required": True,
                 "complete": False,
             }
+
+    def _absent_rows(self, conn, client_id):
+        """The ledger as if the unknown submission never reached the broker."""
+        return [
+            {**dict(r), "state": "ABANDONED"} if r["client_id"] == client_id else dict(r)
+            for r in conn.execute("SELECT * FROM orders")
+        ]
+
+    def _absence_context(self, conn, client_id, now, *, event_id=None):
+        """No ID, no GET trace, and a complete account that shows no effect of the order.
+
+        Expired-unfilled and never-received are indistinguishable here; both leave the
+        account untouched, so the claim resolves as ABANDONED without asserting which.
+        """
+        recovery = self._order_recovery_context(conn, client_id, event_id=event_id)
+        state = self._live_state(conn)
+        row = self._row(conn, client_id)
+        if (
+            state.phase != "STOPPED"
+            or not conn.execute("SELECT halted FROM metadata").fetchone()[0]
+        ):
+            raise LiveOrderError("order_resolution_stop_required")
+        traces = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE client_id=? AND kind IN "
+            "('SUBMISSION_ACK','RECONCILED','ORDER_GET_OBSERVED')",
+            (client_id,),
+        ).fetchone()[0]
+        if (
+            recovery["post_operation"] not in {"order", "close_order"}
+            or row["state"] not in {"SUBMITTING", "UNKNOWN"}
+            or row["evidence_json"]
+            or traces
+        ):
+            raise LiveOrderError("order_absence_unknown_submission_required")
+        submitted = conn.execute(
+            "SELECT id FROM events WHERE client_id=? AND kind='SUBMITTING'", (client_id,)
+        ).fetchone()[0]
+        observed = conn.execute(
+            "SELECT id,payload_json FROM events WHERE client_id=? "
+            "AND kind='ABSENCE_ACCOUNT_OBSERVED' ORDER BY id DESC LIMIT 1",
+            (client_id,),
+        ).fetchone()
+        if observed is None or observed["id"] < submitted:
+            raise LiveOrderError("order_absence_account_required")
+        saved = json.loads(observed["payload_json"])
+        snapshot = AccountSnapshot.model_validate(saved["snapshot"])
+        quote = AccountQuote.model_validate(saved["quote"])
+        rows = self._absent_rows(conn, client_id)
+        post = self.posts.snapshot()
+        try:
+            errors = reconcile_account(state.policy, rows, snapshot, quote, now)
+        except ValueError:
+            errors = ["invalid_account"]
+        if (
+            self.posts.reads.status()["blocked"]
+            or saved["revision"] != revision(rows)
+            or (saved["post_claim"], saved["post_revision"]) != (post["claim"], post["revision"])
+            or errors
+            or any(o.client_id == client_id for o in snapshot.working_orders)
+            or int(snapshot.observed_at.timestamp() * 1_000_000_000)
+            < post["wall_ns"] + ABSENCE_MIN_DELAY_SECONDS * 1_000_000_000
+        ):
+            raise LiveOrderError("order_absence_complete_account_required")
+        context = {
+            "recovery": recovery,
+            "account_id": state.policy.account_id,
+            "implementation_sha256": self._current_implementation(),
+            "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
+            "absent_state": row["state"],
+            "observation_id": observed["id"],
+            "observation_sha256": _hash(observed["payload_json"]),
+        }
+        return {**context, "checkpoint_sha256": self._checkpoint(context)}
+
+    def record_absence_account(self, client_id, snapshot, quote, *, now=None):
+        """Store a complete account that must already reconcile without the unknown order.
+
+        Never updates the account gate: the ledger still holds the unresolved order.
+        """
+        snapshot = AccountSnapshot.model_validate(snapshot.model_dump())
+        quote = AccountQuote.model_validate(quote.model_dump())
+        with self._mutation(), self._transaction() as conn:
+            now = self._clock(now if now is not None else self.clock())
+            post = self.posts.snapshot()
+            self._event(
+                conn,
+                client_id,
+                "ABSENCE_ACCOUNT_OBSERVED",
+                {
+                    "snapshot": snapshot.model_dump(mode="json"),
+                    "quote": quote.model_dump(mode="json"),
+                    "revision": revision(self._absent_rows(conn, client_id)),
+                    "post_claim": post["claim"],
+                    "post_revision": post["revision"],
+                },
+            )
+            # A refused observation rolls back with the transaction; nothing is kept.
+            context = self._absence_context(conn, client_id, now)
+        return {
+            "client_id": client_id,
+            "checkpoint_sha256": context["checkpoint_sha256"],
+            "account_observed_at": snapshot.model_dump(mode="json")["observed_at"],
+            "account_shows_no_effect": True,
+            "absence_proven": False,
+            "live_enabled": False,
+            "complete": False,
+        }
+
+    def order_absence_context(self, client_id):
+        """Local checkpoint for an operator who verified the broker's order history."""
+        with self._transaction() as conn:
+            return self._absence_context(conn, client_id, self._clock(self.clock()))
+
+    def _pending_absence(self, conn, client_id):
+        """A POST commit whose live completion was interrupted; the decision is durable."""
+        done = {
+            json.loads(r[0])["prepared_id"]
+            for r in conn.execute(
+                "SELECT payload_json FROM events WHERE client_id=? "
+                "AND kind='ORDER_ABSENCE_RESOLVED'",
+                (client_id,),
+            )
+        }
+        for resolved in self.posts.trade_resolutions():
+            reference = resolved["reference"]
+            kind = conn.execute(
+                "SELECT kind FROM events WHERE id=?", (reference["prepared_id"],)
+            ).fetchone()
+            if (
+                reference["client_id"] == client_id
+                and kind is not None
+                and kind[0] == "ORDER_ABSENCE_PREPARED"
+                and reference["prepared_id"] not in done
+            ):
+                return reference
+        return None
+
+    def _complete_absence(self, conn, client_id, reference):
+        if self._row(conn, client_id)["state"] not in {"SUBMITTING", "UNKNOWN"}:
+            raise LiveOrderError("live_journal_integrity_or_binding_failed")
+        conn.execute("UPDATE orders SET state='ABANDONED' WHERE client_id=?", (client_id,))
+        self._event(
+            conn,
+            client_id,
+            "ORDER_ABSENCE_RESOLVED",
+            {
+                "prepared_id": reference["prepared_id"],
+                "prepared_sha256": reference["prepared_sha256"],
+            },
+        )
+
+    def resolve_absent_order(self, client_id, approval, *, confirmations):
+        approval = OrderResolutionApproval.model_validate(approval.model_dump())
+        if frozenset(confirmations) != ABSENCE_RESOLUTION_CONFIRMATIONS:
+            raise LiveOrderError("explicit_order_absence_confirmations_required")
+        result = {
+            "client_id": client_id,
+            "order_state": "ABANDONED",
+            "post_claim_resolved": True,
+            "post_phase": "STOPPED",
+            "absence_proven": False,
+            "live_enabled": False,
+            "restart_required": True,
+            "complete": False,
+        }
+        with self._sync_idle(), self._lock, self.posts._ownership() as owner:
+            with self._transaction() as conn:
+                pending = self._pending_absence(conn, client_id)
+                if pending is not None:
+                    self._complete_absence(conn, client_id, pending)
+                    return {**result, "completed_interrupted_resolution": True}
+                now = self._clock(self.clock())
+                context = self._absence_context(conn, client_id, now)
+                if (
+                    context["checkpoint_sha256"] != approval.checkpoint_sha256
+                    or context["account_id"] != approval.account_id
+                    or not approval.accepted_at <= now < approval.expires_at
+                ):
+                    raise LiveOrderError("order_resolution_acceptance_refused")
+                post = {
+                    k: v
+                    for k, v in self.posts.snapshot().items()
+                    if k not in {"blocked", "live_enabled", "complete"}
+                }
+                payload = {
+                    "context": context,
+                    "approval": approval.model_dump(mode="json"),
+                    "post": post,
+                }
+                self._event(conn, client_id, "ORDER_ABSENCE_PREPARED", payload)
+                prepared_id = conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+            with self._transaction() as conn:
+                now = self._clock(self.clock())
+                current = self._absence_context(
+                    conn, client_id, now, event_id=context["recovery"]["event_id"]
+                )
+                prepared = conn.execute(
+                    "SELECT client_id,kind,payload_json FROM events WHERE id=?", (prepared_id,)
+                ).fetchone()
+                if (
+                    current != context
+                    or conn.execute("SELECT MAX(id) FROM events").fetchone()[0] != prepared_id
+                    or not approval.accepted_at <= now < approval.expires_at
+                    or prepared is None
+                    or prepared["client_id"] != client_id
+                    or prepared["kind"] != "ORDER_ABSENCE_PREPARED"
+                    or json.loads(prepared["payload_json"]) != payload
+                ):
+                    raise LiveOrderError("order_resolution_checkpoint_changed")
+                state = self._live_state(conn)
+                saved = json.loads(
+                    conn.execute(
+                        "SELECT payload_json FROM events WHERE id=?",
+                        (context["observation_id"],),
+                    ).fetchone()[0]
+                )
+                snapshot = AccountSnapshot.model_validate(saved["snapshot"])
+                quote = AccountQuote.model_validate(saved["quote"])
+
+                def validate_commit():
+                    stamp = self._clock(self.clock())
+                    if (
+                        not approval.accepted_at <= stamp < approval.expires_at
+                        or self._current_implementation() != context["implementation_sha256"]
+                        or not fresh(
+                            snapshot.observed_at, stamp, state.policy.max_snapshot_age_seconds
+                        )
+                        or not fresh(quote.observed_at, stamp, state.policy.max_quote_age_seconds)
+                        or self.posts.reads.status()["blocked"]
+                    ):
+                        raise LiveOrderError("order_resolution_checkpoint_changed")
+
+                reference = {
+                    "live_instance": state.instance,
+                    "live_path": str(self.path.parent),
+                    "client_id": client_id,
+                    "prepared_id": prepared_id,
+                    "prepared_sha256": self._checkpoint(payload),
+                }
+                # Written in the held live transaction; the POST commit lands first. If the
+                # live commit is lost, the next call completes it from the POST record.
+                self._complete_absence(conn, client_id, reference)
+                updated = self.posts._resolve_trade(
+                    expected=post, reference=reference, owner=owner, validate=validate_commit
+                )
+            return {**result, "post_revision": updated["revision"]}
 
     def acknowledge_submission(self, receipt):
         with self._mutation():

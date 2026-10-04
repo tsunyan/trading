@@ -496,3 +496,87 @@ def test_revalue_invariants_over_random_positions_and_quotes():
         assert revalued.equity == local
         assert revalued.available_margin <= broker.available_margin
         assert revalued.available_margin <= max(local - margin, Decimal(0))
+
+
+def unknown_submission(setup):
+    _, live, _, order, _ = setup
+    clock = setup[0][0]
+    with __import__("test_private_order").client(live, lambda _: httpx.Response(500)) as sender:
+        with pytest.raises(ValueError):
+            sender.submit(order.client_id, quote=quote(clock.wall))
+    return order
+
+
+def absent(setup, order, **broker_options):
+    values = setup[0]
+    clock = values[0]
+    clock.advance(301)
+    return refresher(setup).refresh(
+        values[5].plan.credential_reference,
+        confirmations=ACCOUNT_CONFIRMATIONS,
+        quote=quote(clock.wall),
+        vault=values[4],
+        transport=broker(clock, [], **broker_options),
+        absent_order=order.client_id,
+    )
+
+
+def test_absent_order_observation_is_recorded_without_updating_the_gate(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    gate_before = live[3].snapshot()
+    result = absent(setup, order)
+    assert result["account_shows_no_effect"] and not result["absence_proven"]
+    assert live[3].order_absence_context(order.client_id)["absent_state"] == "UNKNOWN"
+    after = live[3].snapshot()
+    assert after["orders"] == gate_before["orders"] and after["halted"]
+
+
+def test_absent_order_found_active_is_refused_before_any_record(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    clock = setup[0][0]
+    wire = {
+        "rootOrderId": 101,
+        "orderId": 201,
+        "clientOrderId": order.client_id,
+        "symbol": "USD_JPY",
+        "side": order.side,
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": order.effect,
+        "size": str(order.units),
+        "price": str(order.price),
+        "status": "ORDERED",
+        "timestamp": clock.wall.isoformat(),
+    }
+    with pytest.raises(LiveAccountError, match="unknown_order_is_active"):
+        absent(setup, order, orders=[wire])
+    with pytest.raises(ValueError, match="absence_account_required"):
+        live[3].order_absence_context(order.client_id)
+
+
+def test_absent_order_with_a_position_is_refused(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    clock = setup[0][0]
+    held = {
+        "positionId": 401,
+        "symbol": "USD_JPY",
+        "side": "BUY",
+        "size": "1000",
+        "orderedSize": "0",
+        "price": "150.01",
+        "lossGain": "0",
+        "totalSwap": "0",
+        "timestamp": clock.wall.isoformat(),
+    }
+    with pytest.raises(ValueError, match="complete_account_required"):
+        absent(
+            setup,
+            order,
+            positions=[held],
+            assets={"margin": "6000", "availableAmount": "994000"},
+        )
+    with pytest.raises(ValueError, match="absence_account_required"):
+        live[3].order_absence_context(order.client_id)

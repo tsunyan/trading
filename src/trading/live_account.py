@@ -150,6 +150,7 @@ class LiveAccountRefresh:
         transport=None,
         quote_transport=None,
         valuation_tolerance=None,
+        absent_order=None,
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
@@ -169,8 +170,18 @@ class LiveAccountRefresh:
             raise LiveAccountError("account_collection_failed") from None
         if self.journal.credential_binding() != binding:
             raise LiveAccountError("live_binding_changed")
+        if absent_order is not None and any(
+            o.client_id == absent_order for o in report.active_orders
+        ):
+            # Found, not absent: reconcile it by its broker ID instead (order_discovery).
+            raise LiveAccountError("unknown_order_is_active")
         try:
             policy, rows = self._local()
+            if absent_order is not None:
+                rows = [
+                    {**r, "state": "ABANDONED"} if r["client_id"] == absent_order else r
+                    for r in rows
+                ]
             snapshot = snapshot_from_report(report, account_id=policy.account_id, rows=rows)
         except AccountDiscrepancy:
             self.journal.halt()
@@ -194,6 +205,9 @@ class LiveAccountRefresh:
             # Ledger contents agree; only the broker's valuation instant differs from the
             # ticker. Do not halt for that, and do not substitute a locally marked equity.
             raise LiveAccountError("valuation_time_mismatch")
+        if absent_order is not None:
+            # The account must reconcile as if the unknown order never existed.
+            return self.journal.record_absence_account(absent_order, snapshot, quote, now=now)
         result = self.journal.update_account(snapshot, quote, now=now)
         return {
             **result,
@@ -215,6 +229,7 @@ def main(argv=None):
     parser.add_argument("--quote", type=Path)
     parser.add_argument("--confirm", action="append", default=[])
     parser.add_argument("--valuation-tolerance")
+    parser.add_argument("--absent-order", metavar="CLIENT_ID")
     args = parser.parse_args(argv)
     try:
         refresh = LiveAccountRefresh(args.directory, args.read_control_directory, args.scope)
@@ -223,6 +238,7 @@ def main(argv=None):
             confirmations=args.confirm,
             quote=_quote(args.quote) if args.quote is not None else None,
             valuation_tolerance=args.valuation_tolerance,
+            absent_order=args.absent_order,
         )
         print(json.dumps({**result, "network_used": True, "orders_sent": False}))
     except Exception as error:
