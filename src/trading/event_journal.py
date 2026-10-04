@@ -225,6 +225,7 @@ class EventJournal:
                 "unacknowledged": [],
                 "reviewed_unknown": [],
                 "last_kind": None,
+                "begin_index": 0,
                 "rejected": 0,
                 "events": 0,
             }
@@ -284,12 +285,14 @@ class EventJournal:
                 sequence=0,
                 pending=None,
                 clock_skew_ms=entry.clock_skew_ms or 0,
+                begin_index=index,
             )
         elif entry.kind == "REVIEWED":
             # An operator's recorded decision about delivery uncertainty, never a delivery.
-            uncertain = (state["active"] and state["unacknowledged"]) or (
-                not state["active"] and state["last_kind"] in {"FAULT", "REJECTED"}
-            )
+            # An open session is reviewable only for its own unknown records.
+            uncertain = (
+                state["active"] and any(i > state["begin_index"] for i in state["unacknowledged"])
+            ) or (not state["active"] and state["last_kind"] in {"FAULT", "REJECTED"})
             if (
                 not uncertain
                 or entry.epoch != state["epoch"]

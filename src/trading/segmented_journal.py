@@ -564,7 +564,8 @@ class SegmentedEventJournal(EventJournal):
                 faulted = (
                     entries and not state["active"] and entries[-1].kind in {"FAULT", "REJECTED"}
                 )
-                if not (state["active"] and state["unacknowledged"]) and not faulted:
+                own = any(i > state["begin_index"] for i in state["unacknowledged"])
+                if not (state["active"] and own) and not faulted:
                     raise JournalError("journal_review_not_required")
                 if at < state["at"]:
                     raise JournalError("invalid_capture_clock")
