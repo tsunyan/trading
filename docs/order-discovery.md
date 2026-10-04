@@ -19,6 +19,8 @@ uv run python -m trading.order_discovery --directory runs/live-orders --read-con
 3. 読取専用キーで口座を2回走査し（[口座読取](account-reader.md)）、同じ顧客注文IDの有効注文を探します。
 4. 見つかった注文の銘柄・売買・新規/決済・注文タイプ・数量・価格が台帳の注文意図と違えば拒否します。
    同じ顧客注文IDの有効注文が複数あっても拒否します。
+5. GETの後に手順1のcontextを読み直し、チェックポイントが変わっていれば`journal_changed_during_discovery`で
+   拒否します。走査中に別のプロセスがclaimを解消した場合などに、古い注文IDを返さないためです。
 
 見つかった場合は親注文IDと注文ID、状態を出力します。その注文IDを
 `private_order_recovery reconcile --order-id`に渡して照合し、
@@ -34,5 +36,5 @@ uv run python -m trading.order_discovery --directory runs/live-orders --read-con
 
 `tests/test_order_discovery.py`で、結果不明の新規注文をGETだけで見つけて台帳を変えないこと、
 見つからない場合に不在を主張しないこと、条件の違う同じ顧客注文IDの拒否、
-未送信の注文・確認不足でキーを読まないこと、CLIの失敗表示を検証します。実通信は行いません。
+未送信の注文・確認不足でキーを読まないこと、CLIの失敗表示、走査中の台帳変更の拒否を検証します。実通信は行いません。
 追加7試験が合格しました。台帳と既存モジュールは変更していません。Ruffの検査・整形確認、差分チェックも合格しました。

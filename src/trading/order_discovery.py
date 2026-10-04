@@ -87,6 +87,14 @@ class OrderDiscovery:
                 report = AccountReader(client, clock=self.clock).collect_account()
         except Exception:
             raise OrderDiscoveryError("order_discovery_collection_failed") from None
+        # The answer is only about the checkpoint read before the GETs; if the order was
+        # resolved or otherwise advanced meanwhile, report nothing rather than stale IDs.
+        try:
+            after = journal.order_recovery_context(client_id)["checkpoint_sha256"]
+        except Exception:
+            after = None
+        if after != context["checkpoint_sha256"]:
+            raise OrderDiscoveryError("journal_changed_during_discovery")
         order = match_active_order(report, intent)
         result = {
             "client_id": client_id,

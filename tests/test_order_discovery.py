@@ -149,3 +149,23 @@ def test_cli_hides_failures(setup, capsys):
     assert raised.value.code == 2
     assert "read_confirmation_required" in capsys.readouterr().err
     assert values[3].reads == []
+
+
+def test_journal_change_during_the_reads_returns_no_stale_ids(setup, monkeypatch):
+    from trading.live_journal import LiveOrderJournal
+
+    _, live, _, order, _ = setup
+    unknown(setup)
+    original = LiveOrderJournal.order_recovery_context
+    calls = []
+
+    def advanced(self, client_id):
+        context = original(self, client_id)
+        calls.append(client_id)
+        # The second read (after the GETs) sees another process's resolution.
+        return context if len(calls) == 1 else {**context, "checkpoint_sha256": "0" * 64}
+
+    monkeypatch.setattr(LiveOrderJournal, "order_recovery_context", advanced)
+    with pytest.raises(OrderDiscoveryError, match="journal_changed_during_discovery"):
+        discover(setup, [wire(order, setup[0][0])])
+    assert len(calls) == 2
