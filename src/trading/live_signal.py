@@ -259,6 +259,9 @@ def main(argv=None):
     parser.add_argument("--hypothesis")
     args = parser.parse_args(argv)
     try:
+        # First: a run refused below (revoked candidate, changed code, broken config)
+        # must not leave the previous proposal looking current.
+        clear_intent(args.output)
         now = datetime.now(UTC)
         cfg = load_settings(args.config)
         if (args.ledger is None) != (args.hypothesis is None):
@@ -271,7 +274,6 @@ def main(argv=None):
                 require_live(args.ledger, args.hypothesis, cfg)
             except PromotionError as error:
                 raise LiveSignalError(str(error)) from None
-        clear_intent(args.output)
         journal = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         positions, pending, limits = journal_state(journal.journal, now)
         quote = _quote(args.quote)

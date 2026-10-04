@@ -13,7 +13,7 @@ import re
 import subprocess
 import tempfile
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from trading.config import load_settings
@@ -78,6 +78,9 @@ class LiveCycle:
         candidate=None,
         service_status=None,
     ):
+        if intent_output is not None:
+            # Before any check: only this run's intent, if any, may be left afterwards.
+            clear_intent(intent_output)
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
         ) != set(CYCLE_CONFIRMATIONS):
@@ -90,8 +93,6 @@ class LiveCycle:
                 raise LiveCycleError("promoted_candidate_required")
             ledger, hypothesis = candidate
             require_live(ledger, hypothesis, cfg)
-        if intent_output is not None:
-            clear_intent(intent_output)  # Only this run's intent, if any, may be left.
         result = {"reconciled_orders": [], "orders_sent": False}
         if service_status is None and quote is None:
             # Live mode: during broker maintenance every private GET fails; skip quietly.
@@ -237,6 +238,30 @@ def write_result(result, path):
 
 
 APPROVAL_NOTICE_SECONDS = 24 * 3600
+RUN_LIMIT_SECONDS = 360  # The scheduled task's 300 s execution limit plus a minute.
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def require_safe_outputs(outputs, *, protected):
+    """Every file a run rewrites must be its own regular file, never an input or a store.
+
+    A result written over the attestation, or a quote written over the research ledger,
+    would destroy them; so outputs must differ from each other and from the inputs, and
+    an existing output must not be a SQLite database.
+    """
+    paths = [Path(p).resolve() for p in outputs if p is not None]
+    if len(set(paths)) != len(paths):
+        raise LiveCycleError("output_paths_collide")
+    guarded = {Path(p).resolve() for p in protected if p is not None}
+    for path in paths:
+        if path in guarded:
+            raise LiveCycleError("output_path_is_an_input")
+        if path.exists():
+            if not path.is_file():
+                raise LiveCycleError("output_path_not_a_file")
+            with path.open("rb") as handle:
+                if handle.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC:
+                    raise LiveCycleError("output_path_is_a_database")
 
 
 def attestation_expiry(path):
@@ -309,14 +334,32 @@ def main(argv=None, *, send=None):
     finished = lambda: datetime.now(UTC).isoformat()  # noqa: E731
     cycle = None
     try:
+        require_safe_outputs(
+            (
+                args.quote_output,
+                args.intent_output,
+                args.result_output,
+                args.history_output,
+                args.dashboard_output,
+            ),
+            protected=(args.config, args.ledger, args.attestation),
+        )
+        if args.intent_output is not None:
+            # First, before any check that could stop this run from writing a new intent.
+            clear_intent(args.intent_output)
         cycle = LiveCycle(args.directory, args.read_control_directory, args.scope)
         confirmations = args.confirm
         if args.attestation is not None:
-            # Unattended runs: the operator's expiring statement replaces --confirm.
+            # Unattended runs: the operator's expiring statement replaces --confirm, and
+            # it must stay valid for the whole run, not just its start.
             if args.confirm:
                 raise LiveCycleError("confirm_or_attestation_not_both")
             confirmations = require_attestation(
-                args.attestation, cycle.journal, required=CYCLE_CONFIRMATIONS, now=datetime.now(UTC)
+                args.attestation,
+                cycle.journal,
+                required=CYCLE_CONFIRMATIONS,
+                now=datetime.now(UTC),
+                valid_for=timedelta(seconds=RUN_LIMIT_SECONDS),
             ).confirmations
         result = cycle.run(
             args.credential_reference,
@@ -474,7 +517,10 @@ def main(argv=None, *, send=None):
         try:
             write_result(result, args.result_output)
         except OSError:
+            # The result file is the heartbeat the doctor reads; a run that cannot replace
+            # it must not look successful to the task scheduler either.
             result["result_written"] = False
+            result.update(ok=False, reason="result_write_failed")
     if not result["ok"]:
         parser.exit(2, f"live_cycle_failed: {result['reason']}\n")
     print(json.dumps(result, default=str))

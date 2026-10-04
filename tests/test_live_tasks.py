@@ -531,9 +531,13 @@ def test_result_file_is_written_after_the_other_outputs(tmp_path, monkeypatch):
     (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
     FakeCycle.outcome = {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
     monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
-    blocked = tmp_path / "history-is-a-directory"
-    blocked.mkdir()
-    live_cycle.main([*cycle_args(tmp_path), "--history-output", str(blocked)], send=lambda *a: 0)
+
+    def unwritable(result, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(live_cycle, "append_history", unwritable)
+    history = tmp_path / "cycles.jsonl"
+    live_cycle.main([*cycle_args(tmp_path), "--history-output", str(history)], send=lambda *a: 0)
     saved = json.loads((tmp_path / "cycle.json").read_text(encoding="utf-8"))
     assert saved["ok"] and saved["history_written"] is False
 
@@ -558,3 +562,64 @@ def test_history_append_waits_for_and_respects_the_lock(tmp_path):
             live_cycle.append_history({"ok": False}, path, wait_seconds=0.1)
     live_cycle.append_history({"ok": False}, path)
     assert [json.loads(x)["ok"] for x in path.read_text().splitlines()] == [True, False]
+
+
+CONFIG_TEXT = 'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n'
+
+
+def test_an_unwritable_result_file_fails_the_run(tmp_path, monkeypatch, capsys):
+    (tmp_path / "fx.toml").write_text(CONFIG_TEXT)
+    FakeCycle.outcome = {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+
+    def unwritable(result, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(live_cycle, "write_result", unwritable)
+    with pytest.raises(SystemExit) as raised:
+        live_cycle.main(cycle_args(tmp_path), send=lambda *a: 0)
+    # The doctor's heartbeat could not be replaced, so the scheduler must see a failure.
+    assert raised.value.code == 2
+    assert capsys.readouterr().err == "live_cycle_failed: result_write_failed\n"
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        (lambda t: ["--history-output", str(t / "cycle.json")], "output_paths_collide"),
+        (lambda t: ["--intent-output", str(t / "fx.toml")], "output_path_is_an_input"),
+        (lambda t: ["--dashboard-output", str(t)], "output_path_not_a_file"),
+        (lambda t: ["--history-output", str(t / "store.sqlite")], "output_path_is_a_database"),
+    ],
+)
+def test_destructive_output_paths_are_refused_before_anything_runs(
+    tmp_path, monkeypatch, capsys, extra, reason
+):
+    import sqlite3
+    from contextlib import closing
+
+    (tmp_path / "fx.toml").write_text(CONFIG_TEXT)
+    with closing(sqlite3.connect(tmp_path / "store.sqlite")) as conn:
+        conn.execute("CREATE TABLE t (x)")
+    monkeypatch.setattr(live_cycle, "LiveCycle", lambda *a: pytest.fail("cycle opened"))
+    with pytest.raises(SystemExit):
+        live_cycle.main([*cycle_args(tmp_path), *extra(tmp_path)], send=lambda *a: 0)
+    assert capsys.readouterr().err == f"live_cycle_failed: {reason}\n"
+
+
+@pytest.mark.parametrize(
+    ("field", "target", "reason"),
+    [
+        ("result_output", "attestation.json", "output_path_is_an_input"),
+        ("quote_output", "candidate/ledger.sqlite", "output_path_is_an_input"),
+        ("history_output", "cycle.json", "output_paths_collide"),
+        ("dashboard_output", "doctor-state.json", "output_paths_collide"),
+        ("quote_output", "fx live.toml", "output_path_is_an_input"),
+    ],
+)
+def test_plan_refuses_outputs_that_alias_inputs_or_each_other(
+    running, tmp_path, field, target, reason
+):
+    values = inputs(running, tmp_path)
+    with pytest.raises(LiveTaskError, match=reason):
+        task_plan(**{**values, field: tmp_path / target})

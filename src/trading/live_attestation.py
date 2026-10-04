@@ -79,8 +79,12 @@ def load(path):
         raise LiveAttestationError("attestation_unavailable") from None
 
 
-def require(path, journal, *, required, now):
-    """The attested confirmations, only while valid for exactly this journal."""
+def require(path, journal, *, required, now, valid_for=timedelta(0)):
+    """The attested confirmations, only while valid for exactly this journal.
+
+    `valid_for` is how long the caller will rely on them: a run that may take minutes
+    must not start on an attestation that expires before it ends.
+    """
     saved = load(path)
     if saved.live_instance != journal.credential_binding()["live_instance"]:
         raise LiveAttestationError("attestation_not_bound_to_journal")
@@ -90,6 +94,8 @@ def require(path, journal, *, required, now):
         raise LiveAttestationError("attestation_hours_out_of_range")
     if not saved.attested_at <= now < saved.expires_at:
         raise LiveAttestationError("attestation_expired")
+    if now + valid_for >= saved.expires_at:
+        raise LiveAttestationError("attestation_expires_during_run")
     return saved
 
 

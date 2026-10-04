@@ -19,7 +19,7 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 2. 公開tickerから[気配](live-quote.md)を1回取得し、`--quote-output`へ書き出します。
 3. [口座証拠を更新](live-account.md)します。
 4. [戦略の提案](live-signal.md)を作ります。提案があれば`--intent-output`へ書き出します。
-   `--intent-output`のファイルはサイクルの最初に削除するため、提案のない回の後に古い注文意図は残りません。
+   `--intent-output`のファイルは、昇格・宣言・設定などの検査より前、サイクルの最初に削除します。提案のない回や、昇格の取消しなどで拒否された回の後にも、古い注文意図は残りません。
 5. `--prepare`を指定した場合だけ、提案を台帳に準備し、手順2の気配で実行内容を作って
    `checkpoint_sha256`・要求の本文・リスク評価を出力します。
 

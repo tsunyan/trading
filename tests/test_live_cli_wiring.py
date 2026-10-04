@@ -256,9 +256,13 @@ def test_live_signal_cli_refuses_an_unpromoted_strategy_before_reading(
         "--output",
         str(tmp_path / "intent.json"),
     ]
+    stale = tmp_path / "intent.json"
+    stale.write_text('{"client_id": "S-old"}')
     with pytest.raises(SystemExit):
         live_signal.main([*base, "--ledger", str(ledger), "--hypothesis", "H001"])
     assert capsys.readouterr().err == "strategy_not_promoted_for_live\n"
+    # The refused proposal run removed the previous one, so it cannot be prepared by mistake.
+    assert not stale.exists()
     with pytest.raises(SystemExit):
         live_signal.main([*base, "--ledger", str(ledger)])
     assert capsys.readouterr().err == "ledger_and_hypothesis_required_together\n"

@@ -176,3 +176,44 @@ def test_cli_writes_and_checks_the_attestation(journal, tmp_path, capsys):
     with pytest.raises(SystemExit):
         live_attestation.main(["attest", *stores, "--hours", "24"])
     assert "attestation_confirmations_required" in capsys.readouterr().err
+
+
+def test_an_attestation_must_outlast_the_run_that_relies_on_it(journal, tmp_path, monkeypatch):
+    path = tmp_path / "attestation.json"
+    write(journal, path, hours=1)
+    late = NOW + timedelta(minutes=55)
+    assert require(path, journal, required=CYCLE_CONFIRMATIONS, now=late)
+    with pytest.raises(LiveAttestationError, match="attestation_expires_during_run"):
+        require(
+            path,
+            journal,
+            required=CYCLE_CONFIRMATIONS,
+            now=late,
+            valid_for=timedelta(seconds=live_cycle.RUN_LIMIT_SECONDS),
+        )
+
+    class Never(live_cycle.LiveCycle):
+        def __init__(self, *args):
+            self.journal = journal
+
+        def run(self, *args, **kwargs):
+            pytest.fail("a run started on an attestation that expires before it can end")
+
+    monkeypatch.setattr(live_cycle, "LiveCycle", Never)
+    write(journal, path, hours=1, now=datetime.now(UTC) - timedelta(minutes=58))
+    with pytest.raises(SystemExit):
+        live_cycle.main(cycle_args(journal, tmp_path, "--attestation", str(path)))
+    saved = json.loads((tmp_path / "cycle.json").read_text())
+    assert saved["reason"] == "attestation_expires_during_run"
+
+
+def test_a_refused_cycle_still_removes_the_previous_intent(journal, tmp_path, capsys):
+    stale = tmp_path / "intent.json"
+    stale.write_text('{"client_id": "S-old"}')
+    expired = tmp_path / "attestation.json"
+    write(journal, expired, hours=1, now=datetime.now(UTC) - timedelta(hours=2))
+    args = cycle_args(journal, tmp_path, "--attestation", str(expired))
+    with pytest.raises(SystemExit):
+        live_cycle.main([*args, "--intent-output", str(stale)])
+    assert "attestation_expired" in capsys.readouterr().err
+    assert not stale.exists()

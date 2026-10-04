@@ -17,7 +17,7 @@ from trading.config import load_settings
 from trading.live_account import LiveAccountError, _valuation_tolerance
 from trading.live_attestation import LiveAttestationError
 from trading.live_attestation import require as require_attestation
-from trading.live_cycle import CYCLE_CONFIRMATIONS
+from trading.live_cycle import CYCLE_CONFIRMATIONS, LiveCycleError, require_safe_outputs
 from trading.live_signal import LiveSignalError, history_days
 from trading.order_runtime import OrderRuntime
 from trading.paper_runner import scheduled_process_args
@@ -97,6 +97,21 @@ def task_plan(
     for path in (quote_output, result_output):
         if not path.parent.is_dir():
             raise LiveTaskError("output_directory_required")
+    try:
+        # Every file the hourly run (and its doctor) rewrites must not alias another
+        # output, an input or a store; otherwise one run could destroy the next one's input.
+        require_safe_outputs(
+            (
+                quote_output,
+                result_output,
+                history_output,
+                dashboard_output,
+                result_output.with_name("doctor-state.json"),
+            ),
+            protected=(config, ledger, attestation),
+        )
+    except LiveCycleError as error:
+        raise LiveTaskError(str(error)) from None
     args = [
         "--config",
         config,
