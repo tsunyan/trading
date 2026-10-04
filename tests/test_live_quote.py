@@ -10,7 +10,14 @@ import pytest
 
 from trading import live_quote
 from trading.account_guard import AccountQuote
-from trading.live_quote import LiveQuoteError, fetch_quote, parse_ticker, write_quote
+from trading.live_quote import (
+    LiveQuoteError,
+    fetch_quote,
+    fetch_status,
+    parse_status,
+    parse_ticker,
+    write_quote,
+)
 
 NOW = datetime(2026, 10, 5, 1, 0, tzinfo=UTC)
 
@@ -152,3 +159,38 @@ def test_cli_writes_quote_and_hides_failures(tmp_path, monkeypatch, capsys):
     assert AccountQuote.model_validate_json((tmp_path / "q.json").read_text()) == quote
     with pytest.raises(SystemExit):
         live_quote.main(["--output", str(tmp_path / "missing" / "q.json")])
+
+
+@pytest.mark.parametrize("state", ["OPEN", "CLOSE", "MAINTENANCE"])
+def test_service_status_is_read_from_the_fixed_public_endpoint(state):
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        payload = {"status": 0, "data": {"status": state}, "responsetime": "x"}
+        return httpx.Response(200, json=payload)
+
+    assert fetch_status(transport=httpx.MockTransport(handler)) == state
+    assert calls == ["https://forex-api.coin.z.com/public/v1/status"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"{}",
+        b'{"status": 1, "data": {"status": "OPEN"}}',
+        b'{"status": 0, "data": {"status": "UNKNOWN"}}',
+        b'{"status": 0, "data": {"status": "OPEN", "status": "CLOSE"}}',
+    ],
+)
+def test_malformed_service_status_is_refused(content):
+    with pytest.raises(LiveQuoteError, match="invalid_public_service_status"):
+        parse_status(content)
+
+
+def test_service_status_transport_failure_is_fixed_reason():
+    def broken(request):
+        raise httpx.ConnectError("x")
+
+    with pytest.raises(LiveQuoteError, match="public_service_unavailable"):
+        fetch_status(transport=httpx.MockTransport(broken))

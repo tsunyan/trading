@@ -22,7 +22,7 @@ from trading.live_order_sync import (
     LiveOrderSync,
     LiveOrderSyncError,
 )
-from trading.live_quote import LiveQuoteError, fetch_quote, write_quote
+from trading.live_quote import LiveQuoteError, fetch_quote, fetch_status, write_quote
 from trading.live_signal import (
     LiveSignalError,
     decide,
@@ -69,6 +69,7 @@ class LiveCycle:
         intent_output=None,
         valuation_tolerance=None,
         candidate=None,
+        service_status=None,
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
@@ -81,6 +82,16 @@ class LiveCycle:
             ledger, hypothesis = candidate
             require_live(ledger, hypothesis, cfg)
         result = {"reconciled_orders": [], "orders_sent": False}
+        if service_status is None and quote is None:
+            # Live mode: during broker maintenance every private GET fails; skip quietly.
+            service_status = fetch_status(transport=quote_transport)
+        if service_status == "MAINTENANCE":
+            result.update(
+                decision={"action": "hold", "reason": "broker_maintenance", "intent": None},
+                prepared=False,
+                service_status="MAINTENANCE",
+            )
+            return result
         rows = self.journal.snapshot()["orders"]
         for row in rows:
             if row["state"] in ACCEPTED:

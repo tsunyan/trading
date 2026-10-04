@@ -37,3 +37,11 @@ ticker本文はエラーに表示しません。
 置き換え書込みと`order_runtime`での読込、CLIの失敗表示を検証します。実ネットワークは使いません。
 追加21試験と関連する公開APIの試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
 2026-10-04（日曜）に公開APIの実データで取得を確認しました。市場閉鎖中の状態`CLOSE`を`market_open=false`として読み、閉鎖中のスプレッドは0.1円でした。
+
+## サービス状態
+
+`fetch_status()`は`GET /public/v1/status`を1回読み、`OPEN`・`CLOSE`・`MAINTENANCE`のいずれかを返します。
+tickerの`status`は`OPEN`・`CLOSE`だけで、定期メンテナンスを区別できないため別に読みます。
+それ以外の値・重複キー・`status`が0でない応答は`invalid_public_service_status`で拒否します。
+[運用サイクル](live-cycle.md)は`MAINTENANCE`の時に非公開GETを行わず見送ります。
+2026-10-04（日）の実データでは`CLOSE`でした。

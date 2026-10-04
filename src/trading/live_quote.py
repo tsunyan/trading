@@ -57,6 +57,55 @@ def parse_ticker(content, *, received_at):
     return quote
 
 
+STATUSES = frozenset({"OPEN", "CLOSE", "MAINTENANCE"})
+
+
+def _get_json(path, *, transport, monotonic, prefix):
+    started = monotonic()
+    try:
+        with httpx.Client(
+            transport=transport, timeout=5.0, follow_redirects=False, trust_env=False
+        ) as client:
+            with client.stream("GET", f"{PUBLIC_URL}/{path}") as response:
+                if response.status_code != 200:
+                    raise LiveQuoteError(f"unexpected_public_{prefix}_status")
+                kind = response.headers.get("content-type", "").split(";", 1)[0].strip()
+                if kind != "application/json":
+                    raise LiveQuoteError(f"expected_public_{prefix}_json")
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(content) + len(chunk) > MAX_TICKER_BYTES:
+                        raise LiveQuoteError(f"public_{prefix}_too_large")
+                    content.extend(chunk)
+                    if monotonic() - started > 5:
+                        raise LiveQuoteError(f"public_{prefix}_deadline_exceeded")
+    except LiveQuoteError:
+        raise
+    except Exception:
+        raise LiveQuoteError(f"public_{prefix}_unavailable") from None
+    return bytes(content)
+
+
+def parse_status(content):
+    """GMO FX service state: OPEN, CLOSE or MAINTENANCE (the ticker never says MAINTENANCE)."""
+    try:
+        payload = json.loads(content, object_pairs_hook=unique_object)
+        if payload.get("status") != 0 or not isinstance(payload.get("data"), dict):
+            raise ValueError
+        state = payload["data"]["status"]
+        if state not in STATUSES:
+            raise ValueError
+        return state
+    except Exception:
+        raise LiveQuoteError("invalid_public_service_status") from None
+
+
+def fetch_status(*, transport=None, monotonic=time.monotonic):
+    return parse_status(
+        _get_json("status", transport=transport, monotonic=monotonic, prefix="service")
+    )
+
+
 def fetch_quote(*, transport=None, clock=lambda: datetime.now(UTC), monotonic=time.monotonic):
     """One unauthenticated GET to the fixed public host; staleness stays with the risk gate."""
     started = monotonic()

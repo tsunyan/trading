@@ -11,6 +11,9 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 
 ## 1回のサイクルで行うこと
 
+0. 公開APIの[サービス状態](live-quote.md)を読みます。`MAINTENANCE`なら非公開GETを一切行わず、
+   `hold`（`broker_maintenance`）で終わります。メンテナンス中は口座GETがすべて失敗し、毎時の失敗通知に
+   なるためです。`CLOSE`（週末）はそのまま進み、提案の段階で市場閉鎖として見送ります。
 1. 台帳で受付済み（`RECONCILING`・`WORKING`・`PARTIAL`・`CANCEL_PENDING`）の注文を、
    [受付済み注文のGET照合](live-order-sync.md)で順に照合します。
 2. 公開tickerから[気配](live-quote.md)を1回取得し、`--quote-output`へ書き出します。

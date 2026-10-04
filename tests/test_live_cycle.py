@@ -50,6 +50,7 @@ def cycle(
     valuation_tolerance=None,
     units=1000,
     candidate=None,
+    service_status=None,
 ):
     values, live, _ = running
     clock = values[0]
@@ -71,6 +72,7 @@ def cycle(
         transport=transport or private_get(clock),
         quote_output=tmp_path / "quote.json",
         intent_output=tmp_path / "intent.json",
+        service_status=service_status,
     )
 
 
@@ -403,3 +405,22 @@ def test_cycle_cli_writes_the_dashboard_page(running, tmp_path, monkeypatch, cap
     )
     capsys.readouterr()
     assert "実発注の状態" in page.read_text(encoding="utf-8")
+
+
+def test_broker_maintenance_holds_before_any_private_read(running, tmp_path):
+    def refused(request):
+        pytest.fail("private GET during maintenance")
+
+    result = cycle(
+        running,
+        tmp_path,
+        prepare=True,
+        transport=httpx.MockTransport(refused),
+        service_status="MAINTENANCE",
+    )
+    assert result["decision"] == {
+        "action": "hold",
+        "reason": "broker_maintenance",
+        "intent": None,
+    }
+    assert result["prepared"] is False and not (tmp_path / "intent.json").exists()
