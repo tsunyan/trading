@@ -6,6 +6,7 @@ context. Sending stays a separate `order_runtime submit` with that context's SHA
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -242,6 +243,14 @@ def approval_expiry(cycle):
         return None
 
 
+def proposal_key(intent, current):
+    """Identity of a standing proposal: every order term except the per-bar client ID and
+    the limit/bound price, which follows the quote every hour and is re-reviewed at send."""
+    terms = {k: v for k, v in intent.items() if k not in {"client_id", "price", "bound"}}
+    body = json.dumps({"intent": terms, "current": current}, sort_keys=True, default=str)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 def read_result(path):
     if path is None:
         return {}
@@ -410,8 +419,7 @@ def main(argv=None, *, send=None):
                 for key in ("client_id", "side", "effect", "units")
                 if intent.get(key) is not None
             )
-            # The same standing proposal (side, effect, holdings) is announced once, not hourly.
-            key = f"{intent.get('side')}:{intent.get('effect')}:{decision.get('current')}"
+            key = proposal_key(intent, decision.get("current"))
             if previous.get("proposal_notice_for") == key:
                 result["proposal_notice_for"] = key
             elif notify("live_cycle_proposal", reference or "proposal", send=send):
@@ -419,11 +427,6 @@ def main(argv=None, *, send=None):
                 result["proposal_notice_for"] = key
             else:
                 result["notified"] = False
-    if args.result_output is not None:
-        try:
-            write_result(result, args.result_output)
-        except OSError:
-            result["result_written"] = False
     if args.history_output is not None:
         try:
             append_history(result, args.history_output)
@@ -455,6 +458,12 @@ def main(argv=None, *, send=None):
             write_page(page, args.dashboard_output)
         except Exception:
             result["dashboard_written"] = False  # A page never changes the cycle outcome.
+    # Written last, so the canonical result records every output that failed above.
+    if args.result_output is not None:
+        try:
+            write_result(result, args.result_output)
+        except OSError:
+            result["result_written"] = False
     if not result["ok"]:
         parser.exit(2, f"live_cycle_failed: {result['reason']}\n")
     print(json.dumps(result, default=str))

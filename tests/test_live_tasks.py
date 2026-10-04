@@ -507,21 +507,35 @@ def test_a_standing_proposal_is_noticed_once_until_it_changes(tmp_path, monkeypa
     monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
     sent = []
 
-    def proposal(client_id, side, effect, current):
+    def proposal(client_id, side, effect, current, units=1000, price="150.01"):
+        intent = {"client_id": client_id, "side": side, "effect": effect, "units": units}
         FakeCycle.outcome = {
             "decision": {
                 "action": "open" if effect == "OPEN" else "close",
                 "current": current,
-                "intent": {"client_id": client_id, "side": side, "effect": effect, "units": 1000},
+                "intent": {**intent, "kind": "LIMIT", "price": price},
             },
             "orders_sent": False,
         }
         live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
 
     proposal("S2026100510OB", "BUY", "OPEN", 0)
-    proposal("S2026100511OB", "BUY", "OPEN", 0)  # Next bar, same standing proposal.
-    proposal("S2026100512CS", "SELL", "CLOSE", 1)  # Changed: now closing a long.
-    assert [a["id"].split()[0] for a in sent] == ["S2026100510OB", "S2026100512CS"]
+    # Next bar, same standing proposal; only the quote-driven limit price moved.
+    proposal("S2026100511OB", "BUY", "OPEN", 0, price="150.07")
+    proposal("S2026100512OB", "BUY", "OPEN", 0, units=5000)  # Changed: a larger lot.
+    proposal("S2026100513CS", "SELL", "CLOSE", 1)  # Changed: now closing a long.
+    assert [a["id"].split()[0] for a in sent] == ["S2026100510OB", "S2026100512OB", "S2026100513CS"]
+
+
+def test_result_file_is_written_after_the_other_outputs(tmp_path, monkeypatch):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    FakeCycle.outcome = {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    blocked = tmp_path / "history-is-a-directory"
+    blocked.mkdir()
+    live_cycle.main([*cycle_args(tmp_path), "--history-output", str(blocked)], send=lambda *a: 0)
+    saved = json.loads((tmp_path / "cycle.json").read_text(encoding="utf-8"))
+    assert saved["ok"] and saved["history_written"] is False
 
 
 def test_plan_refuses_a_warmup_the_live_fetch_cannot_cover(running, tmp_path):
