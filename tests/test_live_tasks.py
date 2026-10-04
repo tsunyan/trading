@@ -372,3 +372,27 @@ def test_plan_with_candidate_requires_live_promotion(running, tmp_path):
     assert "--hypothesis H001" in plan["tasks"][0]["arguments"]
     with pytest.raises(LiveTaskError, match="ledger_and_hypothesis_required_together"):
         task_plan(**values, ledger=live)
+
+
+def test_history_output_appends_one_line_per_run(tmp_path, monkeypatch, capsys):
+    from trading.live_account import LiveAccountError
+
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    args = [*cycle_args(tmp_path), "--history-output", str(tmp_path / "cycles.jsonl")]
+    FakeCycle.outcome = {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
+    live_cycle.main(args, send=lambda alert, source: None)
+    FakeCycle.outcome = LiveAccountError("valuation_time_mismatch")
+    with pytest.raises(SystemExit):
+        live_cycle.main(args, send=lambda alert, source: None)
+    capsys.readouterr()
+    lines = (tmp_path / "cycles.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["ok"] for line in lines] == [True, False]
+    assert json.loads(lines[1])["reason"] == "valuation_time_mismatch"
+
+
+def test_plan_passes_the_history_output(running, tmp_path):
+    plan = task_plan(**inputs(running, tmp_path), history_output=tmp_path / "cycles.jsonl")
+    assert "--history-output" in plan["tasks"][0]["arguments"]
+    with pytest.raises(LiveTaskError, match="output_directory_required"):
+        task_plan(**inputs(running, tmp_path), history_output=tmp_path / "missing" / "x.jsonl")

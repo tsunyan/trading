@@ -9,6 +9,7 @@ param(
     [Parameter(Mandatory = $true)][string]$QuoteOutput,
     [Parameter(Mandatory = $true)][string]$ResultOutput,
     [string]$ValuationTolerance,
+    [string]$HistoryOutput,
     [string]$Ledger,
     [string]$Hypothesis,
     [string[]]$Confirm = @(),
@@ -33,6 +34,7 @@ $arguments = @(
     '--result-output', $ResultOutput
 )
 if ($ValuationTolerance) { $arguments += @('--valuation-tolerance', $ValuationTolerance) }
+if ($HistoryOutput) { $arguments += @('--history-output', $HistoryOutput) }
 if ($Ledger) { $arguments += @('--ledger', (Resolve-Path -LiteralPath $Ledger).Path) }
 if ($Hypothesis) { $arguments += @('--hypothesis', $Hypothesis) }
 # -File passes one string; accept comma separated confirmations as well.

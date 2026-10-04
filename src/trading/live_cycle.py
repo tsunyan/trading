@@ -177,6 +177,15 @@ def notify(kind, reference, *, send=None):
         return False
 
 
+def append_history(result, path):
+    """One JSON line per run; existing lines are never rewritten."""
+    line = json.dumps(result, default=str, ensure_ascii=False, separators=(",", ":"))
+    with Path(path).open("a", encoding="utf-8", newline="\n") as output:
+        output.write(line + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
 def write_result(result, path):
     path = Path(path)
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".cycle-", suffix=".tmp")
@@ -233,6 +242,7 @@ def main(argv=None, *, send=None):
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--intent-output", type=Path)
     parser.add_argument("--result-output", type=Path)
+    parser.add_argument("--history-output", type=Path)
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--notify", action="store_true")
@@ -318,6 +328,11 @@ def main(argv=None, *, send=None):
             write_result(result, args.result_output)
         except OSError:
             result["result_written"] = False
+    if args.history_output is not None:
+        try:
+            append_history(result, args.history_output)
+        except OSError:
+            result["history_written"] = False
     if not result["ok"]:
         parser.exit(2, f"live_cycle_failed: {result['reason']}\n")
     print(json.dumps(result, default=str))

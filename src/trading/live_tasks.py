@@ -38,6 +38,7 @@ def task_plan(
     valuation_tolerance=None,
     ledger=None,
     hypothesis=None,
+    history_output=None,
 ):
     if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(confirmations) != set(
         CYCLE_CONFIRMATIONS
@@ -87,6 +88,11 @@ def task_plan(
     ]
     if valuation_tolerance is not None:
         args += ["--valuation-tolerance", str(valuation_tolerance)]
+    if history_output is not None:
+        history_output = Path(history_output).resolve()
+        if not history_output.parent.is_dir():
+            raise LiveTaskError("output_directory_required")
+        args += ["--history-output", history_output]
     if (ledger is None) != (hypothesis is None):
         raise LiveTaskError("ledger_and_hypothesis_required_together")
     if ledger is not None:
@@ -133,6 +139,7 @@ def main(argv=None):
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--result-output", type=Path, required=True)
     parser.add_argument("--valuation-tolerance")
+    parser.add_argument("--history-output", type=Path)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
@@ -152,6 +159,7 @@ def main(argv=None):
             valuation_tolerance=args.valuation_tolerance,
             ledger=args.ledger,
             hypothesis=args.hypothesis,
+            history_output=args.history_output,
         )
         print(json.dumps({"ok": True, **plan}))
         return 0
