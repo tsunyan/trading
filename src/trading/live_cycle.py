@@ -379,7 +379,7 @@ def main(argv=None, *, send=None):
             result["history_written"] = False
     if args.dashboard_output is not None and cycle is not None:
         try:
-            from trading.live_dashboard import render, write_page
+            from trading.live_dashboard import read_history, render, write_page
             from trading.live_doctor import diagnose
             from trading.live_report import read_dispatches, report
 
@@ -398,6 +398,7 @@ def main(argv=None, *, send=None):
                 report(cycle.journal, dispatches=dispatches),
                 result,
                 generated_at=now.isoformat(),
+                history=read_history(args.history_output),
             )
             write_page(page, args.dashboard_output)
         except Exception:

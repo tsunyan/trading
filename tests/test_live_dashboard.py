@@ -82,3 +82,31 @@ def test_cli_writes_the_page_atomically(setup, tmp_path, capsys):
     assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".dashboard-")] == []
     assert '"network_used": false' in capsys.readouterr().out
+
+
+def test_history_lists_the_newest_cycles_first_and_skips_broken_lines(tmp_path):
+    import json
+
+    path = tmp_path / "cycles.jsonl"
+    lines = [
+        json.dumps({"ok": True, "finished_at": f"t{i}", "decision": {"action": "hold"}})
+        for i in range(30)
+    ]
+    path.write_text("\n".join([*lines[:-1], "{broken", lines[-1]]) + "\n", encoding="utf-8")
+    history = live_dashboard.read_history(path)
+    assert history[0]["finished_at"] == "t29" and len(history) == 23
+    assert live_dashboard.read_history(tmp_path / "missing.jsonl") == []
+    page = live_dashboard.render(
+        {
+            "send_ready": True,
+            "gates": {},
+            "entry_halted": False,
+            "approval_expires_at": None,
+            "approval_seconds_left": None,
+        },
+        {"account": None, "totals": {}, "orders": [], "equity_history": [], "closed_trades": {}},
+        None,
+        generated_at="now",
+        history=history,
+    )
+    assert "サイクルの履歴" in page and "t29" in page

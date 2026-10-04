@@ -69,7 +69,30 @@ def _sparkline(points, width=640, height=120):
     )
 
 
-def render(doctor, profit, cycle=None, *, generated_at):
+def read_history(path, *, limit=24):
+    """The newest cycle results from a JSON Lines history; broken lines are skipped."""
+    if path is None or not Path(path).is_file():
+        return []
+    items = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines()[-limit:]:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            decision = item.get("decision") or {}
+            items.append(
+                {
+                    "finished_at": item.get("finished_at"),
+                    "ok": item.get("ok"),
+                    "action": decision.get("action"),
+                    "reason": item.get("reason") or decision.get("reason"),
+                }
+            )
+    return list(reversed(items))
+
+
+def render(doctor, profit, cycle=None, *, generated_at, history=()):
     account = profit["account"] or {}
     gates = [{"gate": name, **value} for name, value in doctor["gates"].items()]
     status = "送信可能" if doctor["send_ready"] else "送信不可"
@@ -165,6 +188,13 @@ def render(doctor, profit, cycle=None, *, generated_at):
             orders_table,
             "<h2>直近のサイクル</h2>",
             cycle_html,
+            "<h2>サイクルの履歴</h2>",
+            _rows(
+                list(history),
+                [("終了", "finished_at"), ("成功", "ok"), ("判断", "action"), ("理由", "reason")],
+            )
+            if history
+            else "<p>履歴ファイルが指定されていないか、まだ記録がありません。</p>",
             "</body></html>",
             "",
         ]
@@ -191,6 +221,7 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycle-result", type=Path)
     parser.add_argument("--dispatch-log", type=Path)
+    parser.add_argument("--history", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -205,7 +236,13 @@ def main(argv=None):
                 cycle = {}
         profit = report(journal, dispatches=read_dispatches(args.dispatch_log))
         doctor = diagnose(journal, now, cycle=cycle if args.cycle_result is not None else None)
-        page = render(doctor, profit, cycle, generated_at=now.isoformat())
+        page = render(
+            doctor,
+            profit,
+            cycle,
+            generated_at=now.isoformat(),
+            history=read_history(args.history),
+        )
         write_page(page, args.output)
     except Exception as error:
         parser.exit(2, f"live_dashboard_failed: {type(error).__name__}\n")
