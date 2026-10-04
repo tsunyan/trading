@@ -72,6 +72,21 @@ uv run python -m trading.live_account --directory runs/live-orders --read-contro
 照合に成功すると、台帳の口座証拠・peak・損失による新規停止が更新され、
 [確認済み送信](order-runtime.md)の`context`で新しい口座証拠を使えます。
 
+## スワップの独立再計算（診断）
+
+2026-10-05追加。`--swap-schedule`に`fetch-swap`で取得した公式スワップ履歴を指定すると、
+読み取った建玉ごとに、建玉時刻より後で観測時刻までのロールオーバー（06:00 JST）の付与額を合計し、
+業者が返す建玉ごとの累計スワップと比べます。結果は出力の`swap_check`に出ます。
+
+```powershell
+uv run python -m trading.live_account --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --credential-reference <read_only_reference> --swap-schedule data/usdjpy_swap.csv --swap-tolerance 1 --confirm ...
+```
+
+- `outside_tolerance`: 差が許容幅（円、既定1円）を超えた建玉ID。
+- `schedule_not_covering`: 履歴にロールオーバーの行が欠けている建玉ID。欠けた日を0円と扱いません。
+- **停止や口座証拠の拒否には使いません。** 業者の丸めと付与の境界時刻を実口座で確かめるまでは診断です。
+  差があれば業者の取引報告書と照合してください。
+
 ## 前提と制約
 
 - 同期・監視を登録した台帳と、その台帳に紐付くGET制御・読取専用キーを使います。

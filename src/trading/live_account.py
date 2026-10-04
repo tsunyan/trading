@@ -17,6 +17,7 @@ from trading.broker_contracts import OrderEvidence, OrderIntent
 from trading.credential_store import CredentialParser, CredentialVault
 from trading.live_quote import fetch_quote
 from trading.order_runtime import OrderRuntime, _quote
+from trading.swap_check import read_schedule, swap_check
 
 ACCOUNT_CONFIRMATIONS = frozenset(
     {"complete-account", "account-identity", "external-writers-paused"}
@@ -151,6 +152,8 @@ class LiveAccountRefresh:
         quote_transport=None,
         valuation_tolerance=None,
         absent_order=None,
+        swap_schedule=None,
+        swap_tolerance="1",
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
@@ -208,9 +211,16 @@ class LiveAccountRefresh:
         if absent_order is not None:
             # The account must reconcile as if the unknown order never existed.
             return self.journal.record_absence_account(absent_order, snapshot, quote, now=now)
+        # A diagnostic computed before the journal decides; it never halts or refuses.
+        swaps = (
+            swap_check(report, swap_schedule, tolerance_jpy=swap_tolerance)
+            if swap_schedule is not None
+            else None
+        )
         result = self.journal.update_account(snapshot, quote, now=now)
         return {
             **result,
+            "swap_check": swaps,
             "observed_at": snapshot.model_dump(mode="json")["observed_at"],
             "positions": len(snapshot.positions),
             "working_orders": len(snapshot.working_orders),
@@ -230,6 +240,8 @@ def main(argv=None):
     parser.add_argument("--confirm", action="append", default=[])
     parser.add_argument("--valuation-tolerance")
     parser.add_argument("--absent-order", metavar="CLIENT_ID")
+    parser.add_argument("--swap-schedule", type=Path)
+    parser.add_argument("--swap-tolerance", default="1")
     args = parser.parse_args(argv)
     try:
         refresh = LiveAccountRefresh(args.directory, args.read_control_directory, args.scope)
@@ -239,6 +251,10 @@ def main(argv=None):
             quote=_quote(args.quote) if args.quote is not None else None,
             valuation_tolerance=args.valuation_tolerance,
             absent_order=args.absent_order,
+            swap_schedule=(
+                read_schedule(args.swap_schedule) if args.swap_schedule is not None else None
+            ),
+            swap_tolerance=args.swap_tolerance,
         )
         print(json.dumps({**result, "network_used": True, "orders_sent": False}))
     except Exception as error:

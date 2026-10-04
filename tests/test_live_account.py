@@ -580,3 +580,21 @@ def test_absent_order_with_a_position_is_refused(setup):
         )
     with pytest.raises(ValueError, match="absence_account_required"):
         live[3].order_absence_context(order.client_id)
+
+
+def test_swap_diagnostic_is_reported_without_affecting_the_reconciliation(setup):
+    from test_swap_check import schedule
+
+    values = setup[0]
+    clock = values[0]
+    clock.advance(1)
+    result = refresher(setup).refresh(
+        values[5].plan.credential_reference,
+        confirmations=ACCOUNT_CONFIRMATIONS,
+        quote=quote(clock.wall),
+        vault=values[4],
+        transport=broker(clock, []),
+        swap_schedule=schedule(),
+    )
+    assert result["reconciled"]
+    assert result["swap_check"]["positions"] == 0 and result["swap_check"]["diagnostic_only"]
