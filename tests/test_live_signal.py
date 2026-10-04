@@ -402,3 +402,22 @@ def test_history_days_cover_the_warmup_and_closures():
     assert live_signal.history_days(Settings(**base, fast=12, slow=1000)) == 66
     with pytest.raises(LiveSignalError, match="strategy_warmup_exceeds_live_history"):
         live_signal.history_days(Settings(**base, fast=12, slow=2000))
+
+
+def test_auto_sizing_uses_exact_decimals_at_a_lot_boundary():
+    from decimal import Decimal
+
+    from trading.strategy import entry_units, entry_units_exact
+
+    base = dict(market="fx", symbol="USD_JPY", bar_seconds=3600, lot_size=100, min_units=100)
+    cfg = Settings(**base, commission_rate=0)
+    assert cfg.allocation == 0.2
+    # 751500 x 0.2 / 150.3 is exactly 1000; binary floats land just below it.
+    assert entry_units(751500.0, 751500.0, 150.3, cfg) == 900
+    exact = Decimal("751500")
+    assert entry_units_exact(exact, exact, Decimal("150.3"), cfg) == 1000
+    for rules in (cfg, Settings(**base)):
+        for equity, price in (("1000000", "150.01"), ("123456.78", "149.973"), ("0", "150")):
+            e, p = Decimal(equity), Decimal(price)
+            float_units = entry_units(float(e), float(e), float(p), rules)
+            assert entry_units_exact(e, e, p, rules) == float_units

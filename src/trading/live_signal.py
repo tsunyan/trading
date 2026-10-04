@@ -25,7 +25,7 @@ from trading.gmo import GmoPublic
 from trading.order_runtime import _quote
 from trading.private_order_recovery import PrivateOrderRecovery
 from trading.promotion import PromotionError, require_live
-from trading.strategy import entry_units, signal_direction
+from trading.strategy import entry_units_exact, signal_direction
 
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
 
@@ -178,7 +178,7 @@ def resolve_units(value, cfg, journal, quote, limits):
     if not proof:
         raise LiveSignalError("account_proof_required")
     account = AccountSnapshot.model_validate(proof["snapshot"])
-    sized = entry_units(float(account.balance), float(account.equity), float(quote.ask), cfg)
+    sized = entry_units_exact(account.balance, account.equity, quote.ask, cfg)
     sized = min(sized // limits.unit_step * limits.unit_step, limits.max_units)
     return sized if sized >= limits.min_units else 0
 
