@@ -22,6 +22,8 @@ uv run python -m trading.promotion revoke --ledger runs/ledger.sqlite --hypothes
 記録は追記のみで、取り消しも履歴に残ります。昇格時の凍結仕様（戦略・パラメーター・設定SHA-256・
 コードSHA-256・実行条件）を各行に保存します。実験台帳には`promotions`表を追加するだけで、
 既存の表とスキーマ版は変えません。昇格は運用者の記録であり、戦略の収益性を保証しません。
+`status`・`check`と実発注側の確認は台帳を変更しません（表も作らず、存在しない台帳のパスは拒否します）。
+2026-10-04に既存の実験台帳（`runs/ledger.sqlite`）で`status`・`check`を実行し、台帳がバイト単位で変わらないことを確認しました。
 
 ## forward OOSの合否条件を先に固定する
 
