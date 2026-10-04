@@ -126,6 +126,11 @@ class LiveCycle:
             "intent": None if intent is None else intent.model_dump(mode="json"),
         }
         result["prepared"] = False
+        result["waiting_prepared"] = sorted(
+            row["client_id"]
+            for row in self.journal.snapshot()["orders"]
+            if row["state"] == "PREPARED"
+        )
         if intent is None:
             return result
         if intent_output is not None:
@@ -266,11 +271,25 @@ def main(argv=None, *, send=None):
             if notify("live_cycle_approval_expiring", hours, send=send):
                 result["approval_notice_for"] = expiry.isoformat()
         decision = result.get("decision") or {}
+        waiting = result.get("waiting_prepared") or []
+        if waiting and previous.get("prepared_notice_for") == waiting[0]:
+            result["prepared_notice_for"] = waiting[0]
+        elif waiting and notify("live_cycle_prepared_waiting", waiting[0], send=send):
+            # An unsent prepared order holds every later proposal; say so once per order.
+            result["prepared_notice_for"] = waiting[0]
         if not result["ok"]:
-            result["notified"] = notify("live_cycle_failed", result["reason"][:16], send=send)
+            # A persisting failure is announced once, again only when its reason changes.
+            if (
+                previous.get("ok") is False
+                and previous.get("reason") == result["reason"]
+                and previous.get("notified") is True
+            ):
+                result["notified"] = True
+            else:
+                result["notified"] = notify("live_cycle_failed", result["reason"], send=send)
         elif decision.get("action") in {"open", "close"}:
             reference = (decision.get("intent") or {}).get("client_id", "proposal")
-            result["notified"] = notify("live_cycle_proposal", reference[-16:], send=send)
+            result["notified"] = notify("live_cycle_proposal", reference, send=send)
     if args.result_output is not None:
         try:
             write_result(result, args.result_output)

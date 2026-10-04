@@ -88,6 +88,7 @@ LABELS = {
     "private_condition_cleared": "実口座同期の監視で障害条件の解消を確認しました",
     "live_cycle_proposal": "戦略が実発注の注文を提案しました（未送信）",
     "live_cycle_failed": "実発注の運用サイクルが失敗しました（未送信）",
+    "live_cycle_prepared_waiting": "準備済みで未送信の実発注注文があり、以後の提案を止めています",
     "live_cycle_approval_expiring": "実発注の許可が24時間以内に失効します。受入を更新してください",
 }
 

@@ -289,3 +289,52 @@ def test_approval_expiry_is_noticed_once_per_approval(tmp_path, monkeypatch, cap
     ExpiringCycle.expires += timedelta(minutes=1)
     live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
     assert len(sent) == (2 if hours == 2 else 0)
+
+
+def test_persisting_failure_is_noticed_once_per_reason(tmp_path, monkeypatch):
+    from trading.live_account import LiveAccountError
+
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    sent = []
+    for reason in ["valuation_time_mismatch"] * 3 + ["read_control_blocked"]:
+        FakeCycle.outcome = LiveAccountError(reason)
+        with pytest.raises(SystemExit):
+            live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    assert [a["id"] for a in sent] == ["valuation_time_mismatch", "read_control_blocked"]
+
+
+def test_failed_toast_is_retried_on_the_next_failure(tmp_path, monkeypatch):
+    from trading.live_account import LiveAccountError
+
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    FakeCycle.outcome = LiveAccountError("valuation_time_mismatch")
+    attempts = []
+
+    def flaky(alert, source):
+        attempts.append(alert)
+        if len(attempts) == 1:
+            raise OSError("toast unavailable")
+
+    for _ in range(3):
+        with pytest.raises(SystemExit):
+            live_cycle.main(cycle_args(tmp_path), send=flaky)
+    assert len(attempts) == 2  # The failed first notice is retried once, then remembered.
+
+
+def test_unsent_prepared_order_is_noticed_once_per_order(tmp_path, monkeypatch):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    sent = []
+    for waiting in (["S2026100510OB"], ["S2026100510OB"], [], ["S2026100511CS"]):
+        FakeCycle.outcome = {
+            "decision": {"action": "hold", "reason": "unsettled_local_order", "intent": None},
+            "waiting_prepared": waiting,
+            "orders_sent": False,
+        }
+        live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    assert [(a["kind"], a["id"]) for a in sent] == [
+        ("live_cycle_prepared_waiting", "S2026100510OB"),
+        ("live_cycle_prepared_waiting", "S2026100511CS"),
+    ]
