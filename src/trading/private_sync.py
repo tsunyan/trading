@@ -32,7 +32,7 @@ from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClien
 from trading.private_supervisor import PrivateStreamSupervisor, SupervisorError, SupervisorPolicy
 from trading.read_control import PersistentReadLimiter
 from trading.segmented_journal import SegmentedEventJournal
-from trading.stream_control import StreamControl, StreamControlError
+from trading.stream_control import OPERATOR_OWNER_WAIT_SECONDS, StreamControl, StreamControlError
 from trading.wire_validation import unique_object
 
 MAX_PLAN_BYTES = 262_144
@@ -329,7 +329,7 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("sync_legacy_binding_confirmation_required")
         if type(expected_revision) is not int or expected_revision < 0:
             raise PrivateSyncError("invalid_sync_revision")
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             self._check_plan(expected_plan_sha256)
             state = self.control.snapshot()
             if state["revision"] != expected_revision or self.journal.head() != expected_head:
@@ -347,7 +347,7 @@ class PrivateSyncWorkspace:
         if type(expected_revision) is not int or expected_revision < 0:
             raise PrivateSyncError("invalid_sync_revision")
         self._reads()
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             state = self.control.snapshot()
             if state["revision"] != expected_revision or self.journal.head() != expected_head:
                 raise PrivateSyncError("sync_checkpoint_changed")
@@ -535,7 +535,7 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("invalid_sync_revision")
         if self.catalog is not None and not self._catalog_bound:
             raise PrivateSyncError("sync_catalog_initialization_required")
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             self._check_plan(expected_plan_sha256)
             self.control.check_binding(self.journal, self.book)
             before = self.control.snapshot()
