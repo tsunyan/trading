@@ -68,6 +68,19 @@ def decide(
         raise LiveSignalError("stale_or_future_quote")
     if type(flatten) is not bool:
         raise LiveSignalError("invalid_flatten_option")
+    if not quote.market_open:
+        # Weekends and maintenance: the newest bar is old by design. Hold before judging
+        # bar freshness; the send gate refuses a closed market anyway.
+        held = sorted({p.side for p in positions})
+        return {
+            "signal_time": None,
+            "flatten": flatten,
+            "target": None,
+            "current": 1 if held == ["BUY"] else -1 if held == ["SELL"] else 0,
+            "intent": None,
+            "action": "hold",
+            "reason": "market_closed",
+        }
     if flatten:
         signal_time, target = None, 0
     else:
@@ -94,9 +107,6 @@ def decide(
     }
     if pending:
         return {**decision, "action": "hold", "reason": "unsettled_local_order"}
-    if not quote.market_open:
-        # The send gate refuses a closed market anyway; do not raise a proposal for it.
-        return {**decision, "action": "hold", "reason": "market_closed"}
     if current == target:
         return {**decision, "action": "hold", "reason": "at_target"}
     # One proposal per signal bar (or flatten minute) and direction; repeats are refused.

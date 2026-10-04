@@ -369,3 +369,20 @@ def test_decision_invariants_over_random_holdings_quotes_and_bars():
         else:
             assert decision["action"] == "open" and intent.effect == "OPEN"
             assert intent.units == 1000 and current.ask - current.bid <= Decimal("0.05")
+
+
+def test_closed_market_holds_even_when_the_last_bar_is_days_old():
+    weekend = bars(RISING, end=NOW - timedelta(days=2))
+    decision = decide(
+        weekend,
+        quote(market_open=False),
+        settings(),
+        positions=(long(),),
+        pending=False,
+        units=1000,
+        max_slippage="0.02",
+        limits=LIMITS,
+        now=NOW,
+    )
+    assert decision["action"] == "hold" and decision["reason"] == "market_closed"
+    assert decision["current"] == 1 and decision["intent"] is None
