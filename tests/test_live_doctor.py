@@ -123,3 +123,29 @@ def test_optional_scheduled_cycle_freshness_gate(setup):
     assert gate({"finished_at": stale}) == {"ok": False, "reason": "cycle_stale"}
     assert gate({}) == {"ok": False, "reason": "cycle_result_missing"}
     assert "scheduled_cycle" not in diagnose(live[3], now)["gates"]
+
+
+def test_change_notices_are_sent_once_per_change_and_retried_after_failure(tmp_path):
+    state = tmp_path / "doctor-state.json"
+    blocked = {
+        "gates": {
+            "sync_and_watchdog": {"ok": False, "reason": "live_sync_unhealthy"},
+            "order_queue": {"ok": False, "reason": "orders_awaiting_reconciliation:1"},
+        }
+    }
+    ready = {"gates": {"sync_and_watchdog": {"ok": True, "reason": None}}}
+    sent = []
+
+    def send(alert, source):
+        sent.append(alert)
+
+    def broken(alert, source):
+        raise OSError("toast unavailable")
+
+    assert live_doctor.notify_changes(blocked, state, send=broken) is False
+    assert not state.exists()
+    assert live_doctor.notify_changes(blocked, state, send=send) is True
+    assert live_doctor.notify_changes(blocked, state, send=send) is False
+    assert live_doctor.notify_changes(ready, state, send=send) is True
+    assert [a["kind"] for a in sent] == ["live_doctor_blocked", "live_doctor_ready"]
+    assert sent[0]["id"] == "sync_and_watchdog:live_sync_unhealthy"  # The queue stays quiet.

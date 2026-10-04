@@ -11,6 +11,7 @@ param(
     [string]$ValuationTolerance,
     [string]$HistoryOutput,
     [string]$DashboardOutput,
+    [int]$DoctorIntervalSeconds = 0,
     [string]$Ledger,
     [string]$Hypothesis,
     [string[]]$Confirm = @(),
@@ -35,6 +36,7 @@ $arguments = @(
     '--result-output', $ResultOutput
 )
 if ($ValuationTolerance) { $arguments += @('--valuation-tolerance', $ValuationTolerance) }
+if ($DoctorIntervalSeconds -gt 0) { $arguments += @('--doctor-interval-seconds', $DoctorIntervalSeconds) }
 if ($DashboardOutput) { $arguments += @('--dashboard-output', $DashboardOutput) }
 if ($HistoryOutput) { $arguments += @('--history-output', $HistoryOutput) }
 if ($Ledger) { $arguments += @('--ledger', (Resolve-Path -LiteralPath $Ledger).Path) }
@@ -87,8 +89,14 @@ $start = $now.Date.AddHours($now.Hour + 1).AddMinutes($plan.start_minute)
 foreach ($spec in $plan.tasks) {
     $action = New-ScheduledTaskAction -Execute $spec.executable -Argument $spec.arguments `
         -WorkingDirectory $spec.working_directory
-    $hourly = New-ScheduledTaskTrigger -Once -At $start `
-        -RepetitionInterval ([TimeSpan]::FromSeconds($plan.interval_seconds))
+    # A task with its own interval (the doctor) starts within a minute; the cycle keeps hh:01.
+    if ($spec.PSObject.Properties.Name -contains 'interval_seconds') {
+        $hourly = New-ScheduledTaskTrigger -Once -At ($now.AddMinutes(1)) `
+            -RepetitionInterval ([TimeSpan]::FromSeconds($spec.interval_seconds))
+    } else {
+        $hourly = New-ScheduledTaskTrigger -Once -At $start `
+            -RepetitionInterval ([TimeSpan]::FromSeconds($plan.interval_seconds))
+    }
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::FromSeconds($spec.execution_limit_seconds))

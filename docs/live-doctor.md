@@ -43,3 +43,5 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 所有者不在を同時に表示すること、時間経過での許可失効と口座証拠の期限切れ、台帳停止とGET停止、
 未登録・無効の台帳、CLIの終了コードを検証します。
 追加5試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
+
+`--notify-state <ファイル>`を指定すると、送信を止めている条件の組が変わった時だけWindows通知します（[定期実行](live-tasks.md)）。

@@ -40,6 +40,7 @@ def task_plan(
     hypothesis=None,
     history_output=None,
     dashboard_output=None,
+    doctor_interval_seconds=None,
 ):
     if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(confirmations) != set(
         CYCLE_CONFIRMATIONS
@@ -107,26 +108,62 @@ def task_plan(
         args += ["--ledger", Path(ledger).resolve(), "--hypothesis", hypothesis]
     for item in sorted(CYCLE_CONFIRMATIONS):
         args += ["--confirm", item]
+    if doctor_interval_seconds is not None and (
+        type(doctor_interval_seconds) is not int or not 300 <= doctor_interval_seconds <= 3600
+    ):
+        raise LiveTaskError("invalid_doctor_interval")
     argv = scheduled_process_args(
         "from trading.live_cycle import main; raise SystemExit(main(sys.argv[1:]))", *args
     )
+    tasks = [
+        {
+            "name": f"TradingLab-Live-{binding['live_instance'][:12]}-Cycle",
+            "description": (
+                f"Trading Lab live cycle {binding['live_instance']} (no prepare, no send)"
+            ),
+            "executable": argv[0],
+            "arguments": subprocess.list2cmdline(argv[1:]),
+            "working_directory": str(Path.cwd()),
+            "execution_limit_seconds": 300,
+        }
+    ]
+    if doctor_interval_seconds is not None:
+        # Notices when the hourly cycle stops or any send gate starts or stops blocking.
+        doctor = [
+            "--directory",
+            directory,
+            "--read-control-directory",
+            read_control_directory,
+            "--scope",
+            scope,
+            "--cycle-result",
+            result_output,
+            "--notify-state",
+            result_output.with_name("doctor-state.json"),
+        ]
+        if ledger is not None:
+            doctor += ["--ledger", Path(ledger).resolve(), "--hypothesis", hypothesis]
+            doctor += ["--config", config]
+        doctor_argv = scheduled_process_args(
+            "from trading.live_doctor import main; raise SystemExit(main(sys.argv[1:]))", *doctor
+        )
+        tasks.append(
+            {
+                "name": f"TradingLab-Live-{binding['live_instance'][:12]}-Doctor",
+                "description": f"Trading Lab live doctor {binding['live_instance']} (read only)",
+                "executable": doctor_argv[0],
+                "arguments": subprocess.list2cmdline(doctor_argv[1:]),
+                "working_directory": str(Path.cwd()),
+                "execution_limit_seconds": 120,
+                "interval_seconds": doctor_interval_seconds,
+            }
+        )
     return {
         "live_instance": binding["live_instance"],
         "scope": binding["scope"],
         "start_minute": 1,
         "interval_seconds": 3600,
-        "tasks": [
-            {
-                "name": f"TradingLab-Live-{binding['live_instance'][:12]}-Cycle",
-                "description": (
-                    f"Trading Lab live cycle {binding['live_instance']} (no prepare, no send)"
-                ),
-                "executable": argv[0],
-                "arguments": subprocess.list2cmdline(argv[1:]),
-                "working_directory": str(Path.cwd()),
-                "execution_limit_seconds": 300,
-            }
-        ],
+        "tasks": tasks,
         "prepares_orders": False,
         "sends_orders": False,
     }
@@ -147,6 +184,7 @@ def main(argv=None):
     parser.add_argument("--valuation-tolerance")
     parser.add_argument("--history-output", type=Path)
     parser.add_argument("--dashboard-output", type=Path)
+    parser.add_argument("--doctor-interval-seconds", type=int)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
@@ -168,6 +206,7 @@ def main(argv=None):
             hypothesis=args.hypothesis,
             history_output=args.history_output,
             dashboard_output=args.dashboard_output,
+            doctor_interval_seconds=args.doctor_interval_seconds,
         )
         print(json.dumps({"ok": True, **plan}))
         return 0

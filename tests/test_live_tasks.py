@@ -234,6 +234,8 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
             str(tmp_path / "live.html"),
             "-Units",
             "auto",
+            "-DoctorIntervalSeconds",
+            "900",
             "-PlanOnly",
         ],
         capture_output=True,
@@ -247,6 +249,7 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
     arguments = plan["tasks"][0]["arguments"]
     assert "--prepare" not in arguments and "--units auto" in arguments
     assert "--history-output" in arguments and "--dashboard-output" in arguments
+    assert plan["tasks"][1]["name"].endswith("-Doctor")
 
 
 class ExpiringCycle(FakeCycle):
@@ -419,3 +422,15 @@ def test_prepared_cycle_prints_a_submit_command_for_review(tmp_path, monkeypatch
     assert "trading.order_runtime submit" in command and "c" * 64 in command
     assert "--client-id S2026100510OB" in command and "<order_reference>" in command
     assert "dispatch.jsonl" in command and "--order-permission-confirmed" in command
+
+
+def test_plan_adds_an_optional_doctor_task_with_its_own_interval(running, tmp_path):
+    plan = task_plan(**inputs(running, tmp_path), doctor_interval_seconds=900)
+    cycle, doctor = plan["tasks"]
+    assert doctor["name"].endswith("-Doctor") and doctor["interval_seconds"] == 900
+    assert "trading.live_doctor" in doctor["arguments"]
+    assert "--cycle-result" in doctor["arguments"] and "--notify-state" in doctor["arguments"]
+    assert "interval_seconds" not in cycle
+    for invalid in (True, 299, 3601):
+        with pytest.raises(LiveTaskError, match="invalid_doctor_interval"):
+            task_plan(**inputs(running, tmp_path), doctor_interval_seconds=invalid)

@@ -90,6 +90,8 @@ LABELS = {
     "live_cycle_failed": "実発注の運用サイクルが失敗しました（未送信）",
     "live_cycle_order_settled": "実発注の注文の結果を照合しました（約定・取消・失効）",
     "live_cycle_prepared_waiting": "準備済みで未送信の実発注注文があり、以後の提案を止めています",
+    "live_doctor_blocked": "実発注の送信を止めている条件があります",
+    "live_doctor_ready": "実発注の送信を止めていた条件が解消しました",
     "live_cycle_approval_expiring": "実発注の許可が24時間以内に失効します。受入を更新してください",
 }
 
@@ -102,7 +104,7 @@ def send_toast(alert, observer_id):
     SubElement(binding, "text").text = "Trading Lab"
     SubElement(binding, "text").text = LABELS.get(alert["kind"], "模擬観測の通知")
     private = alert["kind"].startswith("private_")
-    if alert["kind"].startswith("live_cycle_"):
+    if alert["kind"].startswith(("live_cycle_", "live_doctor_")):
         SubElement(binding, "text").text = (
             f"{alert['id']}\n"
             "サイクル結果ファイルと live_setup status を確認してください。送信は手動です。"

@@ -131,7 +131,42 @@ def diagnose(journal, now, *, candidate=None, cycle=None):
     }
 
 
-def main(argv=None):
+# Waiting orders and an unprepared queue are normal operation, not alarms.
+QUIET_GATES = {"order_queue"}
+
+
+def blocking(result):
+    return sorted(
+        f"{name}:{gate['reason']}"
+        for name, gate in result["gates"].items()
+        if not gate["ok"] and name not in QUIET_GATES
+    )
+
+
+def notify_changes(result, state_path, *, send=None):
+    """Notice only when the set of blocking gates changes; the state file remembers it."""
+    from trading.windows_notify import send_toast
+
+    state_path = Path(state_path)
+    try:
+        previous = json.loads(state_path.read_text(encoding="utf-8")).get("blocking", [])
+    except (OSError, ValueError, AttributeError):
+        previous = None
+    current = blocking(result)
+    if current == previous:
+        return False
+    kind = "live_doctor_blocked" if current else "live_doctor_ready"
+    try:
+        (send or send_toast)({"kind": kind, "id": ", ".join(current)[:200] or "ok"}, "live-doctor")
+    except Exception:
+        return False  # Retried on the next run: the state file is not advanced.
+    temporary = state_path.with_name(state_path.name + ".tmp")
+    temporary.write_text(json.dumps({"blocking": current}), encoding="utf-8")
+    temporary.replace(state_path)
+    return True
+
+
+def main(argv=None, *, send=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
@@ -140,6 +175,7 @@ def main(argv=None):
     parser.add_argument("--hypothesis")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--cycle-result", type=Path)
+    parser.add_argument("--notify-state", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -160,6 +196,8 @@ def main(argv=None):
         result = diagnose(journal, datetime.now(UTC), candidate=candidate, cycle=cycle)
     except Exception as error:
         parser.exit(2, f"live_doctor_failed: {type(error).__name__}\n")
+    if args.notify_state is not None:
+        result["notified"] = notify_changes(result, args.notify_state, send=send)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result["send_ready"] else 1
 
