@@ -39,7 +39,7 @@ def test_page_shows_gates_account_orders_and_escapes_cycle_text(setup):
         diagnose(journal, values[0].wall), report(journal), cycle, generated_at="now"
     )
     assert "送信可能" in page and "Buy001" in page and "PREPARED" in page
-    assert "True" not in page and "はい" in page
+    assert "True" not in page and "はい" in page and "決済の成績" in page
     assert "<script>" not in page and "&lt;script&gt;" in page
     assert 'http-equiv="refresh"' in page and "prefers-color-scheme: dark" in page
     assert journal.snapshot() == before
