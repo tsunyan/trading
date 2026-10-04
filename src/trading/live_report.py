@@ -10,10 +10,13 @@ import csv
 import json
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from trading.account_guard import AccountPolicy, AccountSnapshot
 from trading.broker_contracts import OrderEvidence, OrderIntent
 from trading.private_order_recovery import PrivateOrderRecovery
+
+JST = ZoneInfo("Asia/Tokyo")
 
 
 def _money(value):
@@ -72,6 +75,7 @@ def report(journal, *, history=24, dispatches=None):
     orders, realized, fees, swaps = [], Decimal(0), Decimal(0), Decimal(0)
     cost, measured = Decimal(0), 0
     outcomes = []
+    monthly = {}
     dispatches = dispatches or {}
     for row in rows:
         intent = OrderIntent.model_validate_json(row["intent_json"])
@@ -115,6 +119,15 @@ def report(journal, *, history=24, dispatches=None):
                 outcomes.append(
                     sum((e.loss_gain + e.settled_swap - e.fee for e in fills), Decimal(0))
                 )
+            for e in fills:
+                # Japanese calendar month of each execution, in yen.
+                month = e.timestamp.astimezone(JST).strftime("%Y-%m")
+                bucket = monthly.setdefault(
+                    month, {"realized": Decimal(0), "fees": Decimal(0), "settled_swap": Decimal(0)}
+                )
+                bucket["realized"] += e.loss_gain
+                bucket["fees"] += e.fee
+                bucket["settled_swap"] += e.settled_swap
             realized += sum((e.loss_gain for e in fills), Decimal(0))
             fees += sum((e.fee for e in fills), Decimal(0))
             swaps += sum((e.settled_swap for e in fills), Decimal(0))
@@ -149,6 +162,14 @@ def report(journal, *, history=24, dispatches=None):
             "net": _money(realized + swaps - fees),
         },
         "closed_trades": _trade_stats(outcomes),
+        "monthly": [
+            {
+                "month": month,
+                **{key: _money(value) for key, value in values.items()},
+                "net": _money(values["realized"] + values["settled_swap"] - values["fees"]),
+            }
+            for month, values in sorted(monthly.items())
+        ],
         "orders": orders,
         "execution": {"orders_measured": measured, "slippage_cost": _money(cost)},
         "equity_history": [

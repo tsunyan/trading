@@ -70,6 +70,9 @@ def test_open_then_closed_position_reports_realized_net_and_risk_room(tmp_path):
     }
     assert [o["state"] for o in result["orders"]] == ["FILLED", "FILLED"]
     assert len(result["equity_history"]) == 2 and not result["broker_verified"]
+    assert result["monthly"] == [
+        {"month": "2026-09", "realized": "100", "fees": "6", "settled_swap": "0", "net": "94"}
+    ]
 
 
 def test_empty_journal_and_history_limits(tmp_path):
