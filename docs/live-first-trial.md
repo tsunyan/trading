@@ -34,7 +34,9 @@
 ## 3. 新規と決済の往復
 
 1. 最小数量の新規の注文意図（成行・価格保護つき）を用意し、`live_setup prepare`で準備します。
-   戦略の提案を使う場合は`live_cycle --prepare`で準備します。
+   戦略の提案を使う場合は`live_cycle --prepare`で準備します。この場合は`--ledger`・`--hypothesis`で
+   [実運用に昇格した候補](promotion.md)の指定が必要です。運用者が直接用意する注文意図（`live_setup prepare`）は
+   昇格に関係しません。
 2. `order_runtime context`の本文（数量・売買・価格保護）を確認し、`order_runtime submit`で送ります。確認した気配は台帳の送信記録に残り、執行コストの計算に使います。
    送信ログで[執行コスト](live-report.md)を測れます。
 3. [受付済み注文のGET照合](live-order-sync.md)で`FILLED`にし、口座証拠を更新します。
