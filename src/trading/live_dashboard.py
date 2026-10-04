@@ -192,6 +192,10 @@ def render(doctor, profit, cycle=None, *, generated_at, history=()):
         f"（残り {_e(doctor['approval_seconds_left'])} 秒）"
         f"・損失による新規停止 {_e(doctor['entry_halted'])}"
     )
+    attested = (cycle or {}).get("attestation_expires_at")
+    if attested:
+        # The scheduled cycle stops when the operator's attestation expires.
+        approval += f"・定期実行の確認宣言の期限 {_e(attested)}"
     return "\n".join(
         [
             "<!doctype html>",

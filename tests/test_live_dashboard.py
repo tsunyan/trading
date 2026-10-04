@@ -115,3 +115,18 @@ def test_history_lists_the_newest_cycles_first_and_shows_broken_lines(tmp_path, 
         history=history,
     )
     assert "サイクルの履歴" in page and "t29" in page
+
+
+def test_page_shows_the_attestation_expiry_from_the_cycle_result():
+    doctor = {
+        "send_ready": False,
+        "gates": {},
+        "entry_halted": False,
+        "approval_expires_at": None,
+        "approval_seconds_left": None,
+    }
+    profit = {"account": None, "totals": {}, "orders": [], "equity_history": []}
+    cycle = {"ok": True, "attestation_expires_at": "2026-10-05T12:00:00+00:00"}
+    page = live_dashboard.render(doctor, profit, cycle, generated_at="now")
+    assert "定期実行の確認宣言の期限 2026-10-05T12:00:00+00:00" in page
+    assert "確認宣言" not in live_dashboard.render(doctor, profit, {}, generated_at="now")
