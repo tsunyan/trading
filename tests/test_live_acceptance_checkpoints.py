@@ -3,12 +3,14 @@
 import socket
 
 import pytest
+from test_live_acceptance import synthetic_reads
 from test_order_resolution import reopen, terminal
 from test_order_restart import stopped
 from test_private_cancel import working
 from test_private_order import setup as order_setup
 
 from trading.live_acceptance import (
+    READ_KINDS,
     LiveAcceptanceError,
     checkpoint_approval,
     fingerprint,
@@ -32,9 +34,11 @@ def setup(tmp_path):
     return order_setup.__wrapped__(tmp_path)
 
 
-def evidence(tmp_path, kinds):
-    items = []
+def evidence(tmp_path, kinds, journal, now):
+    items = synthetic_reads(journal, tmp_path, now, READ_KINDS & kinds)
     for kind in sorted(kinds):
+        if kind in READ_KINDS:
+            continue
         path = tmp_path / f"{kind}.txt"
         path.write_text(f"reviewed {kind}")
         items.append(fingerprint(kind, path))
@@ -48,7 +52,7 @@ def test_resolution_approval_resolves_the_exact_terminal_claim(setup, tmp_path):
         journal,
         "resolution",
         order.client_id,
-        evidence(tmp_path, EVIDENCE_KINDS),
+        evidence(tmp_path, EVIDENCE_KINDS, journal, clock.now),
         minutes=10,
         now=clock.now,
     )
@@ -66,7 +70,7 @@ def test_cancel_approval_authorizes_one_restricted_cancel(setup, tmp_path):
         journal,
         "cancel",
         order.client_id,
-        evidence(tmp_path, CANCEL_EVIDENCE_KINDS),
+        evidence(tmp_path, CANCEL_EVIDENCE_KINDS, journal, clock.now),
         minutes=5,
         now=clock.now,
     )
@@ -80,7 +84,11 @@ def test_restart_approval_restarts_with_the_reported_confirmations(setup, tmp_pa
     review = tmp_path / "stop review.md"
     review.write_text("operator stop reviewed")
     built, confirmations = restart_approval(
-        journal, evidence(tmp_path, EVIDENCE_KINDS), review, hours=24, now=clock.now
+        journal,
+        evidence(tmp_path, EVIDENCE_KINDS, journal, clock.now),
+        review,
+        hours=24,
+        now=clock.now,
     )
     assert built.stop_review_reference == "stop review.md"
     journal.restart(built, confirmations=confirmations)

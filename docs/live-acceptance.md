@@ -16,6 +16,9 @@ uv run python -m trading.live_acceptance read-evidence --directory runs/live-ord
 `account_identity_verified`は常に`false`です。保存した結果が口座本人性の証明になるわけではなく、
 運用者が業者画面などと突き合わせて確認する資料です。
 
+形式は`trading.read-evidence/1`です。収集の前後で台帳の口座ID・設定・実装SHA-256・revisionを読み、
+GETの間に変わっていた場合は`journal_changed_during_collection`で保存しません。
+
 ## 2. 運用者の資料を指紋化する
 
 ```powershell
@@ -24,6 +27,8 @@ uv run python -m trading.live_acceptance file-evidence --kind rules --file evide
 
 本人性（`identity`）・業者ルール（`rules`）・履歴（`history`）の資料ファイルのSHA-256を表示します。
 空のファイルと64MiB超は拒否します。ファイルの中身は確認しません。
+`read_acceptance`・`account_baseline`は`read_evidence_requires_collection`で拒否します。
+この2種類は手順1の収集でしか作れません。
 
 ## 3. 承認ファイルを作る
 
@@ -32,7 +37,13 @@ uv run python -m trading.live_acceptance approval --directory runs/live-orders -
 ```
 
 台帳の現在の口座ID・設定SHA-256・実装SHA-256を使い、受入時刻を現在、失効を`--hours`後
-（1〜168時間）にします。5種類の証拠をちょうど1つずつ要求します。出力の`expected_revision`を
+（1〜168時間）にします。5種類の証拠をちょうど1つずつ要求します。
+
+- 読取の2種類は、形式どおりのJSONか（重複キーも拒否）、指定した種類と保存された種類が一致するか、
+  台帳の現在の口座ID・設定SHA-256と一致するか、収集から24時間以内で未来でないかを検査します。
+  手書きのJSONや別の台帳で集めた証拠は使えません。
+- 5種類（取消は3種類）の証拠はすべて異なる内容でなければなりません。同じファイルに複数の種類の
+  ラベルを付けると`evidence_documents_must_differ`で拒否します。出力の`expected_revision`を
 `live_setup activate --expected-revision`に渡します。コードや設定が変わると実装・設定のSHA-256が
 変わるため、承認ファイルを作り直します。
 
@@ -58,5 +69,10 @@ uv run python -m trading.live_acceptance cancel-approval --directory runs/live-o
 `tests/test_live_acceptance.py`で、資料ファイルのSHA-256と不正な種類・空ファイルの拒否、読取の証拠の
 保存内容・台帳を変えないこと・上書きの拒否、作った承認ファイルで登録済み台帳を有効化できること、
 期限の範囲、証拠の種類の過不足、CLIで承認ファイルを書いても有効化しないことを検証します。
+加えて、読取の種類を資料として指紋化できないこと、同じ資料での複数種類の拒否、手書き・種類違い・
+別の設定・古い/未来の収集時刻・重複キーの読取証拠の拒否、収集中の台帳変更で保存しないことを検証します。
+
+承認ファイルを手書きした場合はこの検査を通りません。台帳は証拠のSHA-256だけを記録するためです。
+承認ファイルはこのCLIで作ってください。
 追加8試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
 再開・解消・取消の承認は`tests/test_live_acceptance_checkpoints.py`で、作った承認ファイルで実際に各手続きが通ることを含めて検証します（追加6試験）。

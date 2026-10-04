@@ -5,11 +5,12 @@ import socket
 
 import pytest
 from test_account_guard import account, quote
+from test_live_acceptance import synthetic_reads
 from test_live_operations import bind
 from test_live_operations import unbound as operations_unbound
 from test_private_order import ready
 
-from trading.live_acceptance import fingerprint, restart_approval
+from trading.live_acceptance import READ_KINDS, fingerprint, restart_approval
 from trading.live_journal import EVIDENCE_KINDS, LiveOrderError, LiveOrderJournal
 from trading.post_control import PersistentPostLimiter
 
@@ -35,9 +36,11 @@ def migrate(unbound, **updates):
     return bind(unbound, migration_confirmed=True, **updates)
 
 
-def evidence(tmp_path):
-    items = []
+def evidence(tmp_path, journal, now):
+    items = synthetic_reads(journal, tmp_path, now)
     for kind in sorted(EVIDENCE_KINDS):
+        if kind in READ_KINDS:
+            continue
         path = tmp_path / f"{kind}.txt"
         path.write_text(f"reviewed {kind}")
         items.append(fingerprint(kind, path))
@@ -74,7 +77,7 @@ def test_stopped_journal_migrates_and_needs_a_fresh_restart(enabled, tmp_path):
     clock.advance(1)
     journal.update_account(account(clock.now), quote(clock.now), now=clock.now)
     built, confirmations = restart_approval(
-        journal, evidence(tmp_path), _review(tmp_path), hours=24, now=clock.now
+        journal, evidence(tmp_path, journal, clock.now), _review(tmp_path), hours=24, now=clock.now
     )
     assert built.approval.configuration_sha256 == context["configuration_sha256"]
     journal.restart(built, confirmations=confirmations)

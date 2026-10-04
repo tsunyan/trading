@@ -1,9 +1,11 @@
 """Acceptance evidence files and the LiveApproval built from them. Never activates.
 
 `read-evidence` saves one read-only two-sweep account collection as an evidence file.
-`file-evidence` fingerprints an operator document (broker rules, identity, history).
-`approval` writes a LiveApproval for the journal's current activation context from
-those fingerprints. Activation itself stays `live_setup activate` with confirmations.
+`file-evidence` fingerprints an operator document (broker rules, identity, history); the
+two read kinds are refused there because only `read-evidence` may produce them.
+`approval` writes a LiveApproval for the journal's current activation context. Read
+evidence is parsed and must be bound to this journal's account and configuration; every
+kind must be a distinct document. Activation itself stays `live_setup activate`.
 """
 
 import hashlib
@@ -12,8 +14,12 @@ import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
-from trading.account_reader import AccountReader
+from pydantic import AwareDatetime
+
+from trading.account_reader import AccountReader, AccountReadReport
+from trading.broker_contracts import Contract
 from trading.credential_store import CredentialParser, CredentialVault
 from trading.live_journal import (
     CANCEL_EVIDENCE_KINDS,
@@ -25,9 +31,24 @@ from trading.live_journal import (
     OrderResolutionApproval,
 )
 from trading.private_order_recovery import PrivateOrderRecovery
+from trading.wire_validation import unique_object
 
 READ_KINDS = frozenset({"read_acceptance", "account_baseline"})
+READ_FORMAT = "trading.read-evidence/1"
 MAX_DOCUMENT = 64 * 1024 * 1024
+MAX_READ_AGE = timedelta(hours=24)
+
+
+class ReadEvidence(Contract):
+    """The only accepted shape of read_acceptance/account_baseline evidence."""
+
+    format: Literal["trading.read-evidence/1"]
+    kind: Literal["read_acceptance", "account_baseline"]
+    collected_at: AwareDatetime
+    account_id: str
+    configuration_sha256: str
+    report: AccountReadReport
+    account_identity_verified: Literal[False]
 
 
 class LiveAcceptanceError(ValueError):
@@ -51,8 +72,15 @@ def _write_new(path, body):
 
 
 def fingerprint(kind, path):
+    """An operator document. Read evidence must come from `read_evidence`/`read_document`."""
     if kind not in EVIDENCE_KINDS:
         raise LiveAcceptanceError("invalid_evidence_kind")
+    if kind in READ_KINDS:
+        raise LiveAcceptanceError("read_evidence_requires_collection")
+    return _digest(kind, path)
+
+
+def _digest(kind, path):
     path = Path(path)
     digest = hashlib.sha256()
     size = 0
@@ -73,6 +101,8 @@ def read_evidence(
     """One read-only account collection bound to this journal's stores, saved immutably."""
     if kind not in READ_KINDS:
         raise LiveAcceptanceError("invalid_read_evidence_kind")
+    if Path(output).exists():
+        raise LiveAcceptanceError("evidence_file_exists")
     context = journal.activation_context()
     vault = vault if vault is not None else CredentialVault()
     try:
@@ -82,20 +112,59 @@ def read_evidence(
             report = AccountReader(client, clock=clock).collect_account()
     except Exception:
         raise LiveAcceptanceError("account_collection_failed") from None
-    body = json.dumps(
-        {
-            "kind": kind,
-            "collected_at": clock().isoformat(),
-            "account_id": context["account_id"],
-            "configuration_sha256": context["configuration_sha256"],
-            "report": report.model_dump(mode="json"),
-            "account_identity_verified": False,
-        },
-        sort_keys=True,
-        ensure_ascii=False,
-    ).encode()
-    _write_new(output, body)
-    return fingerprint(kind, output)
+    if journal.activation_context() != context:
+        # The binding written below must still be the journal's after the network reads.
+        raise LiveAcceptanceError("journal_changed_during_collection")
+    _write_new(output, read_body(kind, context, report, clock()))
+    return _digest(kind, output)
+
+
+def read_body(kind, context, report, collected_at):
+    return (
+        ReadEvidence(
+            format=READ_FORMAT,
+            kind=kind,
+            collected_at=collected_at,
+            account_id=context["account_id"],
+            configuration_sha256=context["configuration_sha256"],
+            report=report,
+            account_identity_verified=False,
+        )
+        .model_dump_json(indent=2)
+        .encode()
+    )
+
+
+def read_document(kind, path, journal, *, now):
+    """Validate saved read evidence against this journal before fingerprinting it."""
+    if kind not in READ_KINDS:
+        raise LiveAcceptanceError("invalid_read_evidence_kind")
+    evidence = _digest(kind, path)
+    try:
+        content = Path(path).read_bytes()
+        json.loads(content, object_pairs_hook=unique_object)
+        saved = ReadEvidence.model_validate_json(content)
+    except Exception:
+        raise LiveAcceptanceError("invalid_read_evidence_document") from None
+    if hashlib.sha256(content).hexdigest() != evidence.sha256:
+        raise LiveAcceptanceError("read_evidence_changed")
+    context = journal.activation_context()
+    if saved.kind != kind:
+        raise LiveAcceptanceError("read_evidence_kind_mismatch")
+    if (
+        saved.account_id != context["account_id"]
+        or saved.configuration_sha256 != context["configuration_sha256"]
+    ):
+        raise LiveAcceptanceError("read_evidence_not_bound_to_journal")
+    if not timedelta(0) <= now - saved.collected_at <= MAX_READ_AGE:
+        raise LiveAcceptanceError("read_evidence_not_recent")
+    return evidence
+
+
+def document(kind, path, journal, *, now):
+    if kind in READ_KINDS:
+        return read_document(kind, path, journal, now=now)
+    return fingerprint(kind, path)
 
 
 def approval(journal, evidence, *, hours, now):
@@ -118,6 +187,8 @@ def _evidence(items, kinds):
     items = tuple(items)
     if sorted(e.kind for e in items) != sorted(kinds):
         raise LiveAcceptanceError("one_evidence_per_kind_required")
+    if len({e.sha256 for e in items}) != len(items):
+        raise LiveAcceptanceError("evidence_documents_must_differ")
     return tuple(sorted(items, key=lambda e: e.kind))
 
 
@@ -153,7 +224,7 @@ def restart_approval(journal, evidence, stop_review, *, hours, now):
     if type(hours) is not int or not 1 <= hours <= 7 * 24:
         raise LiveAcceptanceError("approval_hours_out_of_range")
     context = journal.restart_context()
-    review = fingerprint("history", stop_review)  # Any non-empty reviewed document.
+    review = _digest("history", stop_review)  # Any non-empty reviewed document.
     built = LiveRestartApproval(
         checkpoint_sha256=context["checkpoint_sha256"],
         approval=LiveApproval(
@@ -215,7 +286,7 @@ def main(argv=None):
                 items = []
                 for item in args.evidence:
                     kind, _, path = item.partition("=")
-                    items.append(fingerprint(kind, path))
+                    items.append(document(kind, path, journal, now=now))
                 if args.command in {"resolution-approval", "cancel-approval"}:
                     built = checkpoint_approval(
                         journal,
