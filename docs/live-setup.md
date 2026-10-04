@@ -57,6 +57,7 @@
    ```
 
 8. 有効化の識別子を取得し、受入証拠を添えた承認ファイル（`LiveApproval`）を作って有効化します。
+   承認ファイルは[受入証拠と承認ファイルの作成](live-acceptance.md)で作れます。
 
    ```powershell
    uv run python -m trading.live_setup activation-context --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope>
