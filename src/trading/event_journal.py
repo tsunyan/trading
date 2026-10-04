@@ -43,7 +43,7 @@ class _JournalBusy(JournalError):
 
 
 class Entry(Contract):
-    kind: Literal["BEGIN", "EVENT", "HEARTBEAT", "ACK", "END", "REJECTED", "FAULT"]
+    kind: Literal["BEGIN", "EVENT", "HEARTBEAT", "ACK", "END", "REJECTED", "FAULT", "REVIEWED"]
     epoch: int = Field(strict=True, gt=0)
     session: str = Field(pattern=r"^[a-f0-9]{32}$")
     at: AwareDatetime
@@ -223,6 +223,8 @@ class EventJournal:
                 "at": meta.get("_archive_at"),
                 "mono": None,
                 "unacknowledged": [],
+                "reviewed_unknown": [],
+                "last_kind": None,
                 "rejected": 0,
                 "events": 0,
             }
@@ -261,6 +263,7 @@ class EventJournal:
             "ACK": {"target"},
             "END": set(),
             "FAULT": {"reason"},
+            "REVIEWED": set(),
         }
         if entry.kind == "REJECTED":
             if "reason" not in populated or populated - {"reason", "rejected_sha256"}:
@@ -282,6 +285,20 @@ class EventJournal:
                 pending=None,
                 clock_skew_ms=entry.clock_skew_ms or 0,
             )
+        elif entry.kind == "REVIEWED":
+            # An operator's recorded decision about delivery uncertainty, never a delivery.
+            uncertain = (state["active"] and state["unacknowledged"]) or (
+                not state["active"] and state["last_kind"] in {"FAULT", "REJECTED"}
+            )
+            if (
+                not uncertain
+                or entry.epoch != state["epoch"]
+                or entry.session != state["session"]
+                or entry.monotonic_ns < state["mono"]
+            ):
+                raise ValueError
+            state["reviewed_unknown"].extend(state["unacknowledged"])
+            state.update(unacknowledged=[], pending=None, active=False)
         else:
             if (
                 not state["active"]
@@ -321,7 +338,7 @@ class EventJournal:
                     raise ValueError
                 state["active"] = False
                 state["rejected"] += entry.kind == "REJECTED"
-        state.update(at=entry.at, mono=entry.monotonic_ns)
+        state.update(at=entry.at, mono=entry.monotonic_ns, last_kind=entry.kind)
 
     def _append(self, conn, meta, entry):
         body = _entry_body(entry)
@@ -366,6 +383,7 @@ class EventJournal:
             "captured_events": state["events"],
             "rejected_frames": state["rejected"],
             "unacknowledged_records": tuple(state["unacknowledged"]),
+            "reviewed_unknown_records": tuple(state["reviewed_unknown"]),
             "archived_segments": meta.get("_archived_segments", 0),
             "history_gap_unproven": True,
             "resync_required": True,
@@ -557,7 +575,7 @@ class EventJournal:
                 )
                 session = monitor.start_session()
             elif entry.kind in {"EVENT", "HEARTBEAT"}:
-                if index in state["unacknowledged"]:
+                if index in state["unacknowledged"] or index in state["reviewed_unknown"]:
                     monitor.disconnect(session)
                     error = "delivery_outcome_unknown"
                 else:
@@ -568,7 +586,9 @@ class EventJournal:
                             monitor.heartbeat(session)
                     except SyncError:
                         error = "historical_monitor_rejected"
-            elif entry.kind in {"END", "REJECTED", "FAULT"}:
+            elif entry.kind in {"END", "REJECTED", "FAULT"} or (
+                entry.kind == "REVIEWED" and entries[index - 2].kind not in {"FAULT", "REJECTED"}
+            ):
                 monitor.disconnect(session)
             if entry.kind != "ACK":
                 outcomes.append(
@@ -586,6 +606,7 @@ class EventJournal:
             "head": meta["head"],
             "outcomes": outcomes,
             "unacknowledged_records": tuple(state["unacknowledged"]),
+            "reviewed_unknown_records": tuple(state["reviewed_unknown"]),
             "resync_required": True,
             "complete": False,
             "live_enabled": False,

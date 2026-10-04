@@ -376,6 +376,44 @@ class StreamControl:
                 journal_head=view["head"],
             )
 
+    def review_delivery_uncertainty(
+        self,
+        journal,
+        cash_book,
+        *,
+        expected_revision,
+        expected_head,
+        expected_reason,
+        at=None,
+        monotonic_ns=0,
+    ):
+        """Record the operator's review of unknown delivery while no capture can run.
+
+        Recovery afterwards stays strict: every stored execution, including formerly
+        unknown ones, must be matched by GET and booked first (reconcile-stopped).
+        """
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise StreamControlError("invalid_stream_revision")
+        with self.ownership():
+            self.check_binding(journal, cash_book)
+            with self._transaction() as conn:
+                state = self._state(conn)
+                if state.phase == "READY":
+                    raise StreamControlError("stream_recovery_not_required")
+                if state.revision != expected_revision or state.reason != expected_reason:
+                    raise StreamControlError("stream_control_state_changed")
+            head = journal.review_delivery_uncertainty(
+                expected_head=expected_head,
+                at=datetime.now(UTC) if at is None else at,
+                monotonic_ns=monotonic_ns,
+            )
+            with self._transaction() as conn:
+                current = self._state(conn)
+                if current.revision != state.revision:
+                    raise StreamControlError("stream_control_state_changed")
+                updated = self._write(conn, current, "REVIEW", journal_head=head)
+            return {**updated.model_dump(), "complete": False, "live_enabled": False}
+
     def recover(
         self,
         journal,

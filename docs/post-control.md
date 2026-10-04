@@ -93,7 +93,7 @@ uv run python -m trading.post_control recover-token --directory runs/account-pos
 OS所有者が存在すれば拒否し、状態が変わっていれば再確認を要求します。解除とTOKEN_RECOVERED履歴は同時commitです。
 復旧前の全POSTオブジェクトは使用を拒否します。制御を再度開き、新しいクライアントを作ります。
 GET・同期・実口座台帳の紐付け、注文状態、許可期限、別途保存した停止は変更しません。
-同期制御が停止していれば、その復旧を別に実施する必要があります。ACK不明・FAULT区間の強制解除はありません。
+同期制御が停止していれば、その復旧を別に実施する必要があります。ACK不明・FAULT区間は[確認の記録](private-sync.md#受渡し結果不明fault区間の確認)と計上の後に復旧します。
 待機の確認項目とscopeは運用者の申告です。壁時計の前進や別PCの操作を検証する仕組みではありません。
 
 [終端結果を確認した注文claimの解消](order-resolution.md)を追加しました。専用実口座台帳の

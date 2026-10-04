@@ -56,7 +56,8 @@ journal = control.recover(
 
 復旧は全保存区間を監査し、ACK不明、停止中の現金台帳、未計上・内容矛盾の受信約定を拒否します。
 旧プロセスが残した開いた区間は、保存した時計条件と計上証拠を確認してENDを追加します。
-正常なENDの区間は追記せず保存切替します。FAULT・REJECTEDで終わった区間の強制解除はありません。
+正常なENDの区間は追記せず保存切替します。ACK不明・FAULT・REJECTEDの区間は、`review_delivery_uncertainty`で
+確認の`REVIEWED`を記録し、保存済みの約定をすべて計上した後に保存切替します（[手順](private-sync.md#受渡し結果不明fault区間の確認)）。
 世代を進めてREADYに戻しても、接続間に失った約定・入出金・外部操作の履歴は修復しません。
 
 `retire_for_recovery`単独では旧プロセスの不在を証明できません。通常は`control.recover`から使います。

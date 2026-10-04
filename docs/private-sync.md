@@ -181,6 +181,31 @@ HTTPクライアントも処理終了後に閉じ、終了待機中のワーカ�
 CLIの引数・設定・通信例外の生の内容はエラーへ再表示しません。同期・制御・Supervisorの固定理由コード
 （例: `sync_checkpoint_changed`）だけを`reason=`として表示し、停止原因を区別できるようにします。
 
+## 受渡し結果不明・FAULT区間の確認
+
+2026-10-05追加。保存した通知の監視への受渡しが不明なまま（ACK不明）終了した区間と、
+`FAULT`・`REJECTED`で終わった区間は、これまで停止中の照合も復旧も拒否し、同期環境の作り直しが必要でした。
+監視の状態は世代ごとにRESTから作り直すので、通知が残す財務上の影響は現金台帳への計上だけです。
+そこで、確認の記録と計上を分けて扱います。
+
+1. 同期を止めたまま原因を調べ、`status`の値を指定して確認を記録します。
+   OS所有権を取得し、現在の区間に`REVIEWED`を追記して制御のrevisionを進めます。
+   ACK不明の記録を「受け渡した」とは扱いません。履歴の再生では引き続き`delivery_outcome_unknown`です。
+   不明な記録がない区間（正常なEND、全件ACK済み）では`journal_review_not_required`で拒否します。
+
+   ```powershell
+   uv run python -m trading.private_sync review-delivery --directory runs/private-sync --expected-plan-sha256 <plan_sha256> --expected-revision <revision> --expected-head <head> --expected-reason <reason> --delivery-uncertainty-reviewed
+   ```
+
+2. 上の[停止中の約定照合・計上](#停止中の約定照合計上)で、保存済みの約定通知（ACK不明だったものを含む）を
+   GETと照合して計上します。
+3. 通常の[復旧](#復旧)を行います。復旧は従来どおり、保存したすべての約定の計上と現金台帳の稼働を要求します。
+
+`REJECTED`（`frame_rejected`・`sequence_gap`）の区間では、通知の本文が保存されていないか、受信番号が
+飛んでいます。失った約定は計上されず、接続の切れ目で失った履歴と同じく現金台帳は不完全なままです。
+実発注の前には、実口座台帳の口座照合（残高・建玉・有効注文）が差を検出して拒否します。
+`REVIEWED`を含む記録は、この変更より前のコードでは検証を拒否します。
+
 ## 停止中の約定照合・計上
 
 同期プロセスを終了し、`status`の設定ハッシュ・revision・末尾・停止理由を確認します。
@@ -200,7 +225,7 @@ RESTから見つけただけの約定は追加計上しません。重複通知�
 設定・制御状態・ジャーナル末尾が取得中に変わった場合、計上を拒否します。計上中はジャーナル変更を
 トランザクションで防ぎます。現金台帳とは別DBのため両者のcommitは一体ではありませんが、計上commit直後に
 終了した場合も保存済み証拠を使って再実行でき、二重計上しません。
-ACK不明・FAULT/REJECTEDで終了した区間・停止した現金台帳は自動解消しません。
+ACK不明・FAULT/REJECTEDで終了した区間は、下の[確認](#受渡し結果不明fault区間の確認)を記録するまで拒否します。停止した現金台帳は自動解消しません。
 約定通知がなければキーの読込・GET・計上は行いません。
 
 成功後も同期状態・ジャーナルは維持し、`recovery_required=true`を返します。
@@ -221,7 +246,7 @@ uv run python -m trading.private_sync recover --directory runs/private-sync --ex
 GET制御の停止・claim不明はこのコマンドでは解除しません。[GET復旧](read-recovery.md)・
 [claim解消](read-orphan.md)を別に確認し、その後に新しい読取クライアントで開始します。
 未計上約定は上の手順で一致を確認して計上した後に復旧します。
-ACK不明・未計上約定・FAULT区間の強制解除はありません。
+未計上約定の強制解除はありません。ACK不明・FAULT区間は、確認の記録と計上の後に復旧できます。
 
 口座の全履歴、外部操作、業者の丸め・証拠金式、接続間の履歴欠損は引き続き未確認です。
 CLI成功も`complete=false`、`live_enabled=false`で、実注文や戦略の昇格へ変換しません。

@@ -507,6 +507,14 @@ class PrivateSyncWorkspace:
         self.journal = self.control.recover(self.journal, self.book, **checks)
         return self.status()
 
+    def review_delivery(self, *, expected_plan_sha256, delivery_uncertainty_reviewed, **checks):
+        """Explicitly close unknown delivery; booking and recovery still come after."""
+        self._check_plan(expected_plan_sha256)
+        if delivery_uncertainty_reviewed is not True:
+            raise PrivateSyncError("sync_delivery_review_confirmation_required")
+        self.control.review_delivery_uncertainty(self.journal, self.book, **checks)
+        return self.status()
+
     def reconcile_stopped(
         self,
         *,
@@ -762,6 +770,7 @@ def main(argv=None):
             "register-order",
             "register-live-orders",
             "reconcile-stopped",
+            "review-delivery",
             "confirm-read-binding",
         ),
     )
@@ -774,6 +783,7 @@ def main(argv=None):
     parser.add_argument("--duration-seconds", type=int)
     parser.add_argument("--read-only-confirmed", action="store_true")
     parser.add_argument("--acknowledge-token-uncertainty", action="store_true")
+    parser.add_argument("--delivery-uncertainty-reviewed", action="store_true")
     parser.add_argument("--order-file", type=Path)
     parser.add_argument("--source-ref")
     parser.add_argument("--intent-confirmed", action="store_true")
@@ -859,6 +869,14 @@ def main(argv=None):
                     expected_revision=args.expected_revision,
                     expected_head=args.expected_head,
                     read_only_confirmed=args.read_only_confirmed,
+                )
+            elif args.command == "review-delivery":
+                result = workspace.review_delivery(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_revision=args.expected_revision,
+                    expected_head=args.expected_head,
+                    expected_reason=args.expected_reason,
+                    delivery_uncertainty_reviewed=args.delivery_uncertainty_reviewed,
                 )
             elif args.command == "recover":
                 result = workspace.recover(
