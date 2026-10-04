@@ -19,6 +19,8 @@
 
 `policy`の項目は[口座ゲート](account-guard.md)の`AccountPolicy`です。上の値は形式の例で、推奨値ではありません。
 `limits`は作成前に[業者の取引ルールと照合](live-rules.md)してください。
+手動で確認して送信する運用では、`policy`の`max_snapshot_age_seconds`と`max_quote_age_seconds`（既定60秒）が
+確認から送信までの持ち時間になります（[運用サイクル](live-cycle.md)）。
 実口座の上限は、業者の取引ルールと受入結果を確認してから決めます。
 
 ## 手順
