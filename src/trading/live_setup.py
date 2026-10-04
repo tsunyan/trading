@@ -7,7 +7,10 @@ expiring operator acceptance; this module only moves validated files into the jo
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
+import tempfile
+from contextlib import closing
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -77,16 +80,37 @@ def backup(journal, output):
         raise LiveSetupError("output_exists")
     with journal._transaction():  # Validates the live state before copying.
         pass
-    with sqlite3.connect(f"file:{journal.path}?mode=ro", uri=True) as source:
-        with sqlite3.connect(output) as target:
-            source.backup(target)
-    with sqlite3.connect(output) as copy:
-        check = copy.execute("PRAGMA integrity_check").fetchone()[0]
-        events = copy.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    if check != "ok":
-        raise LiveSetupError("backup_integrity_failed")
-    digest = hashlib.sha256(output.read_bytes()).hexdigest()
-    return {"output": str(output), "events": events, "sha256": digest, "restorable": False}
+    # Copy into a fresh private file, verify it, then link it into place: linking fails
+    # if anything created the output meanwhile, so an existing file is never replaced.
+    handle, temporary = tempfile.mkstemp(dir=output.parent, prefix=".backup-", suffix=".tmp")
+    os.close(handle)
+    temporary = Path(temporary)
+    try:
+        with closing(sqlite3.connect(f"file:{journal.path}?mode=ro", uri=True)) as source:
+            with closing(sqlite3.connect(temporary)) as target:
+                source.backup(target)
+        with closing(sqlite3.connect(temporary)) as copy:
+            check = copy.execute("PRAGMA integrity_check").fetchone()[0]
+            events = copy.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        if check != "ok":
+            raise LiveSetupError("backup_integrity_failed")
+        digest = hashlib.sha256()
+        with temporary.open("r+b") as copied:  # Writable: Windows refuses fsync on read-only.
+            for chunk in iter(lambda: copied.read(1 << 20), b""):
+                digest.update(chunk)
+            os.fsync(copied.fileno())
+        try:
+            os.link(temporary, output)
+        except FileExistsError:
+            raise LiveSetupError("output_exists") from None
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "output": str(output),
+        "events": events,
+        "sha256": digest.hexdigest(),
+        "restorable": False,
+    }
 
 
 def status(journal):

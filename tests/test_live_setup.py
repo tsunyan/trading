@@ -235,3 +235,24 @@ def test_backup_is_a_consistent_copy_that_never_overwrites(controls, capsys):
         assert conn.execute("SELECT client_id FROM orders").fetchall() == [("Buy001",)]
     assert failure(controls, capsys, "backup", "--output", str(copy)) == "output_exists"
     assert failure(controls, capsys, "backup") == "output_required"
+
+
+def test_backup_never_replaces_a_file_created_during_the_copy(controls, capsys, monkeypatch):
+    import sqlite3 as sqlite
+
+    from trading import live_setup as module
+
+    cli(controls, capsys, "create", "--config", str(controls / "config.json"))
+    copy = controls / "late.sqlite"
+    real = sqlite.connect
+
+    def racing(target, *args, **kwargs):
+        connection = real(target, *args, **kwargs)
+        if not copy.exists() and ".backup-" in str(target):
+            copy.write_bytes(b"created by another process")
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", racing)
+    assert failure(controls, capsys, "backup", "--output", str(copy)) == "output_exists"
+    assert copy.read_bytes() == b"created by another process"
+    assert [p.name for p in controls.iterdir() if p.name.startswith(".backup-")] == []
