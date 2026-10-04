@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from decimal import Decimal
 from math import floor
 
 from trading.config import Settings
@@ -34,21 +33,6 @@ def entry_units(cash: float, equity: float, price: float, cfg: Settings) -> int:
     budget = equity * cfg.allocation * cfg.max_leverage
     budget /= 1 + cfg.commission_rate * cfg.max_leverage
     units = min(floor(budget / price), cfg.max_units)
-    units = units // cfg.lot_size * cfg.lot_size
-    return units if units >= cfg.min_units else 0
-
-
-def entry_units_exact(cash: Decimal, equity: Decimal, price: Decimal, cfg: Settings) -> int:
-    """`entry_units` in exact decimal arithmetic for live money; same rule, no float rounding.
-
-    Config fractions enter by their shortest decimal text (0.2, not the binary 0.2000...01).
-    """
-    if min(cash, equity, price) <= 0:
-        return 0
-    leverage = Decimal(str(cfg.max_leverage))
-    budget = equity * Decimal(str(cfg.allocation)) * leverage
-    budget /= 1 + Decimal(str(cfg.commission_rate)) * leverage
-    units = min(int(budget // price), cfg.max_units)
     units = units // cfg.lot_size * cfg.lot_size
     return units if units >= cfg.min_units else 0
 
