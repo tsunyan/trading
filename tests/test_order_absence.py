@@ -198,6 +198,7 @@ def test_lost_live_commit_after_the_post_commit_is_completed_on_the_next_call(se
         order.client_id, approved, confirmations=ABSENCE_RESOLUTION_CONFIRMATIONS
     )
     assert result["completed_interrupted_resolution"]
+    assert result["post_revision"] == fresh.snapshot()["revision"]
     _, _, _, journal = reopen(setup)
     assert journal.snapshot()["orders"][0]["state"] == "ABANDONED"
     assert len(event_rows(journal, "ORDER_ABSENCE_RESOLVED")) == 1

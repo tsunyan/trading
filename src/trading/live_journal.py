@@ -1761,7 +1761,7 @@ class LiveOrderJournal(OrderJournal):
                 and kind[0] == "ORDER_ABSENCE_PREPARED"
                 and reference["prepared_id"] not in done
             ):
-                return reference
+                return resolved
         return None
 
     def _complete_absence(self, conn, client_id, reference):
@@ -1796,8 +1796,12 @@ class LiveOrderJournal(OrderJournal):
             with self._transaction() as conn:
                 pending = self._pending_absence(conn, client_id)
                 if pending is not None:
-                    self._complete_absence(conn, client_id, pending)
-                    return {**result, "completed_interrupted_resolution": True}
+                    self._complete_absence(conn, client_id, pending["reference"])
+                    return {
+                        **result,
+                        "post_revision": pending["post_after"]["revision"],
+                        "completed_interrupted_resolution": True,
+                    }
                 now = self._clock(self.clock())
                 context = self._absence_context(conn, client_id, now)
                 if (
