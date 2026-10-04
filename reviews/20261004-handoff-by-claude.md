@@ -14,7 +14,7 @@
 | 口座・注文 | 読取結果からの口座証拠更新（建玉時の評価額許容幅つき）、受付済み注文のGET照合 | live-account.md、live-order-sync.md |
 | 復旧 | 有効なまま残る新規・決済の結果不明claim解消（`active-order`確認）、有効注文一覧からのID発見、停止中の無登録台帳の移行 | order-resolution.md、order-discovery.md、live-operations.md |
 | 戦略 | 提案（`--flatten`、`--units auto`、市場閉鎖・損失停止・未決済で見送り）、凍結候補の昇格と合否条件の事前固定・判定 | live-signal.md、promotion.md |
-| 運用 | 台帳CLI（作成・準備・破棄・有効化・状態・停止・バックアップ）、送信直前までのサイクル、毎時タスクと通知、状態診断と変化通知、損益レポート・約定CSV・スリッページ、状態ページ、同期の正常終了からの続行 | live-setup.md、live-cycle.md、live-tasks.md、live-doctor.md、live-report.md、live-dashboard.md、private-sync.md |
+| 運用 | 台帳CLI（作成・準備・破棄・有効化・状態・停止・バックアップ）、送信直前までのサイクル、毎時タスクと通知、状態診断と変化通知、損益レポート（決済の成績・月次・約定CSV・スリッページ）、状態ページ、同期の正常終了からの続行 | live-setup.md、live-cycle.md、live-tasks.md、live-doctor.md、live-report.md、live-dashboard.md、private-sync.md |
 | 受入 | 読取の証拠・資料の指紋から有効化／再開／claim解消／取消の承認ファイル作成、小額の受入試行の手順 | live-acceptance.md、live-first-trial.md |
 
 全体の早見表は`docs/live-commands.md`です。
