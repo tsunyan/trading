@@ -288,7 +288,9 @@ class OrderJournal:
                 blocked = ", ".join(result["reasons"])
         if blocked is None:
             conn.execute("UPDATE orders SET state='SUBMITTING' WHERE client_id=?", (client_id,))
-            self._event(conn, client_id, "SUBMITTING", {})
+            # The reviewed quote is journal evidence for execution-cost review.
+            payload = {} if quote is None else {"quote": quote.model_dump(mode="json")}
+            self._event(conn, client_id, "SUBMITTING", payload)
         return request, blocked
 
     def unknown(self, client_id: str):

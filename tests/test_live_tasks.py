@@ -467,7 +467,7 @@ def test_prepared_cycle_prints_a_submit_command_for_review(tmp_path, monkeypatch
     command = json.loads(capsys.readouterr().out)["submit_command"]
     assert "trading.order_runtime submit" in command and "c" * 64 in command
     assert "--client-id S2026100510OB" in command and "<order_reference>" in command
-    assert "dispatch.jsonl" in command and "--order-permission-confirmed" in command
+    assert "--order-permission-confirmed" in command and "dispatch" not in command
 
 
 def test_plan_adds_an_optional_doctor_task_with_its_own_interval(running, tmp_path):

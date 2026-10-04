@@ -23,21 +23,6 @@ def _money(value):
     return format(Decimal(value).normalize(), "f")
 
 
-def read_dispatches(path):
-    """client_id -> reviewed quote from an order_runtime dispatch log; bad lines are skipped."""
-    quotes = {}
-    if path is None or not Path(path).is_file():
-        return quotes
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        try:
-            item = json.loads(line)
-            if item.get("operation") == "submit" and item.get("quote"):
-                quotes[item["client_id"]] = item["quote"]
-        except (ValueError, AttributeError, KeyError):
-            continue
-    return quotes
-
-
 def _trade_stats(outcomes):
     """Closing-order outcomes net of their own fees and swaps; opening fees are excluded."""
     wins = [o for o in outcomes if o > 0]
@@ -56,7 +41,7 @@ def _trade_stats(outcomes):
     }
 
 
-def report(journal, *, history=24, dispatches=None):
+def report(journal, *, history=24):
     if type(history) is not int or not 0 <= history <= 1000:
         raise ValueError("invalid_history_length")
     with journal._transaction() as conn:
@@ -70,13 +55,19 @@ def report(journal, *, history=24, dispatches=None):
                 (history,),
             )
         ]
+        # The quote each order was reviewed and sent against, from its own journal event.
+        sent_quotes = {
+            r[0]: json.loads(r[1]).get("quote")
+            for r in conn.execute(
+                "SELECT client_id, payload_json FROM events WHERE kind='SUBMITTING' ORDER BY id"
+            )
+        }
     policy = AccountPolicy.model_validate_json(gate["policy_json"])
     peak = Decimal(gate["peak"])
     orders, realized, fees, swaps = [], Decimal(0), Decimal(0), Decimal(0)
     cost, measured = Decimal(0), 0
     outcomes = []
     monthly = {}
-    dispatches = dispatches or {}
     for row in rows:
         intent = OrderIntent.model_validate_json(row["intent_json"])
         item = {
@@ -102,7 +93,7 @@ def report(journal, *, history=24, dispatches=None):
                 realized=_money(sum((e.loss_gain for e in fills), Decimal(0))),
                 settled_swap=_money(sum((e.settled_swap for e in fills), Decimal(0))),
             )
-            sent = dispatches.get(row["client_id"])
+            sent = sent_quotes.get(row["client_id"])
             if filled and sent:
                 # Per unit against the reviewed quote; positive means worse than that quote.
                 average = sum(e.price * e.units for e in fills) / filled
@@ -241,16 +232,13 @@ def main(argv=None):
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
     parser.add_argument("--history", type=int, default=24)
-    parser.add_argument("--dispatch-log", type=Path)
     parser.add_argument("--executions-csv", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
             args.directory, args.read_control_directory, args.scope
         ).journal
-        result = report(
-            journal, history=args.history, dispatches=read_dispatches(args.dispatch_log)
-        )
+        result = report(journal, history=args.history)
         if args.executions_csv is not None:
             items = executions(journal)
             write_csv(items, args.executions_csv)

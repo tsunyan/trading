@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from trading.live_doctor import diagnose
-from trading.live_report import read_dispatches, report
+from trading.live_report import report
 from trading.private_order_recovery import PrivateOrderRecovery
 
 STYLE = " ".join(
@@ -220,7 +220,6 @@ def main(argv=None):
     parser.add_argument("--scope", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cycle-result", type=Path)
-    parser.add_argument("--dispatch-log", type=Path)
     parser.add_argument("--history", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -234,7 +233,7 @@ def main(argv=None):
                 cycle = json.loads(args.cycle_result.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 cycle = {}
-        profit = report(journal, dispatches=read_dispatches(args.dispatch_log))
+        profit = report(journal)
         doctor = diagnose(journal, now, cycle=cycle if args.cycle_result is not None else None)
         page = render(
             doctor,

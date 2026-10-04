@@ -35,7 +35,7 @@
 
 1. 最小数量の新規の注文意図（成行・価格保護つき）を用意し、`live_setup prepare`で準備します。
    戦略の提案を使う場合は`live_cycle --prepare`で準備します。
-2. `order_runtime context`の本文（数量・売買・価格保護）を確認し、`order_runtime submit --dispatch-log ...`で送ります。
+2. `order_runtime context`の本文（数量・売買・価格保護）を確認し、`order_runtime submit`で送ります。確認した気配は台帳の送信記録に残り、執行コストの計算に使います。
    送信ログで[執行コスト](live-report.md)を測れます。
 3. [受付済み注文のGET照合](live-order-sync.md)で`FILLED`にし、口座証拠を更新します。
    建玉がある間は`--valuation-tolerance`を小さい値（例: 0.05）で指定します。

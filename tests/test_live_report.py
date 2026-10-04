@@ -2,6 +2,7 @@
 
 import socket
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from test_account_guard import (
@@ -102,26 +103,16 @@ def test_cli_hides_failures(tmp_path, capsys):
     assert capsys.readouterr().err.startswith("live_report_failed:")
 
 
-def test_slippage_against_the_reviewed_quote_from_the_dispatch_log(tmp_path):
-    import json as jsonlib
-
-    from trading.live_report import read_dispatches
-    from trading.order_runtime import append_dispatch
-
+def test_slippage_against_the_quote_recorded_with_the_submission(tmp_path):
     journal = make_journal(tmp_path, max_loss_jpy="20000")
-    open_position(journal)  # Buy001 filled at 150.01.
-    log = tmp_path / "dispatch.jsonl"
-    append_dispatch(log, "Buy001", "submit", "a" * 64, quote(NOW, bid="149.99", ask="150"))
-    with log.open("a", encoding="utf-8") as output:
-        output.write("not json\n")
-        output.write(jsonlib.dumps({"client_id": "X", "operation": "cancel"}) + "\n")
-    dispatches = read_dispatches(log)
-    assert set(dispatches) == {"Buy001"}
-    result = report(journal, dispatches=dispatches)
-    assert result["orders"][0]["slippage"] == "0.01"  # Paid 0.01 above the reviewed ask.
-    assert result["execution"] == {"orders_measured": 1, "slippage_cost": "10"}
-    assert read_dispatches(tmp_path / "missing.jsonl") == {}
-    assert report(journal)["execution"] == {"orders_measured": 0, "slippage_cost": "0"}
+    open_position(journal)  # Buy001 sent against quote() and filled at 150.01.
+    events = [e for e in journal.snapshot()["events"] if e["kind"] == "SUBMITTING"]
+    sent = events[0]["payload"]["quote"]
+    assert sent == quote().model_dump(mode="json")
+    result = report(journal)
+    expected = Decimal("150.01") - Decimal(sent["ask"])  # Positive: paid above the ask.
+    assert result["orders"][0]["slippage"] == format(expected.normalize(), "f")
+    assert result["execution"]["orders_measured"] == 1
 
 
 def test_executions_export_lists_every_fill_once_and_never_overwrites(tmp_path):
@@ -157,3 +148,12 @@ def test_trade_stats_count_wins_losses_and_profit_factor():
         "win_rate": "0.25",
         "profit_factor": "2",
     }
+
+
+def test_live_catalog_accepts_only_an_empty_or_one_quote_submission_payload():
+    from trading.live_journal import _submitting_payload
+
+    sent = quote().model_dump(mode="json")
+    assert _submitting_payload({}) and _submitting_payload({"quote": sent})
+    assert not _submitting_payload({"quote": sent, "extra": 1})
+    assert not _submitting_payload({"quote": {**sent, "ask": "x"}})

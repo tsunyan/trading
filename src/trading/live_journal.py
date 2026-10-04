@@ -289,6 +289,16 @@ def _configuration(state):
     )
 
 
+def _submitting_payload(payload):
+    """Empty (journals before quotes were recorded) or exactly one valid reviewed quote."""
+    if payload == {}:
+        return True
+    try:
+        return set(payload) == {"quote"} and AccountQuote.model_validate(payload["quote"])
+    except Exception:
+        return False
+
+
 class LiveOrderJournal(OrderJournal):
     """Reuse lifecycle/risk calculations with a separate mode, file and bound owner.
 
@@ -1035,7 +1045,7 @@ class LiveOrderJournal(OrderJournal):
                     raise LiveOrderError("live_catalog_order_integrity_failed")
                 if (
                     len(submitted) != 1
-                    or json.loads(submitted[0]["payload_json"]) != {}
+                    or not _submitting_payload(json.loads(submitted[0]["payload_json"]))
                     or submitted[0]["id"] <= prepared[0]["id"]
                 ):
                     raise LiveOrderError("live_catalog_order_integrity_failed")

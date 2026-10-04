@@ -230,35 +230,6 @@ def test_order_credentials_binding_is_local(monkeypatch, capsys):
     }
 
 
-def test_order_runtime_submit_appends_the_reviewed_quote_to_the_dispatch_log(
-    tmp_path, monkeypatch, capsys
-):
-    recorder = Recorder(SimpleNamespace(root_order_id=101))
-    monkeypatch.setattr(order_runtime, "OrderRuntime", recorder.factory)
-    log = tmp_path / "dispatch.jsonl"
-    order_runtime.main(
-        [
-            "submit",
-            *STORES,
-            "--client-id",
-            "Buy001",
-            "--quote",
-            str(quote_file(tmp_path)),
-            "--expected-sha256",
-            "a" * 64,
-            "--credential-reference",
-            "b" * 32,
-            "--order-permission-confirmed",
-            "--dispatch-log",
-            str(log),
-        ]
-    )
-    assert json.loads(capsys.readouterr().out)["accepted"]
-    line = json.loads(log.read_text(encoding="utf-8"))
-    assert line["client_id"] == "Buy001" and line["quote"]["ask"] == "150.01"
-    assert line["checkpoint_sha256"] == "a" * 64
-
-
 def test_live_signal_cli_refuses_an_unpromoted_strategy_before_reading(
     tmp_path, monkeypatch, capsys
 ):

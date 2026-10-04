@@ -1,7 +1,6 @@
 """Review an existing live order, then explicitly load bound credentials and dispatch once."""
 
 import json
-import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,21 +134,6 @@ def _quote(path):
     return AccountQuote.model_validate(json.loads(payload, object_pairs_hook=_object))
 
 
-def append_dispatch(path, client_id, operation, checkpoint_sha256, quote):
-    """One JSON line per accepted send with the reviewed quote, for execution-cost review."""
-    line = {
-        "client_id": client_id,
-        "operation": operation,
-        "checkpoint_sha256": checkpoint_sha256,
-        "sent_at": datetime.now(UTC).isoformat(),
-        "quote": None if quote is None else quote.model_dump(mode="json"),
-    }
-    with Path(path).open("a", encoding="utf-8", newline="\n") as output:
-        output.write(json.dumps(line, separators=(",", ":")) + "\n")
-        output.flush()
-        os.fsync(output.fileno())
-
-
 def main(argv=None):
     parser = CredentialParser(description=__doc__)
     parser.add_argument("command", choices=("context", "submit", "cancel-context", "cancel"))
@@ -162,7 +146,6 @@ def main(argv=None):
     parser.add_argument("--expected-sha256")
     parser.add_argument("--credential-reference")
     parser.add_argument("--order-permission-confirmed", action="store_true")
-    parser.add_argument("--dispatch-log", type=Path)
     parser.add_argument("--fetch-quote", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -212,14 +195,6 @@ def main(argv=None):
                 "account_complete": False,
                 "reconciliation_required": True,
             }
-            if args.dispatch_log is not None:
-                # After acceptance: a failed log line never hides that the order was sent.
-                try:
-                    append_dispatch(
-                        args.dispatch_log, args.client_id, operation, args.expected_sha256, quote
-                    )
-                except OSError:
-                    result["dispatch_logged"] = False
         print(json.dumps(result, ensure_ascii=False))
     except Exception:
         parser.exit(
