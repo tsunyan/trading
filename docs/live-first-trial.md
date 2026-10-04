@@ -35,7 +35,8 @@
 
 1. 最小数量の新規の注文意図（成行・価格保護つき）を用意し、`live_setup prepare`で準備します。
    戦略の提案を使う場合は`live_cycle --prepare`で準備します。
-2. `order_runtime context`の本文（数量・売買・価格保護）を確認し、`order_runtime submit`で送ります。
+2. `order_runtime context`の本文（数量・売買・価格保護）を確認し、`order_runtime submit --dispatch-log ...`で送ります。
+   送信ログで[執行コスト](live-report.md)を測れます。
 3. [受付済み注文のGET照合](live-order-sync.md)で`FILLED`にし、口座証拠を更新します。
    建玉がある間は`--valuation-tolerance`を小さい値（例: 0.05）で指定します。
 4. `live_cycle --flatten --prepare`で決済を作り、同じく送信・照合・口座証拠の更新をします。
@@ -47,6 +48,7 @@
 - 建玉がある間の評価額と業者の評価額の差が、指定した許容幅に収まる。差が大きい場合は
   業者の評価方法（どの気配で評価しているか）を記録します。
 - 新規と決済の手数料・スワップの丸めを記録します。
+- 損益レポートのスリッページ（確認時の気配と約定価格の差）を記録します。
 
 ## 4. 障害の確認（任意）
 
