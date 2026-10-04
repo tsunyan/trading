@@ -289,6 +289,76 @@ class PersistentReadLimiter(AccountReadLimiter):
                     raise
                 self._wait(0.05)
 
+    def _stream_binding(self, conn, *, allow_legacy=False):
+        receipts = conn.execute(
+            "SELECT token FROM events WHERE kind='STREAM_BOUND' LIMIT 2"
+        ).fetchall()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stream_binding'"
+        ).fetchone()
+        if present is None:
+            if receipts:
+                self._failed = True
+                raise PrivateReadError("stream_binding_integrity_failed")
+            return None
+        rows = conn.execute("SELECT id,supervisor_id FROM stream_binding LIMIT 2").fetchall()
+        if (
+            len(rows) != 1
+            or rows[0][0] != 1
+            or not isinstance(rows[0][1], str)
+            or re.fullmatch(r"[a-f0-9]{32}", rows[0][1]) is None
+            or len(receipts) > 1
+            or (receipts and receipts[0]["token"] != rows[0][1])
+        ):
+            self._failed = True
+            raise PrivateReadError("stream_binding_integrity_failed")
+        if not receipts and not allow_legacy:
+            raise PrivateReadError("stream_binding_history_confirmation_required")
+        return rows[0][1]
+
+    def stream_binding(self):
+        """Read the permanent local supervisor association; never creates it."""
+        with self._transaction() as conn:
+            self._state(conn)
+            return self._stream_binding(conn)
+
+    def bind_stream(self, supervisor_id, *, legacy_binding_confirmed=False):
+        """One supervisor per GET domain. No reset/rebind, even after clean close.
+
+        An additive table keeps existing GET controls compatible. Association is
+        explicit, local, and not proof of broker identity or a cross-PC lock.
+        """
+        if (
+            not isinstance(supervisor_id, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", supervisor_id)
+            or type(legacy_binding_confirmed) is not bool
+        ):
+            raise PrivateReadError("invalid_stream_binding")
+        owner = self._owner_lock(required=True) if legacy_binding_confirmed else nullcontext()
+        with owner, self._transaction() as conn:
+            state = self._state(conn)
+            if (state["stopped"] and not legacy_binding_confirmed) or state["in_flight"]:
+                raise PrivateReadError("stream_binding_control_blocked")
+            bound = self._stream_binding(conn, allow_legacy=legacy_binding_confirmed)
+            if bound is not None:
+                if bound != supervisor_id:
+                    raise PrivateReadError("stream_supervisor_already_bound")
+                if (
+                    legacy_binding_confirmed
+                    and conn.execute("SELECT 1 FROM events WHERE kind='STREAM_BOUND'").fetchone()
+                    is None
+                ):
+                    self._event(conn, state["last_wall_ns"], "STREAM_BOUND", supervisor_id)
+                return
+            if legacy_binding_confirmed:
+                raise PrivateReadError("legacy_stream_binding_required")
+            conn.execute(
+                "CREATE TABLE stream_binding ("
+                "id INTEGER PRIMARY KEY CHECK(id=1),supervisor_id TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO stream_binding VALUES(1,?)", (supervisor_id,))
+            self._event(conn, state["last_wall_ns"], "STREAM_BOUND", supervisor_id)
+
     def status(self):
         with self._transaction() as conn:
             row = self._state(conn)
@@ -309,6 +379,72 @@ class PersistentReadLimiter(AccountReadLimiter):
             "events": count,
             "live_orders_enabled": False,
         }
+
+    def post_binding(self):
+        """Read one permanent POST domain; never create or repair it implicitly."""
+        with self._transaction() as conn:
+            self._state(conn)
+            return self._post_binding(conn)
+
+    def _post_binding(self, conn):
+        receipts = conn.execute(
+            "SELECT token FROM events WHERE kind='POST_BOUND' LIMIT 2"
+        ).fetchall()
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_binding'"
+        ).fetchone()
+        if present is None:
+            if receipts:
+                self._failed = True
+                raise PrivateReadError("post_binding_integrity_failed")
+            return None
+        rows = conn.execute("SELECT id,instance,path FROM post_binding LIMIT 2").fetchall()
+        if (
+            len(rows) != 1
+            or rows[0][0] != 1
+            or not isinstance(rows[0][1], str)
+            or not re.fullmatch(r"[a-f0-9]{32}", rows[0][1])
+            or not isinstance(rows[0][2], str)
+            or not Path(rows[0][2]).is_absolute()
+            or str(Path(rows[0][2]).resolve()) != rows[0][2]
+            or len(receipts) != 1
+            or receipts[0]["token"]
+            != hashlib.sha256((rows[0][1] + ":" + rows[0][2]).encode()).hexdigest()
+        ):
+            self._failed = True
+            raise PrivateReadError("post_binding_integrity_failed")
+        return {"instance": rows[0][1], "path": rows[0][2]}
+
+    def bind_post(self, instance, path):
+        """One POST domain per GET control, without rebinding after stop or deletion."""
+        if (
+            not isinstance(instance, str)
+            or not re.fullmatch(r"[a-f0-9]{32}", instance)
+            or not isinstance(path, Path)
+            or not path.is_absolute()
+        ):
+            raise PrivateReadError("invalid_post_binding")
+        expected = {"instance": instance, "path": str(path.resolve())}
+        with self._transaction() as conn:
+            state = self._state(conn)
+            if state["stopped"] or state["in_flight"]:
+                raise PrivateReadError("post_binding_control_blocked")
+            current = self._post_binding(conn)
+            if current is not None:
+                if current != expected:
+                    raise PrivateReadError("post_control_already_bound")
+                return
+            conn.execute(
+                "CREATE TABLE post_binding (id INTEGER PRIMARY KEY CHECK(id=1),"
+                "instance TEXT NOT NULL,path TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO post_binding VALUES(1,?,?)", (instance, expected["path"]))
+            self._event(
+                conn,
+                state["last_wall_ns"],
+                "POST_BOUND",
+                hashlib.sha256((instance + ":" + expected["path"]).encode()).hexdigest(),
+            )
 
     def _claim(self):
         token = uuid.uuid4().hex

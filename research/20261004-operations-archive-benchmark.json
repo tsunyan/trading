@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-04",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "fixture": "Fully checked submitted test alerts, 1000 hot rows; synthetic READY view",
+  "limitations": "One warm local sample per size. Archive bytes and delivery metadata still grow with history. Monitor-only timing, no production guarantee.",
+  "measurements": [
+    {
+      "alerts": 10000,
+      "active_alerts": 1000,
+      "archive_count": 9,
+      "sqlite_bytes": 5644288,
+      "status_seconds": 0.06150229997001588,
+      "open_seconds": 0.056983299960847944,
+      "full_audit_seconds": 0.1829145000083372,
+      "check_seconds": 0.18621039995923638,
+      "append_seconds": 0.19525619997875765,
+      "notify_seconds": 0.15854390000458807
+    },
+    {
+      "alerts": 50000,
+      "active_alerts": 1000,
+      "archive_count": 49,
+      "sqlite_bytes": 29519872,
+      "status_seconds": 0.3094446000177413,
+      "open_seconds": 0.33398650004528463,
+      "full_audit_seconds": 0.982992600009311,
+      "check_seconds": 0.9306358000030741,
+      "append_seconds": 0.9225757999811321,
+      "notify_seconds": 0.6444091000012122
+    }
+  ]
+}

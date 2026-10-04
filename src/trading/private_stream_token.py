@@ -27,6 +27,10 @@ class StreamError(ValueError):
     """Fixed local codes only; never expose network exceptions or credentials."""
 
 
+class StreamBusyError(StreamError):
+    """No request was sent because another operation still owns the shared slot."""
+
+
 class PrivateStreamLimiter:
     """Share across token clients and subscriptions for one account / outbound IP.
 
@@ -44,6 +48,17 @@ class PrivateStreamLimiter:
     def stop(self):
         with self._lock:
             self._stopped = True
+
+    def fail_token(self, error=None):
+        if not isinstance(error, StreamBusyError):
+            self.stop()
+
+    @contextmanager
+    def token_slot(self, method):
+        if method not in {"POST", "PUT", "DELETE"}:
+            raise StreamError("invalid_token_method")
+        with self.slot():
+            yield
 
     def check(self):
         with self._lock:
@@ -158,14 +173,14 @@ class PrivateTokenClient:
                 raise ValueError
         except Exception:
             self._failed = True
-            self.limiter.stop()
+            self.limiter.fail_token(StreamError("stream_token_clock_invalid"))
             raise StreamError("stream_token_clock_invalid") from None
         self._last_wall, self._last_mono = wall, mono
         return wall, mono
 
     def _request(self, method):
         # Never accepts a path, URL, arbitrary body, or externally supplied token.
-        with self.limiter.slot():
+        with self.limiter.token_slot(method):
             wall, mono = self._now()
             if method == "PUT" and (mono >= self._expires or wall >= self._expires_wall):
                 raise StreamError("stream_token_expired")
@@ -275,9 +290,9 @@ class PrivateTokenClient:
             self._attempted = True
             try:
                 self._request("POST")
-            except BaseException:
+            except BaseException as error:
                 self._failed = True
-                self.limiter.stop()
+                self.limiter.fail_token(error)
                 raise
 
     def _usable(self):
@@ -307,9 +322,14 @@ class PrivateTokenClient:
                     wall, mono = self._now()
                     if mono >= old_mono or wall >= old_wall:
                         raise StreamError("stream_token_expired_during_renewal")
-                except BaseException:
+                except StreamBusyError:
+                    # No token request was sent. Keep receiving and try renewal
+                    # on the next iteration, subject to the old expiry fence.
+                    self._usable()  # Waiting cannot extend the old token lifetime.
+                    return
+                except BaseException as error:
                     self._failed = True
-                    self.limiter.stop()
+                    self.limiter.fail_token(error)
                     raise
 
     def status(self):
@@ -331,10 +351,10 @@ class PrivateTokenClient:
                 if self._token is not None:
                     self._cleanup_unknown = True
                     self._request("DELETE")
-            except Exception:
+            except Exception as error:
                 failed = True
                 self._failed = True
-                self.limiter.stop()
+                self.limiter.fail_token(error)
             finally:
                 try:
                     self._client.close()

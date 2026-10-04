@@ -85,6 +85,8 @@ class EventJournal:
     Reopening this object never starts or resumes a capture session.
     """
 
+    _version = 1
+
     def __init__(self, directory: Path, scope: str):
         if not isinstance(scope, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", scope):
             raise JournalError("invalid_journal_scope")
@@ -181,7 +183,7 @@ class EventJournal:
             meta = dict(metas[0])
             if (
                 meta["id"] != 1
-                or meta["version"] != 1
+                or meta["version"] != self._version
                 or meta["scope"] != self.scope
                 or not isinstance(meta["instance"], str)
                 or not re.fullmatch(r"[a-f0-9]{32}", meta["instance"])
@@ -218,7 +220,7 @@ class EventJournal:
                 "active": False,
                 "sequence": 0,
                 "pending": None,
-                "at": None,
+                "at": meta.get("_archive_at"),
                 "mono": None,
                 "unacknowledged": [],
                 "rejected": 0,
@@ -358,11 +360,13 @@ class EventJournal:
             "head": meta["head"],
             "records": meta["count"],
             "bytes": meta["bytes"],
+            "max_records": meta["max_records"],
             "epoch": state["epoch"],
             "session_open": state["active"],
             "captured_events": state["events"],
             "rejected_frames": state["rejected"],
             "unacknowledged_records": tuple(state["unacknowledged"]),
+            "archived_segments": meta.get("_archived_segments", 0),
             "history_gap_unproven": True,
             "resync_required": True,
             "complete": False,
@@ -413,6 +417,7 @@ class EventJournal:
             "epoch": state["epoch"],
             "head": meta["head"],
             "unacknowledged_records": tuple(state["unacknowledged"]),
+            "archived_segments": meta.get("_archived_segments", 0),
         }
 
     @contextmanager
@@ -429,7 +434,9 @@ class EventJournal:
                 raise JournalError("capture_delivery_unresolved")
             yield
 
-    def record(self, session, kind, *, at, monotonic_ns, sequence=None, payload=None):
+    def record(
+        self, session, kind, *, at, monotonic_ns, sequence=None, payload=None, expected_head=None
+    ):
         if not isinstance(kind, str) or kind not in {"EVENT", "HEARTBEAT", "END"}:
             raise JournalError("invalid_capture_kind")
         at, mono = self._stamp(at, monotonic_ns)
@@ -439,6 +446,8 @@ class EventJournal:
             with self._transaction(write=True) as conn:
                 meta, _, state = self._verify(conn)
                 self._current(state, session)
+                if expected_head is not None and expected_head != meta["head"]:
+                    raise JournalError("journal_head_changed")
                 if state["pending"] is not None:
                     raise JournalError("capture_delivery_unresolved")
                 fields = dict(epoch=state["epoch"], session=session, at=at, monotonic_ns=mono)
@@ -527,9 +536,12 @@ class EventJournal:
 
     def replay(self):
         """Reconstruct recorded, acknowledged input only; never return a live monitor."""
+        return self._replay_snapshot(*self._read())
+
+    @staticmethod
+    def _replay_snapshot(meta, entries, state):
         from trading.account_sync import AccountSyncMonitor, SyncError
 
-        meta, entries, state = self._read()
         clock = [datetime(1970, 1, 1, tzinfo=UTC), 0]
         monitor = None
         session = None

@@ -5,6 +5,8 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 
 採用方針と根拠は [docs/architecture.md](docs/architecture.md)、現在の不足機能と実装順は
 [docs/roadmap.md](docs/roadmap.md) を参照してください。
+USD/JPYの実用化に向けた進行中の作業は [docs/fx-practical-plan.md](docs/fx-practical-plan.md)、
+定期観測・watchdog・Windows通知の使い方は [docs/paper-operations.md](docs/paper-operations.md) を参照してください。
 
 ## 実装済みの範囲
 
@@ -19,15 +21,22 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 - 固定戦略を連続口座、時系列の独立区間、取引コスト悪化条件で評価し、証拠不足を明示。
 - SMAクロス、固定期間モメンタム、固定期間平均回帰を同じ会計で比較可能。
 - 研究上の試行を仮説ごとに記録するローカル実験台帳（試行回数、判断、凍結日）。
+- 凍結した戦略候補のペーパー・実運用への昇格状態の記録。
+- USD/JPYの実口座向け: 専用発注台帳、口座証拠の照合、確認済み送信、結果不明の調査・解消、
+  同期・独立監視、戦略の提案、送信直前までの運用サイクルと定期実行・通知、状態診断・損益レポート
+  （[手順書](docs/live-setup.md)。GMO口座は未準備で、実口座での受入確認は未実施）。
 
 現在は単一銘柄・円建てで、設定により買い、売り、レバレッジを検証できます。
-実注文の送信機能はありません。口座なしで検証する注文生成・署名・永続台帳・照合の
+単一USD/JPYの[専用実口座台帳と送信API](docs/live-orders.md)を追加し、期限付き有効化・口座リスク・
+共通POST制御・新規／決済HTTP・受付保存を合成通信で検証しています。GMO口座は未準備で、
+実口座の有効化・送信は未実施です。取消・結果別復旧・読取運用との接続は残っています。
+口座なしで検証する注文生成・署名・永続台帳・照合の
 [オフライン注文処理基盤](docs/execution-foundation.md)を用意しています。
 [口座照合・注文直前リスクゲート](docs/account-guard.md)も、合成口座で検証できます。
 [読み取り専用の口座データ取得・再生基盤](docs/account-reader.md)では、ページング・
 取得中の変化・応答の鮮度を模擬検証できます。
 [GET専用の認証付き通信](docs/private-read.md)も実装済みですが、実口座接続は未検証です。
-認証情報の自動読込、発注許可への自動変換、実注文送信はありません。
+GETの診断結果を発注許可や完全な口座証拠へ自動変換する経路はありません。
 [読み取り通信の永続停止・プロセス間制御](docs/read-control.md)も、実口座なしで検証できます。
 [期限・状態を照合する手動復旧](docs/read-recovery.md)を追加しました。未完了通信の強制解除はありません。
 新規version 3では[OSロック付きのクラッシュ後claim解消](docs/read-orphan.md)も可能です。
@@ -42,6 +51,16 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 開始残高・履歴完全性・全口座会計の確認は残り、発注許可には変換しません。
 [同期モニターからの現金計上](docs/execution-cash-sync.md)では、明示指定した台帳へ照合済み約定を渡します。
 通知の到着・古い取得・世代引継ぎを拒否し、計上後の途中終了でも再実行による二重計上を防ぎます。
+台帳の明示指定時は完全計上済み注文の再取得を省き、部分約定・新しい通知は取得を継続します。
+[履歴を保存した区間切替](docs/segmented-journal.md)では、同じDB内に旧区間を保存し、
+未確認ACK・未計上約定を拒否して明示的な接続更新ができます。
+[同期の所有権・永続停止・手動復旧](docs/stream-control.md)では、OSロックと保存した状態で二重起動・自動再開を拒否します。
+[Private同期の継続実行](docs/private-supervisor.md)では、定期REST照合と容量・時間・イベント数による予定切替を合成検証できます。
+[明示開始の実口座読取CLI](docs/private-sync.md)はWindows資格情報・永続GET制御・継続同期を組み合わせます。
+固定設定を変えずに既知注文を追記登録でき、稼働中の次回取得でも参照します。登録で停止は解除しません。
+停止中の保存済み約定は、明示GET照合で一度だけ計上し、その後に別の復旧操作を行います。
+合成通信で起動・終了・約定計上・停止を検証済みです。[独立監視とWindows障害通知](docs/private-operations.md)も利用できます。
+実口座受入は残っています。
 [約定からの建玉会計](docs/execution-positions.md)では、開始建玉を宣言した台帳で数量・取得価格・決済損益を検証します。
 部分決済と再起動に対応し、RESTとの差を補正せず表示します。
 [建玉拘束数量の照合](docs/position-reservations.md)では、決済割当から計上済み約定を引き、RESTの拘束数量と比較します。
@@ -58,6 +77,11 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 口座なしの合成デモがあり、実口座接続・実購読の受入確認は未実施です。
 [Windows資格情報マネージャーへの明示的なキー保管](docs/credential-store.md)も追加しました。
 実ストアでの受入確認は未実施で、自動読込・ペーパー運用への接続はありません。
+USD/JPYの実口座発注は、[実発注台帳の作成から確認済み送信までの手順](docs/live-setup.md)にまとめました。
+台帳の作成・有効化、[口座証拠の更新](docs/live-account.md)、[戦略の提案](docs/live-signal.md)、
+[送信直前までの運用サイクル](docs/live-cycle.md)、[確認済み送信](docs/order-runtime.md)、
+[受付済み注文のGET照合](docs/live-order-sync.md)をCLIで行えます。全コマンドは[早見表](docs/live-commands.md)にあります。POSTは実行内容のSHA-256を
+運用者が指定した場合だけ送ります。GMO口座は未準備で、実口座での受入確認は行っていません。口座準備後は[小額の受入試行](docs/live-first-trial.md)から始めます。
 日本株のブローカー接続とJ-Quants自動取得は次段階です。
 移動平均ルールは配線・会計の確認用で、収益性を検証した戦略ではありません。
 
@@ -151,6 +175,16 @@ uv run trading ledger import --run runs/old-run --hypothesis H002-example --purp
 uv run trading ledger decide --entry 12 --decision reject --reason "スワップ込みで赤字"
 uv run trading ledger freeze --id H002-example --entry 12
 uv run trading ledger list --hypothesis H002-example
+```
+
+凍結後は、forward OOSの結果を見る前に合否条件を固定し、凍結後のデータで同じ候補を評価して判定します。
+判定に通った候補だけを実運用へ昇格できます（[昇格管理](docs/promotion.md)）。
+
+```powershell
+uv run python -m trading.promotion set-criteria --hypothesis H002-example --criteria configs/h002-criteria.json
+uv run python -m trading.promotion promote --hypothesis H002-example --stage paper --reason "凍結後のペーパー運用"
+uv run python -m trading.promotion judge --hypothesis H002-example --entry 31
+uv run python -m trading.promotion promote --hypothesis H002-example --stage live --reason "固定条件に合格"
 ```
 
 - `compare`は候補ごとに1件記録します。記録内容は実験ID、データ期間とハッシュ、設定、評価条件、

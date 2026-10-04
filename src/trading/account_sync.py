@@ -41,8 +41,11 @@ class SyncAssessment(Contract):
     blockers: tuple[str, ...]
     execution_reconciliation: ExecutionReconciliation | None = None
     execution_cash: dict | None = None
+    account_inventory: dict | None = None
     position_reservations: dict | None = None
     account_valuation: dict | None = None
+    previously_booked_execution_ids: tuple[int, ...] = ()
+    booked_cash_head: str | None = None
     complete: Literal[False] = False
     live_enabled: Literal[False] = False
 
@@ -115,6 +118,8 @@ class AccountSyncMonitor:
         self._baseline = None
         self._cash_batch = None
         self._cash_observed_at = None
+        self._inventory_input = None
+        self._inventory_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
         self._valuation_input = None
@@ -123,14 +128,18 @@ class AccountSyncMonitor:
         self._orders: dict[int, AccountEvent] = {}
         self._executions: dict[int, AccountEvent] = {}
         self._verified_executions: set[int] = set()
+        self._booked_executions: set[int] = set()
         self._completed_orders: set[int] = set()
 
     def _invalidate(self, reason, *, disconnect=False):
         self._revision += 1
         self._observed = False
         self._verified_executions.clear()
+        self._booked_executions.clear()
         self._cash_batch = None
         self._cash_observed_at = None
+        self._inventory_input = None
+        self._inventory_observed_at = None
         self._reservation_input = None
         self._reservation_observed_at = None
         self._valuation_input = None
@@ -163,6 +172,10 @@ class AccountSyncMonitor:
             or (
                 self._cash_batch is not None
                 and mono - self._cash_observed_at > self._observation_limit
+            )
+            or (
+                self._inventory_input is not None
+                and mono - self._inventory_observed_at > self._observation_limit
             )
             or (
                 self._reservation_input is not None
@@ -267,12 +280,14 @@ class AccountSyncMonitor:
                 "epoch": self._epoch,
                 "revision": self._revision,
                 "received_sequence": self._sequence,
+                "max_session_events": self._capacity,
                 "resync_required": not self._observed,
                 "history_gap_observed": self._gap,
                 "pending_positions": len(self._positions),
                 "pending_orders": len(self._orders),
                 "unverified_executions": len(self._executions.keys() - self._verified_executions),
-                "reconciled_executions": len(self._verified_executions),
+                "reconciled_executions": len(self._verified_executions - self._booked_executions),
+                "previously_booked_executions": len(self._booked_executions),
                 "complete": False,
                 "live_enabled": False,
                 "blockers": list(self._blockers()),
@@ -289,6 +304,32 @@ class AccountSyncMonitor:
             ),
             *(("execution_accounting_not_applied",) if self._executions else ()),
         )
+
+    def assert_rollover_ready(self, session, book: ExecutionCashBook | None):
+        """Only discard process-local execution notices after durable receipt matching.
+
+        This permits a planned observation boundary, not restoration of account
+        proof or repair of the broker history gap. A collection in flight must
+        finish first. Partial orders may cross the boundary if every received
+        fill is booked; the next connection still requires fresh account reads.
+        """
+        with self._lock:
+            self._current(session)
+            if self._ticket is not None:
+                raise SyncError("rollover_collection_in_progress")
+            revision = self._revision
+            events = tuple(self._executions.values())
+            if book is not None and book.snapshot()["halted"]:
+                raise SyncError("rollover_cash_book_halted")
+            if events:
+                if not isinstance(book, ExecutionCashBook):
+                    raise SyncError("rollover_execution_cash_book_required")
+                receipt = book.match_booked_events(events)
+                if set(receipt["booked_execution_ids"]) != set(self._executions):
+                    raise SyncError("rollover_execution_not_booked")
+            self._current(session)
+            if revision != self._revision or self._ticket is not None:
+                raise SyncError("stream_changed_during_collection")
 
     def apply_execution_cash(self, session, book: ExecutionCashBook, *, expected_revision):
         """Explicitly book this accepted observation's individual fills, never totals.
@@ -362,6 +403,66 @@ class AccountSyncMonitor:
         if self._baseline is not None and report.assets.balance != self._baseline.assets.balance:
             problems.append("balance_change_unverified")
         return tuple(problems)
+
+    def compare_account_inventory(self, session, book: ExecutionCashBook, *, expected_revision):
+        """Compare current cash and declared positions against one stable book head."""
+        with self._lock:
+            self._current(session)
+            if type(expected_revision) is not int or expected_revision != self._revision:
+                raise SyncError("stale_inventory_sync_revision")
+            if self._ticket is not None or self._inventory_input is None:
+                raise SyncError("inventory_requires_current_collection")
+            if not isinstance(book, ExecutionCashBook):
+                raise SyncError("execution_cash_book_required")
+            report = self._inventory_input
+            epoch, sequence = self._epoch, self._sequence
+            try:
+                before = book.snapshot()
+                balance = book.compare_balance(report, clock_skew_ms=self._clock_skew_ms)
+                positions = (
+                    book.compare_positions(report, clock_skew_ms=self._clock_skew_ms)
+                    if before.get("position_accounting_applied")
+                    else None
+                )
+                after = book.snapshot()
+                if any(
+                    item["head"] != before["head"]
+                    for item in (balance, after, *((positions,) if positions else ()))
+                ):
+                    raise SyncError("cash_book_changed_during_inventory_comparison")
+                self._current(session)
+                if self._inventory_input is not report or expected_revision != self._revision:
+                    raise SyncError("inventory_sync_changed_during_comparison")
+            except BaseException as error:
+                self._invalidate("account_inventory_comparison_failed")
+                if not isinstance(error, Exception):
+                    raise
+                raise SyncError("account_inventory_comparison_failed") from None
+            return {
+                "balance": balance,
+                "positions": positions,
+                "head": after["head"],
+                "halted": after["halted"]
+                or balance["halted"]
+                or bool(positions and positions["halted"]),
+                "epoch": epoch,
+                "revision": expected_revision,
+                "received_sequence": sequence,
+                "blockers": tuple(
+                    dict.fromkeys(
+                        (
+                            *balance["blockers"],
+                            *(
+                                positions["blockers"]
+                                if positions
+                                else ("cash_book_position_basis_required",)
+                            ),
+                        )
+                    )
+                ),
+                "complete": False,
+                "live_enabled": False,
+            }
 
     def compare_position_reservations(self, session, book: ExecutionCashBook, *, expected_revision):
         """Compare only internally retained, current evidence; never returned dicts."""
@@ -440,13 +541,19 @@ class AccountSyncMonitor:
         collect_reservations: Callable[[], tuple[OrderReadReport, ...]] | None = None,
         collect_quote: Callable[[], ValuationQuote] | None = None,
         valuation_policy: ValuationPolicy | None = None,
+        cash_book_for_lookup: ExecutionCashBook | None = None,
     ) -> SyncAssessment:
         """Collect once outside the lock, then fence concurrent changes at acceptance.
 
         Supply AccountReader.collect_account (or an offline transcript replay). No
-        retry, network creation, ledger mutation, stop reset, or trade permission.
+        retry, network creation, cash posting, stop reset, or trade permission.
+        Explicit durable receipt lookup may persist an identity-conflict stop.
         """
         with self._lock:
+            if cash_book_for_lookup is not None and (
+                not isinstance(cash_book_for_lookup, ExecutionCashBook) or collect_orders is None
+            ):
+                raise SyncError("incremental_cash_requires_book_and_collector")
             if (collect_quote is None) != (valuation_policy is None):
                 raise SyncError("valuation_requires_quote_and_policy")
             if valuation_policy is not None:
@@ -474,6 +581,31 @@ class AccountSyncMonitor:
                 raise SyncError("execution_collection_capacity")
         try:
             try:
+                lookup = None
+                if cash_book_for_lookup is not None:
+                    lookup = cash_book_for_lookup.match_booked_events(events)
+                    matched = set(lookup["booked_execution_ids"])
+                    complete = set(lookup["fully_booked_order_ids"])
+                    # A new notice for an old completed order always forces a new
+                    # REST lookup; never omit a whole order merely by its ID.
+                    order_ids = tuple(
+                        sorted(
+                            {
+                                e.execution_order_id
+                                for e in events
+                                if e.entity_id not in matched
+                                or e.execution_order_id not in complete
+                            }
+                        )
+                    )
+                    current_events = tuple(e for e in events if e.execution_order_id in order_ids)
+                    previously_booked = matched - {e.entity_id for e in current_events}
+                else:
+                    current_events, previously_booked = events, set()
+                with self._lock:
+                    self._current(session)
+                    if ticket != self._ticket or self._revision != revision:
+                        raise SyncError("stream_changed_during_collection")
                 reservation_reports = None
                 if collect_reservations is not None:
                     collected = collect_reservations()
@@ -502,12 +634,12 @@ class AccountSyncMonitor:
                     raise ValueError
                 report = AccountReadReport.model_validate(report.model_dump())
                 reconciliation = None
-                if collect_orders is not None and events:
+                if collect_orders is not None and current_events:
                     with self._lock:
                         self._current(session)
                         if ticket != self._ticket or self._revision != revision:
                             raise SyncError("stream_changed_during_collection")
-                    reconciliation = reconcile_executions(events, collect_orders(order_ids))
+                    reconciliation = reconcile_executions(current_events, collect_orders(order_ids))
                 quote = None
                 if collect_quote is not None:
                     with self._lock:
@@ -518,6 +650,13 @@ class AccountSyncMonitor:
                     quote = ValuationQuote.model_validate(
                         collected_quote.model_dump(warnings=False)
                     )
+            except SyncError as error:
+                # A normal event can invalidate the lookup before order reads,
+                # as well as after the final collection. Preserve that fence so
+                # the supervisor can retry without closing a healthy receiver.
+                if str(error) == "stream_changed_during_collection":
+                    raise
+                raise SyncError("sync_collection_failed") from None
             except Exception:
                 raise SyncError("sync_collection_failed") from None
             with self._lock:
@@ -592,10 +731,19 @@ class AccountSyncMonitor:
                             ):
                                 raise SyncError("stale_or_invalid_reservation_report")
                 mismatches = self._compare(report)
+                if lookup is not None:
+                    current_book = cash_book_for_lookup.snapshot()
+                    if current_book["halted"] or current_book["head"] != lookup["head"]:
+                        raise SyncError("cash_book_changed_during_collection")
+                    self._current(session)
+                    if ticket != self._ticket or self._revision != revision:
+                        raise SyncError("stream_changed_during_collection")
+                    self._booked_executions = previously_booked
+                    self._verified_executions = set(previously_booked)
                 if reconciliation is not None:
                     mismatches += reconciliation.mismatches
                     if not mismatches:
-                        self._verified_executions = set(reconciliation.matched_execution_ids)
+                        self._verified_executions |= set(reconciliation.matched_execution_ids)
                 result = SyncAssessment(
                     epoch=self._epoch,
                     revision=revision,
@@ -607,8 +755,13 @@ class AccountSyncMonitor:
                     ),
                     execution_reconciliation=reconciliation,
                     report=report,
+                    previously_booked_execution_ids=tuple(sorted(previously_booked)),
+                    booked_cash_head=lookup["head"] if lookup is not None else None,
                     blockers=tuple(dict.fromkeys((*self._blockers(), *report.blockers))),
                 )
+                # Keep an independent validated copy: returned diagnostics are not proof.
+                self._inventory_input = AccountReadReport.model_validate(report.model_dump())
+                self._inventory_observed_at = mono
                 if reservation_reports is not None:
                     self._reservation_input = (report, reservation_reports)
                     self._reservation_observed_at = mono
@@ -624,7 +777,7 @@ class AccountSyncMonitor:
                     # Keep it as an account-level blocker; it must not prevent
                     # an individually matched cash batch from being recorded.
                     self._cash_batch = ExecutionCashBatch(
-                        events=events,
+                        events=current_events,
                         reports=reconciliation.reports,
                         clock_skew_ms=self._clock_skew_ms,
                     )

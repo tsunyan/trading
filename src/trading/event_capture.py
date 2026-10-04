@@ -91,7 +91,7 @@ class JournaledEventCapture:
                 self._poison()
                 raise
 
-    def _deliver(self, kind, *, sequence=None, payload=None):
+    def _deliver(self, kind, *, sequence=None, payload=None, expected_head=None):
         with self._lock:
             # record() verifies the journal and session within its transaction.
             self._check_ready()
@@ -104,6 +104,7 @@ class JournaledEventCapture:
                     monotonic_ns=mono,
                     sequence=sequence,
                     payload=payload,
+                    expected_head=expected_head,
                 )
             except BaseException:
                 self._poison()
@@ -136,6 +137,30 @@ class JournaledEventCapture:
 
     def disconnect(self):
         self._deliver("END")
+
+    def end_for_rollover(self, cash_book=None):
+        """Clean boundary with all received fills durably booked and all ACKs known."""
+        with self._lock:
+            if cash_book is not None:
+                self._check_cash_book(cash_book)
+            view = self._ready()
+            if view["unacknowledged_records"]:
+                raise JournalError("capture_delivery_unresolved")
+            self._monitor.assert_rollover_ready(self._monitor_session, cash_book)
+            self._deliver("END", expected_head=view["head"])
+            return self._journal.inspect()["head"]
+
+    @property
+    def journal(self):
+        return self._journal
+
+    def assert_rollover_ready(self, cash_book):
+        with self._lock:
+            self._check_cash_book(cash_book)
+            view = self._ready()
+            if view["unacknowledged_records"]:
+                raise JournalError("capture_delivery_unresolved")
+            self._monitor.assert_rollover_ready(self._monitor_session, cash_book)
 
     def check_live(self):
         """Cheap fence for each receive-loop iteration; status() stays the full audit.
@@ -194,6 +219,11 @@ class JournaledEventCapture:
             "journal_is_not_broker_history_proof",
             *(("journal_epoch_gap_not_repaired",) if view and view["epoch"] > 1 else ()),
             *(
+                ("journal_rollover_gap_not_repaired",)
+                if view and view.get("archived_segments")
+                else ()
+            ),
+            *(
                 ("journal_delivery_outcome_unknown",)
                 if view and view["unacknowledged_records"]
                 else ()
@@ -217,6 +247,19 @@ class JournaledEventCapture:
                 # between its check and the separate cash book commit.
                 with self._journal.guard_session(self._session):
                     return self._monitor.apply_execution_cash(
+                        self._monitor_session, book, expected_revision=expected_revision
+                    )
+            except BaseException:
+                self._poison()
+                raise
+
+    def compare_account_inventory(self, book: ExecutionCashBook, *, expected_revision):
+        with self._lock:
+            self._check_cash_book(book)
+            self._ready()
+            try:
+                with self._journal.guard_session(self._session):
+                    return self._monitor.compare_account_inventory(
                         self._monitor_session, book, expected_revision=expected_revision
                     )
             except BaseException:
@@ -260,8 +303,13 @@ class JournaledEventCapture:
         collect_quote=None,
         valuation_policy=None,
         valuation_book=None,
+        incremental_cash=None,
     ):
         with self._lock:
+            if incremental_cash is None:
+                incremental_cash = cash_book is not None
+            if type(incremental_cash) is not bool or (incremental_cash and cash_book is None):
+                raise SyncError("incremental_cash_requires_explicit_book")
             if cash_book is not None:
                 self._check_cash_book(cash_book)
                 if collect_orders is None:
@@ -294,12 +342,15 @@ class JournaledEventCapture:
             collect_reservations=collect_reservations,
             collect_quote=collect_quote,
             valuation_policy=valuation_policy,
+            cash_book_for_lookup=cash_book if incremental_cash else None,
         )
         with self._lock:
             view = self._ready()
             current = self._monitor.status()
             if session != self._session or current["revision"] != result.revision:
                 raise SyncError("capture_changed_during_collection")
+            if incremental_cash and cash_book.snapshot()["head"] != result.booked_cash_head:
+                raise SyncError("cash_book_changed_during_collection")
             execution_cash = None
             reconciliation = result.execution_reconciliation
             if (
