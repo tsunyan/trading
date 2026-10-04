@@ -99,3 +99,13 @@ def _review(tmp_path):
     path = tmp_path / "migration review.md"
     path.write_text("legacy journal reviewed before registration")
     return path
+
+
+def test_migration_also_works_while_post_control_is_stopped(enabled):
+    _, live, _ = enabled
+    journal = live[3]
+    journal.halt()
+    live[2].stop("operator_stop")
+    context = migrate(enabled)
+    assert journal.snapshot()["live_control"]["operations"] is not None
+    assert context["configuration_sha256"]
