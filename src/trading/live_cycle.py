@@ -371,8 +371,14 @@ def main(argv=None, *, send=None):
             from trading.live_report import report
 
             now = datetime.now(UTC)
+            candidate = _candidate(args)
+            doctor = diagnose(
+                cycle.journal,
+                now,
+                candidate=None if candidate is None else (*candidate, load_settings(args.config)),
+            )
             page = render(
-                diagnose(cycle.journal, now),
+                doctor,
                 report(cycle.journal),
                 result,
                 generated_at=now.isoformat(),

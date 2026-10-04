@@ -91,3 +91,19 @@ def test_cli_exit_code_follows_readiness(setup, capsys):
     printed = json.loads(capsys.readouterr().out)
     # The CLI uses the real clock, far from the fixture clock: not ready, exit code 1.
     assert code == 1 and printed["send_ready"] is False and printed["network_used"] is False
+
+
+@pytest.mark.parametrize("stage", ["paper", "live"])
+def test_optional_strategy_promotion_gate(setup, tmp_path, stage):
+    from test_live_cycle import CFG, live_ledger
+
+    values, live = setup[0], setup[1]
+    ledger = live_ledger(tmp_path, stage=stage)
+    result = diagnose(live[3], values[0].wall, candidate=(ledger, "H001", CFG))
+    gate = result["gates"]["strategy_promotion"]
+    if stage == "live":
+        assert gate == {"ok": True, "reason": None} and result["send_ready"]
+    else:
+        assert gate == {"ok": False, "reason": "strategy_not_promoted_for_live"}
+        assert not result["send_ready"]
+    assert "strategy_promotion" not in diagnose(live[3], values[0].wall)["gates"]

@@ -21,6 +21,10 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 | `account_proof` | `account_proof_missing`、`account_proof_stale` |
 | `order_queue` | `orders_awaiting_reconciliation:<件数>`（準備済み以外で終わっていない注文） |
 
+`--ledger`・`--hypothesis`・`--config`を指定すると`strategy_promotion`も表示します。設定が実運用に
+昇格した凍結候補と同一でなければ不合格です（[昇格管理](promotion.md)）。この項目は新規の提案だけに
+関係し、決済・手仕舞いには影響しませんが、送信可否の判定には含めます。
+
 あわせて、許可の期限と残り秒数、損失による新規停止、注文ごとの状態を表示します。
 
 ## 判定の範囲

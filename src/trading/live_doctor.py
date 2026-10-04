@@ -10,8 +10,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from trading.account_guard import AccountPolicy, AccountSnapshot, fresh
+from trading.config import load_settings
 from trading.live_operations import LiveOperations
 from trading.private_order_recovery import PrivateOrderRecovery
+from trading.promotion import require_live
 
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
 
@@ -25,7 +27,7 @@ def _gate(check):
     return {"ok": reason is None, "reason": reason}
 
 
-def diagnose(journal, now):
+def diagnose(journal, now, *, candidate=None):
     def reads():
         status = journal.posts.reads.status()
         return "read_control_blocked" if status["blocked"] else None
@@ -84,6 +86,11 @@ def diagnose(journal, now):
         waiting = [o for o in orders if o["state"] not in SETTLED | {"PREPARED"}]
         return f"orders_awaiting_reconciliation:{len(waiting)}" if waiting else None
 
+    def promotion():
+        ledger, hypothesis, cfg = candidate
+        require_live(ledger, hypothesis, cfg)
+        return None
+
     gates = {
         "read_control": _gate(reads),
         "post_control": _gate(posts),
@@ -92,6 +99,9 @@ def diagnose(journal, now):
         "account_proof": _gate(account),
         "order_queue": _gate(queue),
     }
+    if candidate is not None:
+        # Only new entries depend on promotion; closes and flattening never do.
+        gates["strategy_promotion"] = _gate(promotion)
     expires = state.approval.expires_at if state.approval is not None else None
     return {
         "checked_at": now.isoformat(),
@@ -112,12 +122,21 @@ def main(argv=None):
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
     parser.add_argument("--scope", required=True)
+    parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--hypothesis")
+    parser.add_argument("--config", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
             args.directory, args.read_control_directory, args.scope
         ).journal
-        result = diagnose(journal, datetime.now(UTC))
+        given = [v is not None for v in (args.ledger, args.hypothesis, args.config)]
+        if any(given) and not all(given):
+            raise ValueError("ledger_hypothesis_and_config_required_together")
+        candidate = (
+            (args.ledger, args.hypothesis, load_settings(args.config)) if all(given) else None
+        )
+        result = diagnose(journal, datetime.now(UTC), candidate=candidate)
     except Exception as error:
         parser.exit(2, f"live_doctor_failed: {type(error).__name__}\n")
     print(json.dumps(result, ensure_ascii=False))
