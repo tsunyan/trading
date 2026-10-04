@@ -6,6 +6,7 @@ the first refusal a send would hit. No credentials, HTTP, claims or state change
 
 import argparse
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from trading.order_receipts import BROKER_CODE_NOTES
 from trading.private_order_recovery import PrivateOrderRecovery
 from trading.promotion import require_live
 
+MIN_FREE_BYTES = 2**30
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
 
 
@@ -99,7 +101,13 @@ def diagnose(journal, now, *, candidate=None, cycle=None):
         require_live(ledger, hypothesis, cfg)
         return None
 
+    def disk():
+        # Every store here appends history; a full volume would stop it mid-operation.
+        free = shutil.disk_usage(journal.path.parent).free
+        return f"disk_space_low:{free // 2**20}MiB" if free < MIN_FREE_BYTES else None
+
     gates = {
+        "disk_space": _gate(disk),
         "read_control": _gate(reads),
         "post_control": _gate(posts),
         "approval": _gate(approval),

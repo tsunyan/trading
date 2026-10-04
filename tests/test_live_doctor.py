@@ -149,3 +149,14 @@ def test_change_notices_are_sent_once_per_change_and_retried_after_failure(tmp_p
     assert live_doctor.notify_changes(ready, state, send=send) is True
     assert [a["kind"] for a in sent] == ["live_doctor_blocked", "live_doctor_ready"]
     assert sent[0]["id"] == "sync_and_watchdog:live_sync_unhealthy"  # The queue stays quiet.
+
+
+def test_low_disk_space_blocks_the_send_with_the_free_space_named(setup, monkeypatch):
+    import shutil
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: usage(10 * 2**30, 0, 512 * 2**20))
+    result = report(setup)
+    assert not result["send_ready"]
+    assert result["gates"]["disk_space"]["reason"] == "disk_space_low:512MiB"

@@ -14,6 +14,7 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 
 | 項目 | 理由の例 |
 | --- | --- |
+| `disk_space` | `disk_space_low:<空きMiB>`（台帳のあるドライブの空きが1GiB未満。台帳・同期・監視は履歴を追記し続けるため） |
 | `read_control` | `read_control_blocked`（GET制御の停止・未完了claim） |
 | `post_control` | `post_stopped:<停止理由>`、`post_claim_in_flight` |
 | `approval` | `phase_disabled`、`phase_stopped`、`journal_halted`、`implementation_changed`、`approval_expired` |
