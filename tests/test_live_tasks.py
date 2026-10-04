@@ -139,6 +139,7 @@ def cycle_args(tmp_path):
 
 
 class FakeCycle:
+    journal = None
     outcome = None
 
     def __init__(self, *args, **kwargs):
@@ -240,3 +241,51 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
     plan = json.loads(process.stdout)
     assert plan["ok"] and not plan["sends_orders"]
     assert "--prepare" not in plan["tasks"][0]["arguments"]
+
+
+class ExpiringCycle(FakeCycle):
+    expires = None
+
+    def __init__(self, *args, **kwargs):
+        expires = self.expires
+        self.journal = type(
+            "J",
+            (),
+            {
+                "snapshot": staticmethod(
+                    lambda: {
+                        "live_control": {
+                            "approval": None
+                            if expires is None
+                            else {"expires_at": expires.isoformat()}
+                        }
+                    }
+                )
+            },
+        )()
+
+
+@pytest.mark.parametrize("hours", [2, 30])
+def test_approval_expiry_is_noticed_once_per_approval(tmp_path, monkeypatch, capsys, hours):
+    from datetime import UTC, datetime, timedelta
+
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    ExpiringCycle.outcome = {"decision": {"action": "hold", "intent": None}, "orders_sent": False}
+    ExpiringCycle.expires = datetime.now(UTC) + timedelta(hours=hours)
+    monkeypatch.setattr(live_cycle, "LiveCycle", ExpiringCycle)
+    sent = []
+    for _ in range(3):
+        live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    capsys.readouterr()
+    saved = json.loads((tmp_path / "cycle.json").read_text(encoding="utf-8"))
+    assert saved["approval_expires_at"] == ExpiringCycle.expires.isoformat()
+    if hours == 2:
+        assert [a["kind"] for a in sent] == ["live_cycle_approval_expiring"]
+        assert sent[0]["id"] in {"1h left", "2h left"}
+        assert saved["approval_notice_for"] == ExpiringCycle.expires.isoformat()
+    else:
+        assert sent == [] and "approval_notice_for" not in saved
+    # A renewed approval (new expiry) is noticed again when it nears its own end.
+    ExpiringCycle.expires += timedelta(minutes=1)
+    live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    assert len(sent) == (2 if hours == 2 else 0)

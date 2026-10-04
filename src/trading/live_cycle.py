@@ -179,6 +179,30 @@ def write_result(result, path):
         raise
 
 
+APPROVAL_NOTICE_SECONDS = 24 * 3600
+
+
+def approval_expiry(cycle):
+    if cycle is None:
+        return None
+    try:
+        approval = cycle.journal.snapshot()["live_control"]["approval"]
+        return datetime.fromisoformat(approval["expires_at"]) if approval else None
+    except Exception:
+        return None
+
+
+def read_result(path):
+    if path is None:
+        return {}
+    try:
+        with Path(path).open("rb") as handle:
+            data = json.loads(handle.read(1_000_000))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def main(argv=None, *, send=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -198,6 +222,7 @@ def main(argv=None, *, send=None):
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     finished = lambda: datetime.now(UTC).isoformat()  # noqa: E731
+    cycle = None
     try:
         cycle = LiveCycle(args.directory, args.read_control_directory, args.scope)
         result = cycle.run(
@@ -223,7 +248,23 @@ def main(argv=None, *, send=None):
         )
         reason = str(error) if isinstance(error, fixed) else type(error).__name__
         result = {"ok": False, "reason": reason, "orders_sent": False, "finished_at": finished()}
+    expiry = approval_expiry(cycle)
+    if expiry is not None:
+        result["approval_expires_at"] = expiry.isoformat()
+    # The result file is rewritten every run; carry the expiry notice marker forward.
+    previous = read_result(args.result_output)
+    if expiry is not None and previous.get("approval_notice_for") == expiry.isoformat():
+        result["approval_notice_for"] = previous["approval_notice_for"]
     if args.notify:
+        left = (expiry - datetime.now(UTC)).total_seconds() if expiry is not None else None
+        if (
+            left is not None
+            and 0 < left < APPROVAL_NOTICE_SECONDS
+            and "approval_notice_for" not in result
+        ):
+            hours = f"{int(left // 3600)}h left"
+            if notify("live_cycle_approval_expiring", hours, send=send):
+                result["approval_notice_for"] = expiry.isoformat()
         decision = result.get("decision") or {}
         if not result["ok"]:
             result["notified"] = notify("live_cycle_failed", result["reason"][:16], send=send)
