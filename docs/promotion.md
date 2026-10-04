@@ -18,7 +18,7 @@ uv run python -m trading.promotion revoke --ledger runs/ledger.sqlite --hypothes
 - `live`: 現在が`paper`で、合否条件が登録済みで、その仮説の`forward_oos`の記録のうち最新の判断が
   `judge`の記録した`advance`であるものがあること。合否条件のない仮説は`forward_criteria_required`で
   拒否します（2026-10-04のレビュー対応で必須にしました）。
-- `revoke`: 現在の昇格を取り消します。理由は必須です。
+- `revoke`: 現在の昇格を取り消します。理由は必須です。取り消した後に`paper`から`live`へ戻すには、取消しより後に`judge`が記録した合格が必要です。取消し前の合格は再利用できません。
 
 記録は追記のみで、取り消しも履歴に残ります。昇格時の凍結仕様（戦略・パラメーター・設定SHA-256・
 コードSHA-256・実行条件）を各行に保存します。実験台帳には`promotions`表を追加するだけで、
@@ -35,7 +35,7 @@ uv run python -m trading.promotion judge --ledger runs/ledger.sqlite --hypothesi
 
 合否条件は`report.json`内の数値の場所（`.`区切り、配列は番号）と比較（`>=`・`<=`・`>`・`<`）と値の組を
 1〜20件並べたJSONです。例: `[{"path": "metrics.profit_factor", "op": ">=", "value": 1.2}]`。
-登録できるのは凍結後で、その仮説のforward OOSの記録が台帳に1件もない間だけです。登録後は変更できません。
+登録できるのは凍結後で、その仮説の記録がすべて`research`（凍結前のデータだけ）の間だけです。`forward_oos`に加えて、凍結をまたぐ`mixed`や凍結後に条件を変えた`modified_after_freeze`も凍結後の値動きを見せるため、1件でもあれば`post_freeze_results_already_recorded`で拒否します。登録後は変更できません。
 `judge`は、forward OOSの記録の`report.json`が記録時のSHA-256のままであることを確かめ、すべての条件を
 満たせば`advance`、1つでも満たさない（値がない場合を含む）と`reject`を、条件のSHA-256と各値を理由として
 台帳の判断に追記します。あわせて`forward_judgments`表に、判断ID・記録ID・条件のSHA-256（全桁）・

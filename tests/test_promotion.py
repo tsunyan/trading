@@ -130,9 +130,13 @@ def test_fixed_criteria_judge_forward_entries_and_gate_live_promotion(frozen, tm
     assert promote(frozen, "H001", "live", "fixed criteria passed")["stage"] == "live"
 
 
-def test_criteria_must_come_before_forward_results(frozen, tmp_path, bars, cfg):
-    forward_run(frozen, tmp_path, bars, cfg, "early", profit_factor=2.0, max_drawdown_pct=1)
-    with pytest.raises(PromotionError, match="forward_results_already_recorded"):
+@pytest.mark.parametrize("period", ["forward_oos", "mixed", "modified_after_freeze"])
+def test_criteria_must_come_before_any_post_freeze_result(frozen, tmp_path, bars, cfg, period):
+    entry = forward_run(frozen, tmp_path, bars, cfg, "early", profit_factor=2.0, max_drawdown_pct=1)
+    with sqlite3.connect(frozen) as conn:
+        conn.execute("UPDATE entries SET period = ? WHERE entry_id = ?", (period, entry))
+    # A run crossing the freeze already showed post-freeze outcomes.
+    with pytest.raises(PromotionError, match="post_freeze_results_already_recorded"):
         set_criteria(frozen, "H001", CRITERIA)
 
 
@@ -207,3 +211,16 @@ def test_missing_ledger_is_not_created_by_a_read(tmp_path, cfg):
     with pytest.raises(PromotionError, match="ledger_not_found"):
         require_live(missing, "H001", cfg)
     assert not missing.exists() and not missing.parent.exists()
+
+
+def test_returning_to_live_after_revoke_needs_a_new_judged_forward_pass(
+    frozen, tmp_path, bars, cfg
+):
+    promote_live(frozen, tmp_path, bars, cfg)
+    revoke(frozen, "H001", "live losses")
+    promote(frozen, "H001", "paper", "restart paper")
+    with pytest.raises(PromotionError, match="advanced_forward_oos_entry_required"):
+        promote(frozen, "H001", "live", "reuse the old pass")
+    again = forward_run(frozen, tmp_path, bars, cfg, "again", profit_factor=1.4, max_drawdown_pct=5)
+    assert judge(frozen, "H001", again)["decision"] == "advance"
+    assert promote(frozen, "H001", "live", "new forward pass")["stage"] == "live"

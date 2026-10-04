@@ -111,11 +111,13 @@ def set_criteria(database: Path, hypothesis_id: str, criteria, now: datetime | N
         connection.execute(CRITERIA_TABLE)
         if _criteria_rows(connection, hypothesis_id) is not None:
             raise PromotionError("forward_criteria_already_fixed")
+        # Any entry that saw data after the freeze (forward_oos, mixed or
+        # modified_after_freeze) could inform the criteria; only research entries may exist.
         if connection.execute(
-            "SELECT 1 FROM entries WHERE hypothesis_id = ? AND period = 'forward_oos' LIMIT 1",
+            "SELECT 1 FROM entries WHERE hypothesis_id = ? AND period != 'research' LIMIT 1",
             (hypothesis_id,),
         ).fetchone():
-            raise PromotionError("forward_results_already_recorded")
+            raise PromotionError("post_freeze_results_already_recorded")
         connection.execute(
             "INSERT INTO forward_criteria VALUES (?, ?, ?, ?)",
             (hypothesis_id, _now(now), body, hashlib.sha256(body.encode()).hexdigest()),
@@ -216,9 +218,10 @@ def _stage(history):
     return history[-1]["action"] if history else None
 
 
-def _forward_advanced(connection, hypothesis_id, criteria):
+def _forward_advanced(connection, hypothesis_id, criteria, *, since=None):
     # Only the latest decision on an entry counts, and only if judge() made it from
-    # exactly the fixed criteria and the recorded report.
+    # exactly the fixed criteria and the recorded report. After a revoke (`since`), only a
+    # judgment recorded later counts: returning to live needs new forward evidence.
     if not _exists(connection, "forward_judgments"):
         return None
     return connection.execute(
@@ -227,8 +230,9 @@ def _forward_advanced(connection, hypothesis_id, criteria):
         " JOIN forward_judgments j ON j.decision_id = d.decision_id"
         " WHERE e.hypothesis_id = ? AND e.period = 'forward_oos' AND d.decision = 'advance'"
         " AND j.entry_id = e.entry_id AND j.hypothesis_id = e.hypothesis_id"
-        " AND j.criteria_sha256 = ? AND j.report_sha256 = e.artifact_sha256",
-        (hypothesis_id, criteria["criteria_sha256"]),
+        " AND j.criteria_sha256 = ? AND j.report_sha256 = e.artifact_sha256"
+        " AND j.judged_at > ?",
+        (hypothesis_id, criteria["criteria_sha256"], since or ""),
     ).fetchone()
 
 
@@ -254,7 +258,9 @@ def promote(
             criteria = _criteria_rows(connection, hypothesis_id)
             if criteria is None:
                 raise PromotionError("forward_criteria_required")
-            if not _forward_advanced(connection, hypothesis_id, criteria):
+            revoked = [row["recorded_at"] for row in history if row["action"] == "revoked"]
+            since = revoked[-1] if revoked else None
+            if not _forward_advanced(connection, hypothesis_id, criteria, since=since):
                 raise PromotionError("advanced_forward_oos_entry_required")
         connection.execute(
             "INSERT INTO promotions (hypothesis_id, action, recorded_at, reason, frozen_spec)"
