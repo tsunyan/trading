@@ -449,3 +449,50 @@ def test_revalue_marks_at_the_ticker_and_never_raises_available_margin():
     assert revalued.available_margin == Decimal("993976.6")
     with pytest.raises(LiveAccountError, match="valuation_outside_tolerance"):
         live_account.revalue(broker, marked, tolerance=Decimal("0.001"), policy=policy())
+
+
+def test_revalue_invariants_over_random_positions_and_quotes():
+    import random
+
+    from test_account_guard import NOW, policy
+    from test_account_guard import account as guard_account
+    from test_account_guard import quote as guard_quote
+
+    from trading.account_guard import Position, marked_equity
+
+    rng = random.Random(4)
+    for _ in range(300):
+        lots = tuple(
+            Position(
+                position_id=400 + i,
+                side=rng.choice(["BUY", "SELL"]),
+                units=rng.choice([1000, 5000]),
+                average_price=str(Decimal(14900 + rng.randint(0, 200)) / 100),
+            )
+            for i in range(rng.randint(1, 3))
+        )
+        bid = Decimal(14900 + rng.randint(0, 200)) / 100
+        current = guard_quote(NOW, bid=str(bid), ask=str(bid + Decimal("0.01")))
+        base = guard_account(NOW, positions=lots)
+        local = marked_equity(base, current)
+        broker_equity = local + Decimal(rng.randint(-3000, 3000)) / 100
+        margin = Decimal(rng.randint(0, 50000))
+        available = max(broker_equity - margin, Decimal(0))
+        broker = base.model_copy(
+            update={
+                "equity": broker_equity,
+                "required_margin": margin,
+                "available_margin": available,
+            }
+        )
+        units = sum(p.units for p in lots)
+        tolerance = Decimal(rng.choice(["0.001", "0.005", "0.01"]))
+        allowed = abs(broker_equity - local) <= tolerance * units + policy().tolerance_jpy
+        if not allowed:
+            with pytest.raises(LiveAccountError, match="valuation_outside_tolerance"):
+                live_account.revalue(broker, current, tolerance=tolerance, policy=policy())
+            continue
+        revalued = live_account.revalue(broker, current, tolerance=tolerance, policy=policy())
+        assert revalued.equity == local
+        assert revalued.available_margin <= broker.available_margin
+        assert revalued.available_margin <= max(local - margin, Decimal(0))
