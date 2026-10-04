@@ -152,7 +152,7 @@ def report(journal, *, history=24):
             "settled_swap": _money(swaps),
             "net": _money(realized + swaps - fees),
         },
-        "closed_trades": _trade_stats(outcomes),
+        "closing_orders": _trade_stats(outcomes),
         "monthly": [
             {
                 "month": month,

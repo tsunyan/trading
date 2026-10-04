@@ -62,7 +62,7 @@ def test_open_then_closed_position_reports_realized_net_and_risk_room(tmp_path):
     result = report(journal)
     assert result["totals"] == {"realized": "100", "fees": "6", "settled_swap": "0", "net": "94"}
     # One closing order: +100 realized minus its own 3 fee; the opening fee stays in totals.
-    assert result["closed_trades"] == {
+    assert result["closing_orders"] == {
         "count": 1,
         "wins": 1,
         "losses": 0,
@@ -81,7 +81,7 @@ def test_empty_journal_and_history_limits(tmp_path):
     empty = report(journal)
     assert empty["account"] is None and empty["orders"] == [] and empty["equity_history"] == []
     assert empty["totals"]["net"] == "0"
-    assert empty["closed_trades"]["count"] == 0 and empty["closed_trades"]["win_rate"] is None
+    assert empty["closing_orders"]["count"] == 0 and empty["closing_orders"]["win_rate"] is None
     for history in (-1, 1001, True):
         with pytest.raises(ValueError):
             report(journal, history=history)

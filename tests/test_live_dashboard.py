@@ -39,7 +39,7 @@ def test_page_shows_gates_account_orders_and_escapes_cycle_text(setup):
         diagnose(journal, values[0].wall), report(journal), cycle, generated_at="now"
     )
     assert "送信可能" in page and "Buy001" in page and "PREPARED" in page
-    assert "True" not in page and "はい" in page and "決済の成績" in page
+    assert "True" not in page and "はい" in page and "決済注文ごとの成績" in page
     assert "<script>" not in page and "&lt;script&gt;" in page
     assert 'http-equiv="refresh"' in page and "prefers-color-scheme: dark" in page
     assert journal.snapshot() == before
@@ -109,7 +109,7 @@ def test_history_lists_the_newest_cycles_first_and_shows_broken_lines(tmp_path, 
             "approval_expires_at": None,
             "approval_seconds_left": None,
         },
-        {"account": None, "totals": {}, "orders": [], "equity_history": [], "closed_trades": {}},
+        {"account": None, "totals": {}, "orders": [], "equity_history": [], "closing_orders": {}},
         None,
         generated_at="now",
         history=history,

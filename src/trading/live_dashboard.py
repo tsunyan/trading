@@ -162,7 +162,7 @@ def render(doctor, profit, cycle=None, *, generated_at, history=()):
         ],
     )
     trades_table = _rows(
-        [profit.get("closed_trades") or {}],
+        [profit.get("closing_orders") or {}],
         [
             ("決済回数", "count"),
             ("勝ち", "wins"),
@@ -211,7 +211,7 @@ def render(doctor, profit, cycle=None, *, generated_at, history=()):
             account_table,
             "<h2>合計</h2>",
             totals_table,
-            "<h2>決済の成績</h2>",
+            "<h2>決済注文ごとの成績</h2>",
             trades_table,
             "<h2>評価額の推移</h2>",
             _sparkline(profit["equity_history"]),

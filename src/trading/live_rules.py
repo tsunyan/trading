@@ -7,6 +7,7 @@ an immutable evidence file that `live_acceptance file-evidence --kind rules` can
 
 import argparse
 import json
+import os
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -93,6 +94,8 @@ def _write_new(path, body):
     path = Path(path)
     with path.open("xb") as output:  # Evidence is never overwritten.
         output.write(body)
+        output.flush()
+        os.fsync(output.fileno())  # Durable before it can be fingerprinted as evidence.
 
 
 def main(argv=None):
