@@ -41,8 +41,8 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 
 実行内容には手順2の気配が含まれます。送信時の口座リスク検査は気配と口座証拠の鮮度
 （既定は各60秒）を要求するため、サイクルの出力から送信までに時間がかかると拒否されます。
-その場合は台帳の準備済み注文を残したまま、`order_runtime context`で新しい気配の実行内容を
-作り直すか、サイクルを再実行します。
+その場合は台帳の準備済み注文を残したまま、`order_runtime context --fetch-quote <気配ファイル>`で
+新しい気配を取って実行内容を作り直し、そのSHA-256と同じ気配ファイルで送信します。
 
 同じ足・同じ向きの提案は顧客注文IDが同じになります。以前の注文が取消・失効で終わった後に
 同じ足で別の価格保護の提案を準備しようとすると、`signal_client_id_already_used`で拒否します。
