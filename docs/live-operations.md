@@ -25,8 +25,22 @@ uv run python -m trading.private_order_operations bind --directory runs/live-ord
 
 既定の鮮度上限は両方120秒です。1秒から独立監視の停滞閾値まで指定でき、登録後は変更できません。
 別の同期・監視への変更、登録の除去、再登録を拒否します。登録イベントの欠落・改変・重複も拒否します。
-すでに有効化した台帳や停止した台帳の登録・移行は、このコマンドの対象にしていません。
 既存の無登録台帳を読取りで自動登録・再初期化しません。実運用の新規台帳では最初の有効化前に登録します。
+
+## 登録前に有効化した台帳の移行
+
+登録の仕組みより前に有効化した台帳は、停止中（STOPPED）に限り、`bind`に`--confirm-migration`を
+付けて登録できます。POST制御に処理中のclaimがある場合やGET制御が停止中の場合は拒否します。
+
+```powershell
+uv run python -m trading.live_setup stop --directory runs/live-orders --read-control-directory runs/private-reads --scope <scope> --confirm-stop
+uv run python -m trading.private_order_operations bind --directory runs/live-orders --read-control-directory runs/private-reads --scope <scope> --sync-directory runs/private-sync --expected-revision <revision> --expected-plan-sha256 <plan_sha256> --expected-monitor-instance <monitor_instance> --confirm-operations --confirm-migration
+```
+
+登録で設定SHA-256が変わるため、保存済みの許可は状態から外し、`LIVE_APPROVAL_VOIDED`イベントに
+履歴として残します。注文履歴・損失停止・口座証拠は変えません。送信を再開するには、
+[明示再開](order-restart.md)で完全な照合と新しい承認（[`live_acceptance restart-approval`](live-acceptance.md)）が必要です。
+再開後の送信は、登録した同期・監視の健全性を必須にします。
 
 ## 同期と監視の開始後
 

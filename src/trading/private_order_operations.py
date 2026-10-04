@@ -26,6 +26,7 @@ def main(argv=None):
     parser.add_argument("--max-sync-age-seconds", type=int, default=120)
     parser.add_argument("--max-watchdog-age-seconds", type=int, default=120)
     parser.add_argument("--confirm-operations", action="store_true")
+    parser.add_argument("--confirm-migration", action="store_true")
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -45,6 +46,7 @@ def main(argv=None):
                 max_sync_age_seconds=args.max_sync_age_seconds,
                 max_watchdog_age_seconds=args.max_watchdog_age_seconds,
                 operations_confirmed=args.confirm_operations,
+                migration_confirmed=args.confirm_migration,
             )
         print(json.dumps({**result, "complete": False, "live_enabled": False}, default=str))
     except (ValueError, OSError, KeyError, TypeError, sqlite3.Error):

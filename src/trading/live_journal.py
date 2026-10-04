@@ -793,8 +793,13 @@ class LiveOrderJournal(OrderJournal):
         max_sync_age_seconds=120,
         max_watchdog_age_seconds=120,
         operations_confirmed=False,
+        migration_confirmed=False,
     ):
-        if operations_confirmed is not True or type(expected_revision) is not int:
+        if (
+            operations_confirmed is not True
+            or type(expected_revision) is not int
+            or type(migration_confirmed) is not bool
+        ):
             raise LiveOrderError("explicit_live_operations_confirmation_required")
         with self._transaction() as conn:
             initial = self._live_state(conn)
@@ -810,17 +815,29 @@ class LiveOrderJournal(OrderJournal):
         )
         with self._mutation(), self._transaction() as conn:
             state = self._live_state(conn)
-            if (
-                state.revision != expected_revision
-                or state.phase != "DISABLED"
-                or state.approval is not None
-                or state.operations is not None
-                or conn.execute("SELECT halted FROM metadata WHERE id=1").fetchone()[0]
-                or self.posts.snapshot()["blocked"]
-                or conn.execute(
-                    "SELECT 1 FROM events WHERE kind IN ('SUBMITTING','CANCEL_REQUESTED') LIMIT 1"
-                ).fetchone()
-            ):
+            halted = conn.execute("SELECT halted FROM metadata WHERE id=1").fetchone()[0]
+            if migration_confirmed:
+                # An existing unregistered journal: only while stopped with no POST claim.
+                # The new configuration fingerprint voids the old approval; resuming needs
+                # the explicit restart with a fresh acceptance.
+                refused = (
+                    state.phase != "STOPPED"
+                    or not halted
+                    or self.posts.snapshot()["claim"] is not None
+                    or self.posts.reads.status()["blocked"]
+                )
+            else:
+                refused = (
+                    state.phase != "DISABLED"
+                    or state.approval is not None
+                    or halted
+                    or self.posts.snapshot()["blocked"]
+                    or conn.execute(
+                        "SELECT 1 FROM events WHERE kind IN ('SUBMITTING','CANCEL_REQUESTED') "
+                        "LIMIT 1"
+                    ).fetchone()
+                )
+            if state.revision != expected_revision or state.operations is not None or refused:
                 raise LiveOrderError("live_operations_registration_refused")
             LiveOperations(
                 binding,
@@ -829,12 +846,21 @@ class LiveOrderJournal(OrderJournal):
                 monotonic=self.posts._mono,
             ).enrollment_check()
             candidate = self._activation_state(state.model_copy(update={"operations": binding}))
+            if migration_confirmed and state.approval is not None:
+                # The old approval names the old fingerprints; keep it as history only.
+                self._event(
+                    conn,
+                    None,
+                    "LIVE_APPROVAL_VOIDED",
+                    {"approval": state.approval.model_dump(mode="json"), "reason": "migration"},
+                )
             self._write_live(
                 conn,
                 state,
                 operations=binding,
                 implementation_sha256=candidate.implementation_sha256,
                 configuration_sha256=candidate.configuration_sha256,
+                **({"approval": None} if migration_confirmed else {}),
             )
             self._event(conn, None, "LIVE_OPERATIONS_BOUND", binding.model_dump(mode="json"))
         return self.activation_context()
