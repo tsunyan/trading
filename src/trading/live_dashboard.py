@@ -186,10 +186,14 @@ def main(argv=None):
         ).journal
         now = datetime.now(UTC)
         cycle = None
-        if args.cycle_result is not None and args.cycle_result.is_file():
-            cycle = json.loads(args.cycle_result.read_text(encoding="utf-8"))
+        if args.cycle_result is not None:
+            try:
+                cycle = json.loads(args.cycle_result.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cycle = {}
         profit = report(journal, dispatches=read_dispatches(args.dispatch_log))
-        page = render(diagnose(journal, now), profit, cycle, generated_at=now.isoformat())
+        doctor = diagnose(journal, now, cycle=cycle if args.cycle_result is not None else None)
+        page = render(doctor, profit, cycle, generated_at=now.isoformat())
         write_page(page, args.output)
     except Exception as error:
         parser.exit(2, f"live_dashboard_failed: {type(error).__name__}\n")

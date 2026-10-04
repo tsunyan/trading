@@ -107,3 +107,19 @@ def test_optional_strategy_promotion_gate(setup, tmp_path, stage):
         assert gate == {"ok": False, "reason": "strategy_not_promoted_for_live"}
         assert not result["send_ready"]
     assert "strategy_promotion" not in diagnose(live[3], values[0].wall)["gates"]
+
+
+def test_optional_scheduled_cycle_freshness_gate(setup):
+    from datetime import timedelta
+
+    values, live = setup[0], setup[1]
+    now = values[0].wall
+
+    def gate(cycle):
+        return diagnose(live[3], now, cycle=cycle)["gates"]["scheduled_cycle"]
+
+    assert gate({"finished_at": (now - timedelta(minutes=50)).isoformat()})["ok"]
+    stale = (now - timedelta(hours=3)).isoformat()
+    assert gate({"finished_at": stale}) == {"ok": False, "reason": "cycle_stale"}
+    assert gate({}) == {"ok": False, "reason": "cycle_result_missing"}
+    assert "scheduled_cycle" not in diagnose(live[3], now)["gates"]

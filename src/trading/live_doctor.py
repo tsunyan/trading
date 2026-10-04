@@ -27,7 +27,10 @@ def _gate(check):
     return {"ok": reason is None, "reason": reason}
 
 
-def diagnose(journal, now, *, candidate=None):
+CYCLE_STALE_SECONDS = 2 * 3600
+
+
+def diagnose(journal, now, *, candidate=None, cycle=None):
     def reads():
         status = journal.posts.reads.status()
         return "read_control_blocked" if status["blocked"] else None
@@ -102,6 +105,17 @@ def diagnose(journal, now, *, candidate=None):
     if candidate is not None:
         # Only new entries depend on promotion; closes and flattening never do.
         gates["strategy_promotion"] = _gate(promotion)
+
+    def cycle_freshness():
+        finished = (cycle or {}).get("finished_at")
+        if not finished:
+            return "cycle_result_missing"
+        age = (now - datetime.fromisoformat(finished)).total_seconds()
+        return "cycle_stale" if age > CYCLE_STALE_SECONDS or age < -60 else None
+
+    if cycle is not None:
+        # The hourly task itself: a page or check that never notices it stopped is blind.
+        gates["scheduled_cycle"] = _gate(cycle_freshness)
     expires = state.approval.expires_at if state.approval is not None else None
     return {
         "checked_at": now.isoformat(),
@@ -125,6 +139,7 @@ def main(argv=None):
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--cycle-result", type=Path)
     args = parser.parse_args(argv)
     try:
         journal = PrivateOrderRecovery(
@@ -136,7 +151,13 @@ def main(argv=None):
         candidate = (
             (args.ledger, args.hypothesis, load_settings(args.config)) if all(given) else None
         )
-        result = diagnose(journal, datetime.now(UTC), candidate=candidate)
+        cycle = None
+        if args.cycle_result is not None:
+            try:
+                cycle = json.loads(args.cycle_result.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cycle = {}
+        result = diagnose(journal, datetime.now(UTC), candidate=candidate, cycle=cycle)
     except Exception as error:
         parser.exit(2, f"live_doctor_failed: {type(error).__name__}\n")
     print(json.dumps(result, ensure_ascii=False))

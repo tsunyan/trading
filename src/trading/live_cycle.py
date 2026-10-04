@@ -376,6 +376,7 @@ def main(argv=None, *, send=None):
                 cycle.journal,
                 now,
                 candidate=None if candidate is None else (*candidate, load_settings(args.config)),
+                cycle=result,
             )
             page = render(
                 doctor,
