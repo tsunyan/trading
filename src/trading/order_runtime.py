@@ -163,6 +163,7 @@ def main(argv=None):
     parser.add_argument("--credential-reference")
     parser.add_argument("--order-permission-confirmed", action="store_true")
     parser.add_argument("--dispatch-log", type=Path)
+    parser.add_argument("--fetch-quote", type=Path)
     args = parser.parse_args(argv)
     try:
         inspection = args.command in {"context", "cancel-context"}
@@ -179,6 +180,14 @@ def main(argv=None):
             operation == "submit" and args.authorization_sha256 is not None
         ):
             raise OrderRuntimeError("invalid_execution_options")
+        if args.fetch_quote is not None:
+            # Inspection only: take one public quote, save it, and review against it.
+            if args.command != "context" or args.quote is not None:
+                raise OrderRuntimeError("fetch_quote_is_for_context_only")
+            from trading.live_quote import fetch_quote, write_quote
+
+            write_quote(fetch_quote(), args.fetch_quote)
+            args.quote = args.fetch_quote
         quote = _quote(args.quote) if operation == "submit" else None
         runtime = OrderRuntime(args.directory, args.read_control_directory, args.scope)
         options = dict(

@@ -28,7 +28,10 @@ uv run python -m trading.order_credentials save --directory runs/live-orders --r
 
 まず`context`で、送信する注文の本文・リスク評価・台帳とPOST制御の状態をまとめたSHA-256を表示します。
 新規・決済には、口座証拠と同じかより新しい気配のJSON（`AccountQuote`、4096バイトまで）が必要です。
-`context`はネットワーク・資格情報・claimを使いません。
+`context`は資格情報・claimを使いません。`--quote`の代わりに`--fetch-quote quote.json`を指定すると、
+[公開tickerの気配](live-quote.md)を1回取得してファイルに保存し、その気配で実行内容を作ります
+（この場合だけ公開APIへのGETを1回送ります）。送信は同じファイルを`--quote`に指定します。
+気配の鮮度は口座リスク検査で既定60秒のため、`context`から送信までを続けて行ってください。
 
 ```powershell
 uv run python -m trading.order_runtime context --directory runs/live-orders --read-control-directory runs/private-reads --scope <scope> --client-id <client_id> --quote quote.json

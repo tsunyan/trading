@@ -289,3 +289,33 @@ def test_live_signal_cli_refuses_an_unpromoted_strategy_before_reading(
     with pytest.raises(SystemExit):
         live_signal.main([*base, "--ledger", str(ledger)])
     assert capsys.readouterr().err == "ledger_and_hypothesis_required_together\n"
+
+
+def test_context_can_fetch_and_save_the_quote_it_reviews(tmp_path, monkeypatch, capsys):
+    from trading import live_quote
+
+    fresh = AccountQuote(bid="151", ask="151.01", observed_at=NOW, market_open=True)
+    monkeypatch.setattr(live_quote, "fetch_quote", lambda: fresh)
+    recorder = Recorder({"checkpoint_sha256": "d" * 64})
+    monkeypatch.setattr(order_runtime, "OrderRuntime", recorder.factory)
+    saved = tmp_path / "quote.json"
+    order_runtime.main(["context", *STORES, "--client-id", "Buy001", "--fetch-quote", str(saved)])
+    assert json.loads(capsys.readouterr().out)["checkpoint_sha256"] == "d" * 64
+    assert AccountQuote.model_validate_json(saved.read_text()) == fresh
+    assert recorder.calls[-1][2]["quote"] == fresh
+    with pytest.raises(SystemExit):
+        order_runtime.main(
+            [
+                "submit",
+                *STORES,
+                "--client-id",
+                "Buy001",
+                "--fetch-quote",
+                str(saved),
+                "--expected-sha256",
+                "a" * 64,
+                "--credential-reference",
+                "b" * 32,
+                "--order-permission-confirmed",
+            ]
+        )
