@@ -24,6 +24,7 @@ from trading.live_acceptance import (
     read_document,
     read_evidence,
 )
+from trading.live_acceptance import documents as fingerprint_all
 from trading.live_journal import CONFIRMATIONS, EVIDENCE_KINDS, LiveApproval
 from trading.order_runtime import OrderRuntime
 
@@ -100,7 +101,8 @@ def test_read_evidence_is_saved_once_and_binds_the_journal_fingerprint(running, 
     evidence = collect(running, tmp_path, "account_baseline")
     saved = json.loads((tmp_path / "account_baseline.json").read_text(encoding="utf-8"))
     assert saved["kind"] == "account_baseline" and saved["account_identity_verified"] is False
-    assert saved["format"] == "trading.read-evidence/1"
+    assert saved["format"] == "trading.read-evidence/2"
+    assert len(saved["collection_id"]) == 32
     assert saved["configuration_sha256"] == live[3].activation_context()["configuration_sha256"]
     assert saved["report"]["assets"]["balance"] == "1000000"
     assert (
@@ -246,3 +248,75 @@ def pinned(moment):
             return moment
 
     return Pinned
+
+
+def test_approval_models_refuse_one_document_for_several_kinds_without_the_builder():
+    from datetime import UTC, datetime
+
+    import pydantic
+
+    from trading.live_journal import (
+        CANCEL_EVIDENCE_KINDS,
+        AcceptanceEvidence,
+        CancelApproval,
+        OrderResolutionApproval,
+    )
+
+    now = datetime(2026, 10, 5, tzinfo=UTC)
+
+    def evidence(kinds, same):
+        return tuple(
+            AcceptanceEvidence(
+                kind=kind,
+                reference=f"{kind}.pdf",
+                sha256="a" * 64 if same else hashlib.sha256(kind.encode()).hexdigest(),
+            )
+            for kind in sorted(kinds)
+        )
+
+    common = {"account_id": "acct", "accepted_at": now}
+    cases = [
+        (
+            LiveApproval,
+            EVIDENCE_KINDS,
+            {"configuration_sha256": "b" * 64, "implementation_sha256": "c" * 64},
+            timedelta(hours=1),
+        ),
+        (
+            CancelApproval,
+            CANCEL_EVIDENCE_KINDS,
+            {"checkpoint_sha256": "d" * 64},
+            timedelta(minutes=5),
+        ),
+        (
+            OrderResolutionApproval,
+            EVIDENCE_KINDS,
+            {"checkpoint_sha256": "d" * 64},
+            timedelta(minutes=5),
+        ),
+    ]
+    # A hand-written approval file reaches the journal without the builder's checks.
+    for model, kinds, extra, life in cases:
+        fields = {**common, **extra, "expires_at": now + life}
+        assert model(**fields, evidence=evidence(kinds, same=False))
+        with pytest.raises(pydantic.ValidationError):
+            model(**fields, evidence=evidence(kinds, same=True))
+
+
+def test_one_collection_cannot_be_relabelled_as_both_read_kinds(running, tmp_path):
+    journal, now = running[1][3], running[0][0].wall
+    synthetic_reads(journal, tmp_path, now, {"read_acceptance"})
+    original = tmp_path / "read_acceptance.json"
+    copied = tmp_path / "account_baseline.json"
+    # Changing only `kind` gives different bytes and SHA-256, so the duplicate-document
+    # check alone would pass; the shared collection ID does not.
+    saved = json.loads(original.read_text())
+    copied.write_text(json.dumps({**saved, "kind": "account_baseline"}))
+    pairs = [("read_acceptance", original), ("account_baseline", copied)]
+    with pytest.raises(LiveAcceptanceError, match="read_evidence_reused_collection"):
+        fingerprint_all(pairs, journal, now=now)
+    separate = tmp_path / "separate"
+    separate.mkdir()
+    synthetic_reads(journal, separate, now, {"account_baseline"})
+    pairs = [("read_acceptance", original), ("account_baseline", separate / copied.name)]
+    assert len(fingerprint_all(pairs, journal, now=now)) == 2

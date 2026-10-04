@@ -1,5 +1,6 @@
 """Live journal lifecycle CLI with temporary controls; no credentials or HTTP."""
 
+import hashlib
 import json
 import socket
 from datetime import UTC, datetime, timedelta
@@ -72,7 +73,11 @@ def approval_file(controls, context):
         "accepted_at": (now - timedelta(seconds=1)).isoformat(),
         "expires_at": (now + timedelta(hours=1)).isoformat(),
         "evidence": [
-            {"kind": kind, "reference": f"synthetic-{kind}", "sha256": "a" * 64}
+            {
+                "kind": kind,
+                "reference": f"synthetic-{kind}",
+                "sha256": hashlib.sha256(kind.encode()).hexdigest(),
+            }
             for kind in sorted(EVIDENCE_KINDS)
         ],
     }

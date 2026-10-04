@@ -16,7 +16,7 @@ uv run python -m trading.live_acceptance read-evidence --directory runs/live-ord
 `account_identity_verified`は常に`false`です。保存した結果が口座本人性の証明になるわけではなく、
 運用者が業者画面などと突き合わせて確認する資料です。
 
-形式は`trading.read-evidence/1`です。収集の前後で台帳の口座ID・設定・実装SHA-256・revisionを読み、
+形式は`trading.read-evidence/2`で、収集ごとにランダムな`collection_id`を持ちます。収集の前後で台帳の口座ID・設定・実装SHA-256・revisionを読み、
 GETの間に変わっていた場合は`journal_changed_during_collection`で保存しません。
 
 ## 2. 運用者の資料を指紋化する
@@ -28,7 +28,7 @@ uv run python -m trading.live_acceptance file-evidence --kind rules --file evide
 本人性（`identity`）・業者ルール（`rules`）・履歴（`history`）の資料ファイルのSHA-256を表示します。
 空のファイルと64MiB超は拒否します。ファイルの中身は確認しません。
 `read_acceptance`・`account_baseline`は`read_evidence_requires_collection`で拒否します。
-この2種類は手順1の収集でしか作れません。
+この2種類は手順1の収集で作ります。
 
 ## 3. 承認ファイルを作る
 
@@ -41,7 +41,9 @@ uv run python -m trading.live_acceptance approval --directory runs/live-orders -
 
 - 読取の2種類は、形式どおりのJSONか（重複キーも拒否）、指定した種類と保存された種類が一致するか、
   台帳の現在の口座ID・設定SHA-256と一致するか、収集から24時間以内で未来でないかを検査します。
-  手書きのJSONや別の台帳で集めた証拠は使えません。
+  形式の違うJSONや別の台帳で集めた証拠は使えません。
+- 読取の2種類は別々の収集でなければなりません。1回の収集を複製して`kind`だけを書き換えると、
+  内容とSHA-256は変わりますが`collection_id`が同じなので`read_evidence_reused_collection`で拒否します。
 - 5種類（取消は3種類）の証拠はすべて異なる内容でなければなりません。同じファイルに複数の種類の
   ラベルを付けると`evidence_documents_must_differ`で拒否します。出力の`expected_revision`を
 `live_setup activate --expected-revision`に渡します。コードや設定が変わると実装・設定のSHA-256が
@@ -72,7 +74,16 @@ uv run python -m trading.live_acceptance cancel-approval --directory runs/live-o
 加えて、読取の種類を資料として指紋化できないこと、同じ資料での複数種類の拒否、手書き・種類違い・
 別の設定・古い/未来の収集時刻・重複キーの読取証拠の拒否、収集中の台帳変更で保存しないことを検証します。
 
-承認ファイルを手書きした場合はこの検査を通りません。台帳は証拠のSHA-256だけを記録するためです。
+## 検査の範囲
+
+このCLIの検査は、種類の付け間違い・古い証拠・別の台帳の証拠・同じ資料や同じ収集の使い回しを防ぎます。
+一方で、ファイル・台帳・コードを操作できる運用者自身に対して、証拠の出所を証明するものではありません。
+形式どおりで新しい`collection_id`を持つJSONを手で作れば、収集したものと区別できません。
+運用者は信頼の起点であり、ここでの目的は誤操作を防ぐことです（2026-10-05の再レビュー対応で記述を改めました）。
+
+台帳は証拠のSHA-256だけを記録します。承認ファイルを手書きした場合、読取証拠の中身と収集の検査は通りません。
+ただし、種類ごとに異なるSHA-256であることは、承認のモデル自体（`LiveApproval`・`CancelApproval`・
+`OrderResolutionApproval`）が検査するため、手書きの承認でも同じ資料を複数の種類に使うことはできません。
 承認ファイルはこのCLIで作ってください。
 追加8試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
 再開・解消・取消の承認は`tests/test_live_acceptance_checkpoints.py`で、作った承認ファイルで実際に各手続きが通ることを含めて検証します（追加6試験）。

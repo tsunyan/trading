@@ -172,6 +172,11 @@ class AcceptanceEvidence(Contract):
         return self
 
 
+def _distinct(evidence):
+    """Each evidence kind must be its own document; one file cannot stand for several."""
+    return len({e.sha256 for e in evidence}) == len(evidence)
+
+
 class LiveApproval(Contract):
     """Operator supplied acceptance references, not an automatic broker attestation."""
 
@@ -188,6 +193,7 @@ class LiveApproval(Contract):
             not self.accepted_at < self.expires_at <= self.accepted_at + timedelta(days=7)
             or len(self.evidence) != len(EVIDENCE_KINDS)
             or {e.kind for e in self.evidence} != EVIDENCE_KINDS
+            or not _distinct(self.evidence)
         ):
             raise ValueError("invalid_live_approval")
         return self
@@ -226,6 +232,7 @@ class CancelApproval(Contract):
             not self.accepted_at < self.expires_at <= self.accepted_at + timedelta(minutes=10)
             or len(self.evidence) != len(CANCEL_EVIDENCE_KINDS)
             or {e.kind for e in self.evidence} != CANCEL_EVIDENCE_KINDS
+            or not _distinct(self.evidence)
         ):
             raise ValueError("invalid_cancel_approval")
         return self
@@ -246,6 +253,7 @@ class OrderResolutionApproval(Contract):
             not self.accepted_at < self.expires_at <= self.accepted_at + timedelta(minutes=10)
             or len(self.evidence) != len(EVIDENCE_KINDS)
             or {e.kind for e in self.evidence} != EVIDENCE_KINDS
+            or not _distinct(self.evidence)
         ):
             raise ValueError("invalid_order_resolution_approval")
         return self

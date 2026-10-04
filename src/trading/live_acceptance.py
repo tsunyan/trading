@@ -4,19 +4,26 @@
 `file-evidence` fingerprints an operator document (broker rules, identity, history); the
 two read kinds are refused there because only `read-evidence` may produce them.
 `approval` writes a LiveApproval for the journal's current activation context. Read
-evidence is parsed and must be bound to this journal's account and configuration; every
-kind must be a distinct document. Activation itself stays `live_setup activate`.
+evidence is parsed and must be bound to this journal's account and configuration, and
+each read kind must come from its own collection; every kind must be a distinct document
+(the approval models enforce that too). Activation itself stays `live_setup activate`.
+
+Threat model: these checks catch mislabelled, stale, foreign, duplicated or reused
+evidence. They cannot authenticate a document against the local operator, who controls
+the files, the journal and the code; a hand-built file in the exact format with a fresh
+collection ID is indistinguishable from a collected one.
 """
 
 import hashlib
 import json
 import os
 import tempfile
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AwareDatetime
+from pydantic import AwareDatetime, Field
 
 from trading.account_reader import AccountReader, AccountReadReport
 from trading.broker_contracts import Contract
@@ -34,7 +41,7 @@ from trading.private_order_recovery import PrivateOrderRecovery
 from trading.wire_validation import unique_object
 
 READ_KINDS = frozenset({"read_acceptance", "account_baseline"})
-READ_FORMAT = "trading.read-evidence/1"
+READ_FORMAT = "trading.read-evidence/2"
 MAX_DOCUMENT = 64 * 1024 * 1024
 MAX_READ_AGE = timedelta(hours=24)
 
@@ -42,8 +49,9 @@ MAX_READ_AGE = timedelta(hours=24)
 class ReadEvidence(Contract):
     """The only accepted shape of read_acceptance/account_baseline evidence."""
 
-    format: Literal["trading.read-evidence/1"]
+    format: Literal["trading.read-evidence/2"]
     kind: Literal["read_acceptance", "account_baseline"]
+    collection_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     collected_at: AwareDatetime
     account_id: str
     configuration_sha256: str
@@ -119,11 +127,14 @@ def read_evidence(
     return _digest(kind, output)
 
 
-def read_body(kind, context, report, collected_at):
+def read_body(kind, context, report, collected_at, *, collection_id=None):
+    """One collection's evidence. Its random ID lets an approval refuse one collection
+    copied into both read kinds (changing `kind` alone changes the bytes and SHA-256)."""
     return (
         ReadEvidence(
             format=READ_FORMAT,
             kind=kind,
+            collection_id=collection_id or uuid.uuid4().hex,
             collected_at=collected_at,
             account_id=context["account_id"],
             configuration_sha256=context["configuration_sha256"],
@@ -137,6 +148,10 @@ def read_body(kind, context, report, collected_at):
 
 def read_document(kind, path, journal, *, now):
     """Validate saved read evidence against this journal before fingerprinting it."""
+    return _read_document(kind, path, journal, now=now)[0]
+
+
+def _read_document(kind, path, journal, *, now):
     if kind not in READ_KINDS:
         raise LiveAcceptanceError("invalid_read_evidence_kind")
     evidence = _digest(kind, path)
@@ -158,13 +173,28 @@ def read_document(kind, path, journal, *, now):
         raise LiveAcceptanceError("read_evidence_not_bound_to_journal")
     if not timedelta(0) <= now - saved.collected_at <= MAX_READ_AGE:
         raise LiveAcceptanceError("read_evidence_not_recent")
-    return evidence
+    return evidence, saved.collection_id
 
 
 def document(kind, path, journal, *, now):
     if kind in READ_KINDS:
         return read_document(kind, path, journal, now=now)
     return fingerprint(kind, path)
+
+
+def documents(pairs, journal, *, now):
+    """Fingerprint (kind, path) pairs; the read kinds must come from distinct collections."""
+    items, collections = [], []
+    for kind, path in pairs:
+        if kind in READ_KINDS:
+            item, collection = _read_document(kind, path, journal, now=now)
+            collections.append(collection)
+        else:
+            item = fingerprint(kind, path)
+        items.append(item)
+    if len(set(collections)) != len(collections):
+        raise LiveAcceptanceError("read_evidence_reused_collection")
+    return items
 
 
 def approval(journal, evidence, *, hours, now):
@@ -283,10 +313,9 @@ def main(argv=None):
                     clock=lambda: datetime.now(UTC),
                 ).model_dump(mode="json")
             else:
-                items = []
-                for item in args.evidence:
-                    kind, _, path = item.partition("=")
-                    items.append(document(kind, path, journal, now=now))
+                items = documents(
+                    [item.partition("=")[::2] for item in args.evidence], journal, now=now
+                )
                 if args.command in {"resolution-approval", "cancel-approval"}:
                     built = checkpoint_approval(
                         journal,

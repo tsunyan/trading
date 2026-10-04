@@ -1,5 +1,6 @@
 """Restricted cancellation acceptance preserves all trading stops and replay fences."""
 
+import hashlib
 import json
 import socket
 import sqlite3
@@ -43,7 +44,11 @@ def approval(setup, order, *, lifetime=30):
         accepted_at=clock.now,
         expires_at=clock.now + timedelta(seconds=lifetime),
         evidence=tuple(
-            AcceptanceEvidence(kind=kind, reference=f"synthetic-{kind}", sha256="a" * 64)
+            AcceptanceEvidence(
+                kind=kind,
+                reference=f"synthetic-{kind}",
+                sha256=hashlib.sha256(kind.encode()).hexdigest(),
+            )
             for kind in sorted(CANCEL_EVIDENCE_KINDS)
         ),
     )
