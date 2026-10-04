@@ -354,3 +354,21 @@ def test_settled_orders_are_noticed_with_their_final_state(tmp_path, monkeypatch
     sent = []
     live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
     assert sent == [{"kind": "live_cycle_order_settled", "id": "S2026100510OB FILLED"}]
+
+
+def test_plan_with_candidate_requires_live_promotion(running, tmp_path):
+    from test_live_cycle import live_ledger
+
+    from trading.promotion import PromotionError
+
+    values = inputs(running, tmp_path)
+    config_text = 'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 4\n'
+    values["config"].write_text(config_text)
+    paper = live_ledger(tmp_path / "paper", stage="paper")
+    with pytest.raises(PromotionError, match="strategy_not_promoted_for_live"):
+        task_plan(**values, ledger=paper, hypothesis="H001")
+    live = live_ledger(tmp_path / "live", stage="live")
+    plan = task_plan(**values, ledger=live, hypothesis="H001")
+    assert "--hypothesis H001" in plan["tasks"][0]["arguments"]
+    with pytest.raises(LiveTaskError, match="ledger_and_hypothesis_required_together"):
+        task_plan(**values, ledger=live)

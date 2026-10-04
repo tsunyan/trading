@@ -24,6 +24,7 @@ from trading.data import validate_bars
 from trading.gmo import GmoPublic
 from trading.order_runtime import _quote
 from trading.private_order_recovery import PrivateOrderRecovery
+from trading.promotion import PromotionError, require_live
 from trading.strategy import entry_units, signal_direction
 
 SETTLED = {"FILLED", "CANCELED", "EXPIRED", "ABANDONED"}
@@ -221,10 +222,19 @@ def main(argv=None):
     parser.add_argument("--max-slippage", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--flatten", action="store_true")
+    parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--hypothesis")
     args = parser.parse_args(argv)
     try:
         now = datetime.now(UTC)
         cfg = load_settings(args.config)
+        if (args.ledger is None) != (args.hypothesis is None):
+            raise LiveSignalError("ledger_and_hypothesis_required_together")
+        if args.ledger is not None and not args.flatten:
+            try:
+                require_live(args.ledger, args.hypothesis, cfg)
+            except PromotionError as error:
+                raise LiveSignalError(str(error)) from None
         journal = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         positions, pending, limits = journal_state(journal.journal, now)
         quote = _quote(args.quote)

@@ -32,6 +32,7 @@ from trading.live_signal import (
     write_intent,
 )
 from trading.order_journal import OrderBlocked
+from trading.promotion import PromotionError, require_live
 from trading.windows_notify import send_toast
 
 CYCLE_CONFIRMATIONS = ACCOUNT_CONFIRMATIONS | HISTORY_CONFIRMATIONS
@@ -66,6 +67,7 @@ class LiveCycle:
         quote_output=None,
         intent_output=None,
         valuation_tolerance=None,
+        candidate=None,
     ):
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
@@ -73,6 +75,10 @@ class LiveCycle:
             raise LiveCycleError("cycle_confirmations_required")
         if type(prepare) is not bool:
             raise LiveCycleError("invalid_prepare_option")
+        if candidate is not None and not flatten:
+            # Only the frozen candidate promoted to live may open; flattening stays available.
+            ledger, hypothesis = candidate
+            require_live(ledger, hypothesis, cfg)
         result = {"reconciled_orders": [], "orders_sent": False}
         rows = self.journal.snapshot()["orders"]
         for row in rows:
@@ -209,6 +215,12 @@ def read_result(path):
         return {}
 
 
+def _candidate(args):
+    if (args.ledger is None) != (args.hypothesis is None):
+        raise LiveCycleError("ledger_and_hypothesis_required_together")
+    return None if args.ledger is None else (args.ledger, args.hypothesis)
+
+
 def main(argv=None, *, send=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -225,6 +237,8 @@ def main(argv=None, *, send=None):
     parser.add_argument("--flatten", action="store_true")
     parser.add_argument("--notify", action="store_true")
     parser.add_argument("--valuation-tolerance")
+    parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     finished = lambda: datetime.now(UTC).isoformat()  # noqa: E731
@@ -240,6 +254,7 @@ def main(argv=None, *, send=None):
             prepare=args.prepare,
             flatten=args.flatten,
             valuation_tolerance=args.valuation_tolerance,
+            candidate=_candidate(args),
             quote_output=args.quote_output,
             intent_output=args.intent_output,
         )
@@ -251,6 +266,7 @@ def main(argv=None, *, send=None):
             LiveOrderSyncError,
             LiveSignalError,
             LiveQuoteError,
+            PromotionError,
         )
         reason = str(error) if isinstance(error, fixed) else type(error).__name__
         result = {"ok": False, "reason": reason, "orders_sent": False, "finished_at": finished()}

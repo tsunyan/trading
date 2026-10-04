@@ -9,6 +9,8 @@ param(
     [Parameter(Mandatory = $true)][string]$QuoteOutput,
     [Parameter(Mandatory = $true)][string]$ResultOutput,
     [string]$ValuationTolerance,
+    [string]$Ledger,
+    [string]$Hypothesis,
     [string[]]$Confirm = @(),
     [switch]$PlanOnly
 )
@@ -31,6 +33,8 @@ $arguments = @(
     '--result-output', $ResultOutput
 )
 if ($ValuationTolerance) { $arguments += @('--valuation-tolerance', $ValuationTolerance) }
+if ($Ledger) { $arguments += @('--ledger', (Resolve-Path -LiteralPath $Ledger).Path) }
+if ($Hypothesis) { $arguments += @('--hypothesis', $Hypothesis) }
 # -File passes one string; accept comma separated confirmations as well.
 foreach ($item in ($Confirm -join ',' -split ',')) {
     if ($item) { $arguments += @('--confirm', $item.Trim()) }

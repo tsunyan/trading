@@ -49,6 +49,7 @@ def cycle(
     flatten=False,
     valuation_tolerance=None,
     units=1000,
+    candidate=None,
 ):
     values, live, _ = running
     clock = values[0]
@@ -59,6 +60,7 @@ def cycle(
         confirmations=confirmations,
         cfg=CFG,
         units=units,
+        candidate=candidate,
         max_slippage="0.02",
         prepare=prepare,
         flatten=flatten,
@@ -316,3 +318,43 @@ def test_cycle_sizes_auto_units_from_the_refreshed_proof(running, tmp_path):
     result = cycle(running, tmp_path, prepare=False, units="auto")
     # 1,000,000 x 20% at the 150.01 ask, stepped to 100s and capped at the 1000 maximum.
     assert result["decision"]["intent"]["units"] == 1000
+
+
+def live_ledger(tmp_path, *, stage):
+    from bar_frames import bars_frame
+    from test_ledger import T0, write_comparison
+
+    from trading.ledger import add_hypothesis, decide, freeze_hypothesis, record_run
+    from trading.promotion import promote
+
+    bars = bars_frame()
+    database = tmp_path / "ledger.sqlite"
+    add_hypothesis(database, "H001", "trend", now=T0)
+    write_comparison(tmp_path / "research", bars.iloc[:3], CFG, names=("01-sma_cross",))
+    (entry,) = record_run(database, tmp_path / "research", "H001", "pick")
+    freeze_hypothesis(database, "H001", entry, now=bars.timestamp.iloc[3].to_pydatetime())
+    promote(database, "H001", "paper", "start paper")
+    if stage == "live":
+        write_comparison(tmp_path / "after", bars, CFG, names=("01-sma_cross",))
+        (forward,) = record_run(database, tmp_path / "after", "H001", "forward")
+        decide(database, forward, "advance", "criteria met")
+        promote(database, "H001", "live", "passed")
+    return database
+
+
+@pytest.mark.parametrize("stage", ["paper", "live"])
+def test_candidate_gate_allows_only_the_live_promoted_configuration(running, tmp_path, stage):
+    from trading.promotion import PromotionError
+
+    values = running[0]
+    ledger = live_ledger(tmp_path, stage=stage)
+    if stage == "paper":
+        with pytest.raises(PromotionError, match="strategy_not_promoted_for_live"):
+            cycle(running, tmp_path, prepare=False, candidate=(ledger, "H001"))
+        assert values[3].reads == []
+        # Closing everything never depends on the strategy's promotion.
+        flat = cycle(running, tmp_path, prepare=False, flatten=True, candidate=(ledger, "H001"))
+        assert flat["decision"]["reason"] == "at_target"
+    else:
+        result = cycle(running, tmp_path, prepare=False, candidate=(ledger, "H001"))
+        assert result["decision"]["action"] == "open"

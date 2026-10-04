@@ -16,6 +16,7 @@ from trading.config import load_settings
 from trading.live_cycle import CYCLE_CONFIRMATIONS
 from trading.order_runtime import OrderRuntime
 from trading.paper_runner import scheduled_process_args
+from trading.promotion import PromotionError, require_live
 
 
 class LiveTaskError(ValueError):
@@ -35,6 +36,8 @@ def task_plan(
     result_output,
     confirmations,
     valuation_tolerance=None,
+    ledger=None,
+    hypothesis=None,
 ):
     if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(confirmations) != set(
         CYCLE_CONFIRMATIONS
@@ -84,6 +87,12 @@ def task_plan(
     ]
     if valuation_tolerance is not None:
         args += ["--valuation-tolerance", str(valuation_tolerance)]
+    if (ledger is None) != (hypothesis is None):
+        raise LiveTaskError("ledger_and_hypothesis_required_together")
+    if ledger is not None:
+        # Fail at planning, not every hour, if the candidate is not promoted for live.
+        require_live(Path(ledger), hypothesis, load_settings(config))
+        args += ["--ledger", Path(ledger).resolve(), "--hypothesis", hypothesis]
     for item in sorted(CYCLE_CONFIRMATIONS):
         args += ["--confirm", item]
     argv = scheduled_process_args(
@@ -124,6 +133,8 @@ def main(argv=None):
     parser.add_argument("--quote-output", type=Path, required=True)
     parser.add_argument("--result-output", type=Path, required=True)
     parser.add_argument("--valuation-tolerance")
+    parser.add_argument("--ledger", type=Path)
+    parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
     args = parser.parse_args(argv)
     try:
@@ -139,11 +150,14 @@ def main(argv=None):
             result_output=args.result_output,
             confirmations=args.confirm,
             valuation_tolerance=args.valuation_tolerance,
+            ledger=args.ledger,
+            hypothesis=args.hypothesis,
         )
         print(json.dumps({"ok": True, **plan}))
         return 0
     except Exception as error:
-        reason = str(error) if isinstance(error, LiveTaskError) else "live_task_plan_failed"
+        fixed = isinstance(error, (LiveTaskError, PromotionError))
+        reason = str(error) if fixed else "live_task_plan_failed"
         print(json.dumps({"ok": False, "reason": reason}))
         return 1
 
