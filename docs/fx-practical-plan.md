@@ -240,3 +240,11 @@ CLIの有効化は、同期・独立監視を登録していない台帳を拒�
 [運用サイクルの定期実行と通知](live-tasks.md)を追加しました。毎時1分に準備なしの`live_cycle`を実行し、
 提案・失敗をWindows通知、結果をファイルに残します。準備・送信は通知を見た運用者が行います。
 建玉がある間の評価額は、明示した[許容幅](live-account.md)の範囲で気配から評価し直せます。
+
+2026-10-04午後の追加: [昇格管理](promotion.md)、`--units auto`、[同期の正常終了からの続行](private-sync.md)、
+[無登録台帳の明示移行](live-operations.md)、定期サイクルの結果履歴・[状態ページ](live-dashboard.md)・通知の整理、
+[状態診断](live-doctor.md)の昇格・サイクル鮮度の項目と変化通知タスク、[スリッページと約定明細](live-report.md)、
+監査用バックアップ、`context --fetch-quote`。公開APIの実データで気配・取引ルール・足の取得を確認し、
+週末に提案が失敗する不具合（足の鮮度より先に市場閉鎖を判定）と、足の取得日数の不足を直しました。
+手順は[小額の受入試行](live-first-trial.md)と[早見表](live-commands.md)、自動送信は[設計案](live-autonomy-proposal.md)を参照してください。
+全2475テストが合格しました（`OPENBLAS_NUM_THREADS=1`。PCのコミット可能メモリ不足のため）。
