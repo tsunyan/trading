@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from test_live_flow import running as flow_running
 from trading import live_cycle, live_tasks
 from trading.live_cycle import CYCLE_CONFIRMATIONS
 from trading.live_tasks import LiveTaskError, task_plan
+from trading.provenance import source_sha256
 
 
 @pytest.fixture(autouse=True)
@@ -29,10 +31,18 @@ def running(tmp_path):
     yield from flow_running.__wrapped__(tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def promoted(tmp_path, monkeypatch):
+    from test_live_cycle import live_ledger
+
+    (tmp_path / "candidate").mkdir()
+    return live_ledger(tmp_path / "candidate", stage="live", monkeypatch=monkeypatch)
+
+
 def inputs(running, tmp_path, **changes):
     values, live, _ = running
     config = tmp_path / "fx live.toml"
-    config.write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    config.write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 4\n')
     return {
         "directory": live[3].path.parent,
         "read_control_directory": live[1].path.parent,
@@ -44,6 +54,8 @@ def inputs(running, tmp_path, **changes):
         "quote_output": tmp_path / "quote.json",
         "result_output": tmp_path / "cycle.json",
         "confirmations": CYCLE_CONFIRMATIONS,
+        "ledger": tmp_path / "candidate" / "ledger.sqlite",
+        "hypothesis": "H001",
         **changes,
     }
 
@@ -73,6 +85,13 @@ def test_plan_runs_the_cycle_hourly_without_prepare_and_changes_nothing(running,
         ({"credential_reference": "../x"}, "invalid_credential_reference"),
         ({"units": 0}, "invalid_units"),
         ({"max_slippage": "inf"}, "invalid_decimal_option"),
+        ({"max_slippage": "0"}, "invalid_max_slippage"),
+        ({"max_slippage": "-0.01"}, "invalid_max_slippage"),
+        ({"valuation_tolerance": "0"}, "invalid_valuation_tolerance"),
+        ({"valuation_tolerance": "2"}, "invalid_valuation_tolerance"),
+        ({"units": 10**9}, "units_outside_journal_limits"),
+        ({"units": 1001}, "units_outside_journal_limits"),
+        ({"ledger": None, "hypothesis": None}, "promoted_candidate_required"),
     ],
 )
 def test_invalid_plans_are_refused(running, tmp_path, change, reason):
@@ -103,6 +122,10 @@ def test_unregistered_journal_cannot_be_scheduled(tmp_path, capsys):
             "1000",
             "--max-slippage",
             "0.02",
+            "--ledger",
+            str(tmp_path / "candidate" / "ledger.sqlite"),
+            "--hypothesis",
+            "H001",
             "--quote-output",
             str(tmp_path / "q.json"),
             "--result-output",
@@ -197,6 +220,11 @@ def test_cycle_failure_notifies_writes_and_exits_even_if_the_toast_fails(tmp_pat
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell boundary")
 def test_install_script_plan_only_round_trip(running, tmp_path):
     values = inputs(running, tmp_path)
+    # The PowerShell child checks promotion against this checkout's real package hash.
+    with sqlite3.connect(values["ledger"]) as conn:
+        (spec,) = conn.execute("SELECT frozen_spec FROM hypotheses").fetchone()
+        spec = json.dumps({**json.loads(spec), "code_sha256": source_sha256()})
+        conn.execute("UPDATE hypotheses SET frozen_spec = ?", (spec,))
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     script = Path(__file__).resolve().parents[1] / "scripts/install-live-cycle.ps1"
     process = subprocess.run(
@@ -236,6 +264,10 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
             "auto",
             "-DoctorIntervalSeconds",
             "900",
+            "-Ledger",
+            str(values["ledger"]),
+            "-Hypothesis",
+            "H001",
             "-PlanOnly",
         ],
         capture_output=True,
@@ -365,22 +397,19 @@ def test_settled_orders_are_noticed_with_their_final_state(tmp_path, monkeypatch
     assert sent == [{"kind": "live_cycle_order_settled", "id": "S2026100510OB FILLED"}]
 
 
-def test_plan_with_candidate_requires_live_promotion(running, tmp_path):
+def test_plan_with_candidate_requires_live_promotion(running, tmp_path, monkeypatch):
     from test_live_cycle import live_ledger
 
     from trading.promotion import PromotionError
 
     values = inputs(running, tmp_path)
-    config_text = 'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 4\n'
-    values["config"].write_text(config_text)
     paper = live_ledger(tmp_path / "paper", stage="paper")
     with pytest.raises(PromotionError, match="strategy_not_promoted_for_live"):
-        task_plan(**values, ledger=paper, hypothesis="H001")
-    live = live_ledger(tmp_path / "live", stage="live")
-    plan = task_plan(**values, ledger=live, hypothesis="H001")
+        task_plan(**{**values, "ledger": paper})
+    plan = task_plan(**values)
     assert "--hypothesis H001" in plan["tasks"][0]["arguments"]
-    with pytest.raises(LiveTaskError, match="ledger_and_hypothesis_required_together"):
-        task_plan(**values, ledger=live)
+    with pytest.raises(LiveTaskError, match="promoted_candidate_required"):
+        task_plan(**{**values, "hypothesis": None})
 
 
 def test_history_output_appends_one_line_per_run(tmp_path, monkeypatch, capsys):

@@ -25,6 +25,7 @@ from trading.live_order_sync import (
 from trading.live_quote import LiveQuoteError, fetch_quote, fetch_status, write_quote
 from trading.live_signal import (
     LiveSignalError,
+    clear_intent,
     decide,
     entry_halted,
     journal_state,
@@ -77,10 +78,14 @@ class LiveCycle:
             raise LiveCycleError("cycle_confirmations_required")
         if type(prepare) is not bool:
             raise LiveCycleError("invalid_prepare_option")
-        if candidate is not None and not flatten:
-            # Only the frozen candidate promoted to live may open; flattening stays available.
+        if not flatten:
+            # Only the frozen candidate promoted to live may propose; flattening stays available.
+            if candidate is None:
+                raise LiveCycleError("promoted_candidate_required")
             ledger, hypothesis = candidate
             require_live(ledger, hypothesis, cfg)
+        if intent_output is not None:
+            clear_intent(intent_output)  # Only this run's intent, if any, may be left.
         result = {"reconciled_orders": [], "orders_sent": False}
         if service_status is None and quote is None:
             # Live mode: during broker maintenance every private GET fails; skip quietly.

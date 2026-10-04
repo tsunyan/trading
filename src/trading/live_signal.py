@@ -215,6 +215,11 @@ def write_intent(intent, path):
         raise
 
 
+def clear_intent(path):
+    """A run that ends without a new intent must not leave an older actionable one behind."""
+    Path(path).unlink(missing_ok=True)
+
+
 def history_days(cfg: Settings):
     """Calendar days covering the strategy warm-up plus weekends and multi-day closures."""
     hours_per_day = 86_400 // cfg.bar_seconds
@@ -247,11 +252,15 @@ def main(argv=None):
         cfg = load_settings(args.config)
         if (args.ledger is None) != (args.hypothesis is None):
             raise LiveSignalError("ledger_and_hypothesis_required_together")
-        if args.ledger is not None and not args.flatten:
+        if not args.flatten:
+            # Strategy proposals need the live-promoted candidate; flattening never does.
+            if args.ledger is None:
+                raise LiveSignalError("promoted_candidate_required")
             try:
                 require_live(args.ledger, args.hypothesis, cfg)
             except PromotionError as error:
                 raise LiveSignalError(str(error)) from None
+        clear_intent(args.output)
         journal = PrivateOrderRecovery(args.directory, args.read_control_directory, args.scope)
         positions, pending, limits = journal_state(journal.journal, now)
         quote = _quote(args.quote)

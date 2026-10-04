@@ -1,21 +1,24 @@
 """Promotion state of a frozen research candidate: paper, then live. Append-only.
 
 A hypothesis can be promoted to `paper` only after it is frozen, and to `live` only from
-`paper` and only when a forward out-of-sample ledger entry for it carries an `advance`
-decision. `require_live` lets live tools refuse any strategy settings other than the
-frozen candidate's exact configuration. Promotion is an operator record, not a proof
-that the strategy is profitable.
+`paper`, only after its forward-OOS pass criteria were fixed, and only when `judge` derived
+an `advance` from exactly those criteria for a forward out-of-sample entry. A manually
+recorded `advance` never counts. `require_live` lets live tools refuse any strategy
+settings or package code other than the frozen candidate's. Promotion is an operator
+record, not a proof that the strategy is profitable.
 """
 
 import argparse
 import hashlib
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 
 from trading.config import Settings, load_settings
 from trading.ledger import _connect, _hypothesis, _now
 from trading.ledger import decide as ledger_decide
+from trading.provenance import source_sha256
 
 STAGES = ("paper", "live")
 ACTIONS = (*STAGES, "revoked")
@@ -39,6 +42,19 @@ CREATE TABLE IF NOT EXISTS forward_criteria (
     criteria_sha256 TEXT NOT NULL
 )
 """
+JUDGMENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS forward_judgments (
+    decision_id INTEGER PRIMARY KEY REFERENCES decisions(decision_id),
+    hypothesis_id TEXT NOT NULL REFERENCES hypotheses(hypothesis_id),
+    entry_id INTEGER NOT NULL REFERENCES entries(entry_id),
+    criteria_sha256 TEXT NOT NULL,
+    report_sha256 TEXT NOT NULL,
+    judged_at TEXT NOT NULL,
+    judge_version TEXT NOT NULL
+)
+"""
+JUDGE_VERSION = "promotion.judge/1"
+MAX_REPORT = 16 * 1024 * 1024
 OPERATORS = {
     ">=": lambda a, b: a >= b,
     "<=": lambda a, b: a <= b,
@@ -78,6 +94,7 @@ def _validate_criteria(criteria):
             or item["op"] not in OPERATORS
             or isinstance(item["value"], bool)
             or not isinstance(item["value"], (int, float))
+            or not math.isfinite(item["value"])
         ):
             raise PromotionError("invalid_forward_criteria")
     return criteria
@@ -86,7 +103,7 @@ def _validate_criteria(criteria):
 def set_criteria(database: Path, hypothesis_id: str, criteria, now: datetime | None = None):
     """Fix the forward-OOS pass criteria after freezing and before any forward result exists."""
     criteria = _validate_criteria(criteria)
-    body = json.dumps(criteria, sort_keys=True, separators=(",", ":"))
+    body = json.dumps(criteria, sort_keys=True, separators=(",", ":"), allow_nan=False)
     with _connect(database) as connection:
         hypothesis = _hypothesis(connection, hypothesis_id)
         if not hypothesis["frozen_at"]:
@@ -131,8 +148,7 @@ def judge(database: Path, hypothesis_id: str, entry_id: int, now: datetime | Non
         if entry is None or entry["period"] != "forward_oos":
             raise PromotionError("forward_oos_entry_required")
         criteria = json.loads(row["criteria_json"])
-        directory = Path(entry["run_dir"]) / entry["candidate"]
-        raw = (directory / "report.json").read_bytes()
+        raw = _report(Path(entry["run_dir"]) / entry["candidate"] / "report.json")
         if hashlib.sha256(raw).hexdigest() != entry["artifact_sha256"]:
             raise PromotionError("report_changed_since_recording")
     report = json.loads(raw)
@@ -152,8 +168,35 @@ def judge(database: Path, hypothesis_id: str, entry_id: int, now: datetime | Non
             for c in checks
         )
     )
-    ledger_decide(database, entry_id, decision, reason, now=now)
+    recorded = ledger_decide(database, entry_id, decision, reason, now=now)
+    # Judge origin is a structured row keyed by the decision, never inferred from its text.
+    # A decision without this row (a crash in between, or a manual one) never counts.
+    with _connect(database) as connection:
+        connection.execute(JUDGMENTS_TABLE)
+        connection.execute(
+            "INSERT INTO forward_judgments VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                recorded["decision_id"],
+                hypothesis_id,
+                entry_id,
+                row["criteria_sha256"],
+                entry["artifact_sha256"],
+                recorded["decided_at"],
+                JUDGE_VERSION,
+            ),
+        )
     return {"entry_id": entry_id, "decision": decision, "checks": checks}
+
+
+def _report(path):
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_REPORT + 1)
+    except OSError:
+        raise PromotionError("forward_report_unreadable") from None
+    if len(raw) > MAX_REPORT:
+        raise PromotionError("forward_report_too_large")
+    return raw
 
 
 def _history(connection, hypothesis_id):
@@ -173,16 +216,19 @@ def _stage(history):
     return history[-1]["action"] if history else None
 
 
-def _forward_advanced(connection, hypothesis_id):
-    criteria = _criteria_rows(connection, hypothesis_id)
-    # With fixed criteria, only an advance that judge() derived from them counts.
-    prefix = "%" if criteria is None else f"fixed criteria {criteria['criteria_sha256'][:12]}:%"
+def _forward_advanced(connection, hypothesis_id, criteria):
+    # Only the latest decision on an entry counts, and only if judge() made it from
+    # exactly the fixed criteria and the recorded report.
+    if not _exists(connection, "forward_judgments"):
+        return None
     return connection.execute(
         "SELECT 1 FROM entries e JOIN decisions d ON d.decision_id = ("
         " SELECT max(decision_id) FROM decisions WHERE entry_id = e.entry_id)"
+        " JOIN forward_judgments j ON j.decision_id = d.decision_id"
         " WHERE e.hypothesis_id = ? AND e.period = 'forward_oos' AND d.decision = 'advance'"
-        " AND d.reason LIKE ?",
-        (hypothesis_id, prefix),
+        " AND j.entry_id = e.entry_id AND j.hypothesis_id = e.hypothesis_id"
+        " AND j.criteria_sha256 = ? AND j.report_sha256 = e.artifact_sha256",
+        (hypothesis_id, criteria["criteria_sha256"]),
     ).fetchone()
 
 
@@ -205,7 +251,10 @@ def promote(
         if stage == "live":
             if current != "paper":
                 raise PromotionError("paper_stage_required")
-            if not _forward_advanced(connection, hypothesis_id):
+            criteria = _criteria_rows(connection, hypothesis_id)
+            if criteria is None:
+                raise PromotionError("forward_criteria_required")
+            if not _forward_advanced(connection, hypothesis_id, criteria):
                 raise PromotionError("advanced_forward_oos_entry_required")
         connection.execute(
             "INSERT INTO promotions (hypothesis_id, action, recorded_at, reason, frozen_spec)"
@@ -251,8 +300,12 @@ def status(database: Path, hypothesis_id: str):
         return status_in(connection, hypothesis_id)
 
 
-def require_live(database: Path, hypothesis_id: str, cfg: Settings):
-    """The live candidate's frozen spec, only for exactly its configuration."""
+def require_live(database: Path, hypothesis_id: str, cfg: Settings, *, code_sha256=None):
+    """The live candidate's frozen spec, only for exactly its configuration and code.
+
+    The forward-OOS entries that promoted it already had to match the frozen package hash;
+    live use must too, so any package change needs a new frozen candidate.
+    """
     if not isinstance(cfg, Settings):
         raise PromotionError("strategy_settings_required")
     current = status(database, hypothesis_id)
@@ -265,6 +318,8 @@ def require_live(database: Path, hypothesis_id: str, cfg: Settings):
         or spec["strategy_parameters"] != cfg.strategy_parameters
     ):
         raise PromotionError("strategy_config_differs_from_candidate")
+    if spec.get("code_sha256") != (code_sha256 if code_sha256 is not None else source_sha256()):
+        raise PromotionError("strategy_code_differs_from_candidate")
     return spec
 
 

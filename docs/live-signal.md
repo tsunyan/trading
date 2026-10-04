@@ -9,7 +9,7 @@
 
 ```powershell
 uv run python -m trading.live_quote --output runs/live-orders/quote.json
-uv run python -m trading.live_signal --config configs/fx.toml --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --quote runs/live-orders/quote.json --units 1000 --max-slippage 0.02 --output runs/live-orders/intent.json
+uv run python -m trading.live_signal --config configs/fx.toml --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --quote runs/live-orders/quote.json --units 1000 --max-slippage 0.02 --ledger runs/ledger.sqlite --hypothesis H001 --output runs/live-orders/intent.json
 ```
 
 ## シグナル
@@ -63,6 +63,9 @@ uv run python -m trading.live_signal --config configs/fx.toml --directory runs/l
 ## 出力
 
 提案があれば`--output`へ注文意図のJSONを置き換え書込みし、決定内容を標準出力に出します。
+提案がない場合（見送り）は、以前の実行が残した`--output`のファイルを削除します。見送りと表示されている間に
+古い注文意図を準備してしまわないためです。`--flatten`以外では`--ledger`・`--hypothesis`で
+[実運用に昇格した候補](promotion.md)の指定が必須です（`promoted_candidate_required`）。
 見送りではファイルを書きません。出力の`prepared`と`orders_sent`は常に`false`です。
 
 ## 検証

@@ -5,7 +5,7 @@
 [`order_runtime submit`](order-runtime.md)で行います。
 
 ```powershell
-uv run python -m trading.live_cycle --config configs/fx.toml --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --credential-reference <read_only_reference> --units 1000 --max-slippage 0.02 --quote-output runs/live-orders/quote.json --intent-output runs/live-orders/intent.json --prepare --confirm complete-account --confirm account-identity --confirm external-writers-paused --confirm complete-history
+uv run python -m trading.live_cycle --config configs/fx.toml --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --credential-reference <read_only_reference> --units 1000 --max-slippage 0.02 --quote-output runs/live-orders/quote.json --intent-output runs/live-orders/intent.json --ledger runs/ledger.sqlite --hypothesis H001 --prepare --confirm complete-account --confirm account-identity --confirm external-writers-paused --confirm complete-history
 uv run python -m trading.order_runtime submit --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --client-id <client_id> --quote runs/live-orders/quote.json --expected-sha256 <checkpoint_sha256> --credential-reference <order_reference> --order-permission-confirmed
 ```
 
@@ -19,6 +19,7 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 2. 公開tickerから[気配](live-quote.md)を1回取得し、`--quote-output`へ書き出します。
 3. [口座証拠を更新](live-account.md)します。
 4. [戦略の提案](live-signal.md)を作ります。提案があれば`--intent-output`へ書き出します。
+   `--intent-output`のファイルはサイクルの最初に削除するため、提案のない回の後に古い注文意図は残りません。
 5. `--prepare`を指定した場合だけ、提案を台帳に準備し、手順2の気配で実行内容を作って
    `checkpoint_sha256`・要求の本文・リスク評価を出力します。
 
@@ -32,7 +33,8 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 確認項目は口座証拠の3項目と`complete-history`の4つです。足りない場合は、何も読まずに拒否します。
 各段階が要求する確認を、運用者がサイクル単位でまとめて与える形です。
 
-`--ledger`と`--hypothesis`で、[実運用に昇格した凍結候補](promotion.md)の設定だけに新規の提案を限ります。
+`--ledger`と`--hypothesis`で[実運用に昇格した凍結候補](promotion.md)を指定します。`--flatten`以外では
+必須で、指定しないと`promoted_candidate_required`で何も読まずに拒否します。
 `--units auto`で新規の数量を[口座証拠から決めます](live-signal.md)。
 `--flatten`を付けると、手順4で戦略の代わりに全建玉の決済を提案します（[手仕舞い](live-signal.md)）。
 建玉がある間は`--valuation-tolerance`で[評価額の許容幅](live-account.md)を指定します。

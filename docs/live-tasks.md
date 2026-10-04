@@ -5,7 +5,7 @@ Windows通知で知らせるタスク計画と登録スクリプトを追加し�
 通知を見た運用者が、サイクルを`--prepare`付きで実行し、表示されたSHA-256で送信します。
 
 ```powershell
-.\scripts\install-live-cycle.ps1 -Directory runs\live-orders -ReadControlDirectory runs\account-read-control -Scope <scope> -CredentialReference <read_only_reference> -Config configs\fx.toml -Units 1000 -MaxSlippage 0.02 -QuoteOutput runs\live-orders\quote.json -ResultOutput runs\live-orders\cycle.json -ValuationTolerance 0.05 -Confirm complete-account,account-identity,external-writers-paused,complete-history -PlanOnly
+.\scripts\install-live-cycle.ps1 -Directory runs\live-orders -ReadControlDirectory runs\account-read-control -Scope <scope> -CredentialReference <read_only_reference> -Config configs\fx.toml -Units 1000 -MaxSlippage 0.02 -QuoteOutput runs\live-orders\quote.json -ResultOutput runs\live-orders\cycle.json -ValuationTolerance 0.05 -Ledger runs\ledger.sqlite -Hypothesis H001 -Confirm complete-account,account-identity,external-writers-paused,complete-history -PlanOnly
 ```
 
 `-PlanOnly`を外すと、現在のユーザーのタスクとして登録します。登録はこのコマンドを運用者が
@@ -18,6 +18,9 @@ Windows通知で知らせるタスク計画と登録スクリプトを追加し�
 - 確認項目: 計画の作成時に4つの確認をすべて要求し、タスクのコマンドに含めます。
   外部操作の停止や口座本人性の確認を、タスクを登録している間ずっと維持する宣言になります。
   これを満たさなくなったらタスクを無効にしてください。
+- 戦略: `-Ledger`・`-Hypothesis`で[実運用に昇格した凍結候補](promotion.md)の指定が必須です。
+- 入力の検査: 毎時の実行で必ず拒否される値は、計画の作成時に拒否します。`-MaxSlippage`は正の値、
+  `-ValuationTolerance`は0より大きく1以下、固定の`-Units`は台帳の最小・最大と単位の倍数に限ります。
 - 対象: 同期・監視を登録した台帳だけを計画できます。タスク名は台帳の識別子から作り、
   同じ名前の別のタスクや別ユーザーのタスクは上書きしません。
 - 鍵: 読取専用キーの参照だけを使います。発注用キーは使いません。

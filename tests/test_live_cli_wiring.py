@@ -201,7 +201,9 @@ def test_live_signal_writes_the_intent_and_skips_bars_when_flattening(
         "--output",
         str(tmp_path / "intent.json"),
     ]
-    live_signal.main([*args, "--flatten"] if flatten else args)
+    monkeypatch.setattr(live_signal, "require_live", lambda *a: None)
+    promoted = ["--ledger", str(tmp_path / "ledger.sqlite"), "--hypothesis", "H001"]
+    live_signal.main([*args, "--flatten"] if flatten else [*args, *promoted])
     printed = json.loads(capsys.readouterr().out)
     assert printed["prepared"] is False and printed["orders_sent"] is False
     assert printed["action"] == ("close" if flatten else "open")
@@ -289,6 +291,9 @@ def test_live_signal_cli_refuses_an_unpromoted_strategy_before_reading(
     with pytest.raises(SystemExit):
         live_signal.main([*base, "--ledger", str(ledger)])
     assert capsys.readouterr().err == "ledger_and_hypothesis_required_together\n"
+    with pytest.raises(SystemExit):
+        live_signal.main(base)
+    assert capsys.readouterr().err == "promoted_candidate_required\n"
 
 
 def test_context_can_fetch_and_save_the_quote_it_reviews(tmp_path, monkeypatch, capsys):

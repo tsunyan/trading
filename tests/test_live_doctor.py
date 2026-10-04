@@ -94,11 +94,11 @@ def test_cli_exit_code_follows_readiness(setup, capsys):
 
 
 @pytest.mark.parametrize("stage", ["paper", "live"])
-def test_optional_strategy_promotion_gate(setup, tmp_path, stage):
+def test_optional_strategy_promotion_gate(setup, tmp_path, stage, monkeypatch):
     from test_live_cycle import CFG, live_ledger
 
     values, live = setup[0], setup[1]
-    ledger = live_ledger(tmp_path, stage=stage)
+    ledger = live_ledger(tmp_path, stage=stage, monkeypatch=monkeypatch)
     result = diagnose(live[3], values[0].wall, candidate=(ledger, "H001", CFG))
     gate = result["gates"]["strategy_promotion"]
     if stage == "live":

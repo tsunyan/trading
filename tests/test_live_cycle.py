@@ -34,6 +34,21 @@ def no_native_or_network(monkeypatch):
     monkeypatch.setattr(socket, "socket", forbidden)
 
 
+# The fixture strategy counts as promoted; the gate itself is tested with a real ledger.
+PROMOTED = ("promoted-fixture-ledger", "H001")
+
+
+@pytest.fixture(autouse=True)
+def promoted_fixture(monkeypatch):
+    real = live_cycle.require_live
+
+    def gate(ledger, hypothesis, cfg):
+        if (ledger, hypothesis) != PROMOTED:
+            return real(ledger, hypothesis, cfg)
+
+    monkeypatch.setattr(live_cycle, "require_live", gate)
+
+
 @pytest.fixture
 def running(tmp_path):
     yield from flow_running.__wrapped__(tmp_path)
@@ -49,7 +64,7 @@ def cycle(
     flatten=False,
     valuation_tolerance=None,
     units=1000,
-    candidate=None,
+    candidate=PROMOTED,
     service_status=None,
 ):
     values, live, _ = running
@@ -305,12 +320,13 @@ def test_refused_context_abandons_the_order_prepared_in_the_same_run(
     def refused(self, *args, **kwargs):
         raise OrderBlocked("live_account_risk_refused")
 
+    original = LiveOrderJournal.execution_context
     monkeypatch.setattr(LiveOrderJournal, "execution_context", refused)
     with pytest.raises(LiveCycleError, match="prepared_order_abandoned:live_account_risk_refused"):
         cycle(running, tmp_path, prepare=True)
     orders = live[3].snapshot()["orders"]
     assert [row["state"] for row in orders] == ["ABANDONED"]
-    monkeypatch.undo()
+    monkeypatch.setattr(LiveOrderJournal, "execution_context", original)
     # The abandoned row no longer counts as unsettled for later proposals.
     later = cycle(running, tmp_path, prepare=False)
     assert later["decision"]["reason"] != "unsettled_local_order"
@@ -325,12 +341,18 @@ def test_cycle_sizes_auto_units_from_the_refreshed_proof(running, tmp_path):
     assert result["decision"]["intent"]["units"] == 1000
 
 
-def live_ledger(tmp_path, *, stage):
+def live_ledger(tmp_path, *, stage, monkeypatch=None):
+    """A frozen H001 at `stage`. With `monkeypatch`, this package counts as the frozen code."""
     from bar_frames import bars_frame
-    from test_ledger import T0, write_comparison
+    from test_ledger import CODE, T0, write_comparison
+    from test_promotion import CRITERIA
 
-    from trading.ledger import add_hypothesis, decide, freeze_hypothesis, record_run
-    from trading.promotion import promote
+    from trading import promotion
+    from trading.ledger import add_hypothesis, freeze_hypothesis, record_run
+    from trading.promotion import judge, promote, set_criteria
+
+    if monkeypatch is not None:
+        monkeypatch.setattr(promotion, "source_sha256", lambda: CODE)
 
     bars = bars_frame()
     database = tmp_path / "ledger.sqlite"
@@ -340,19 +362,23 @@ def live_ledger(tmp_path, *, stage):
     freeze_hypothesis(database, "H001", entry, now=bars.timestamp.iloc[3].to_pydatetime())
     promote(database, "H001", "paper", "start paper")
     if stage == "live":
-        write_comparison(tmp_path / "after", bars, CFG, names=("01-sma_cross",))
+        set_criteria(database, "H001", CRITERIA)
+        metrics = {"profit_factor": 1.5, "max_drawdown_pct": 6}
+        write_comparison(tmp_path / "after", bars, CFG, names=("01-sma_cross",), metrics=metrics)
         (forward,) = record_run(database, tmp_path / "after", "H001", "forward")
-        decide(database, forward, "advance", "criteria met")
+        assert judge(database, "H001", forward)["decision"] == "advance"
         promote(database, "H001", "live", "passed")
     return database
 
 
 @pytest.mark.parametrize("stage", ["paper", "live"])
-def test_candidate_gate_allows_only_the_live_promoted_configuration(running, tmp_path, stage):
+def test_candidate_gate_allows_only_the_live_promoted_configuration(
+    running, tmp_path, stage, monkeypatch
+):
     from trading.promotion import PromotionError
 
     values = running[0]
-    ledger = live_ledger(tmp_path, stage=stage)
+    ledger = live_ledger(tmp_path, stage=stage, monkeypatch=monkeypatch)
     if stage == "paper":
         with pytest.raises(PromotionError, match="strategy_not_promoted_for_live"):
             cycle(running, tmp_path, prepare=False, candidate=(ledger, "H001"))
@@ -424,3 +450,19 @@ def test_broker_maintenance_holds_before_any_private_read(running, tmp_path):
         "intent": None,
     }
     assert result["prepared"] is False and not (tmp_path / "intent.json").exists()
+
+
+def test_strategy_cycle_requires_a_promoted_candidate_but_flattening_does_not(running, tmp_path):
+    values = running[0]
+    with pytest.raises(LiveCycleError, match="promoted_candidate_required"):
+        cycle(running, tmp_path, prepare=False, candidate=None)
+    assert values[3].reads == []
+    flat = cycle(running, tmp_path, prepare=False, flatten=True, candidate=None)
+    assert flat["decision"]["reason"] == "at_target"
+
+
+def test_a_cycle_without_a_new_intent_removes_the_previous_intent_file(running, tmp_path):
+    stale = tmp_path / "intent.json"
+    stale.write_text('{"client_id": "S-old"}')
+    result = cycle(running, tmp_path, prepare=False, service_status="MAINTENANCE")
+    assert result["decision"]["intent"] is None and not stale.exists()
