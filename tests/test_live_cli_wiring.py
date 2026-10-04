@@ -255,3 +255,37 @@ def test_order_runtime_submit_appends_the_reviewed_quote_to_the_dispatch_log(
     line = json.loads(log.read_text(encoding="utf-8"))
     assert line["client_id"] == "Buy001" and line["quote"]["ask"] == "150.01"
     assert line["checkpoint_sha256"] == "a" * 64
+
+
+def test_live_signal_cli_refuses_an_unpromoted_strategy_before_reading(
+    tmp_path, monkeypatch, capsys
+):
+    from test_live_cycle import live_ledger
+
+    ledger = live_ledger(tmp_path, stage="paper")
+    config = tmp_path / "fx.toml"
+    config.write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 2\nslow = 4\n')
+    monkeypatch.setattr(
+        live_signal,
+        "PrivateOrderRecovery",
+        lambda *a: pytest.fail("journal opened before the promotion check"),
+    )
+    base = [
+        "--config",
+        str(config),
+        *STORES,
+        "--quote",
+        str(quote_file(tmp_path)),
+        "--units",
+        "1000",
+        "--max-slippage",
+        "0.02",
+        "--output",
+        str(tmp_path / "intent.json"),
+    ]
+    with pytest.raises(SystemExit):
+        live_signal.main([*base, "--ledger", str(ledger), "--hypothesis", "H001"])
+    assert capsys.readouterr().err == "strategy_not_promoted_for_live\n"
+    with pytest.raises(SystemExit):
+        live_signal.main([*base, "--ledger", str(ledger)])
+    assert capsys.readouterr().err == "ledger_and_hypothesis_required_together\n"

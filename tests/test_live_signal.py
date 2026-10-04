@@ -386,3 +386,9 @@ def test_closed_market_holds_even_when_the_last_bar_is_days_old():
     )
     assert decision["action"] == "hold" and decision["reason"] == "market_closed"
     assert decision["current"] == 1 and decision["intent"] is None
+
+
+def test_more_than_ten_lots_cannot_be_closed_in_one_order():
+    lots = tuple(long(pid=400 + i) for i in range(11))
+    with pytest.raises(LiveSignalError, match="too_many_positions_to_close"):
+        run(FALLING, positions=lots)
