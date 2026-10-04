@@ -352,8 +352,13 @@ def main(argv=None, *, send=None):
             else:
                 result["notified"] = notify("live_cycle_failed", result["reason"], send=send)
         elif decision.get("action") in {"open", "close"}:
-            reference = (decision.get("intent") or {}).get("client_id", "proposal")
-            result["notified"] = notify("live_cycle_proposal", reference, send=send)
+            intent = decision.get("intent") or {}
+            reference = " ".join(
+                str(intent[key])
+                for key in ("client_id", "side", "effect", "units")
+                if intent.get(key) is not None
+            )
+            result["notified"] = notify("live_cycle_proposal", reference or "proposal", send=send)
     if args.result_output is not None:
         try:
             write_result(result, args.result_output)

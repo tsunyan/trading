@@ -166,7 +166,7 @@ def test_cycle_notifies_only_for_proposals_and_writes_the_result(
     if action == "hold":
         assert sent == [] and "notified" not in saved
     else:
-        assert sent == [{"kind": "live_cycle_proposal", "id": "S2026100510OB"}]
+        assert sent == [{"kind": "live_cycle_proposal", "id": "S2026100510OB"}]  # Minimal intent.
         assert saved["notified"] is True
     assert json.loads(capsys.readouterr().out)["ok"]
 
@@ -434,3 +434,23 @@ def test_plan_adds_an_optional_doctor_task_with_its_own_interval(running, tmp_pa
     for invalid in (True, 299, 3601):
         with pytest.raises(LiveTaskError, match="invalid_doctor_interval"):
             task_plan(**inputs(running, tmp_path), doctor_interval_seconds=invalid)
+
+
+def test_proposal_notice_names_side_effect_and_units(tmp_path, monkeypatch):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    FakeCycle.outcome = {
+        "decision": {
+            "action": "open",
+            "intent": {
+                "client_id": "S2026100510OB",
+                "side": "BUY",
+                "effect": "OPEN",
+                "units": 1000,
+            },
+        },
+        "orders_sent": False,
+    }
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    sent = []
+    live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    assert sent == [{"kind": "live_cycle_proposal", "id": "S2026100510OB BUY OPEN 1000"}]
