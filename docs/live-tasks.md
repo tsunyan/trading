@@ -5,19 +5,38 @@ Windows通知で知らせるタスク計画と登録スクリプトを追加し�
 通知を見た運用者が、サイクルを`--prepare`付きで実行し、表示されたSHA-256で送信します。
 
 ```powershell
-.\scripts\install-live-cycle.ps1 -Directory runs\live-orders -ReadControlDirectory runs\account-read-control -Scope <scope> -CredentialReference <read_only_reference> -Config configs\fx.toml -Units 1000 -MaxSlippage 0.02 -QuoteOutput runs\live-orders\quote.json -ResultOutput runs\live-orders\cycle.json -ValuationTolerance 0.05 -Ledger runs\ledger.sqlite -Hypothesis H001 -Confirm complete-account,account-identity,external-writers-paused,complete-history -PlanOnly
+.\scripts\install-live-cycle.ps1 -Directory runs\live-orders -ReadControlDirectory runs\account-read-control -Scope <scope> -CredentialReference <read_only_reference> -Config configs\fx.toml -Units 1000 -MaxSlippage 0.02 -QuoteOutput runs\live-orders\quote.json -ResultOutput runs\live-orders\cycle.json -ValuationTolerance 0.05 -Ledger runs\ledger.sqlite -Hypothesis H001 -Attestation runs\live-orders\attestation.json -PlanOnly
 ```
 
 `-PlanOnly`を外すと、現在のユーザーのタスクとして登録します。登録はこのコマンドを運用者が
 実行した場合だけで、ほかのコマンドがタスクを作ることはありません。
 
+## 確認の宣言ファイル
+
+```powershell
+uv run python -m trading.live_attestation attest --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --hours 24 --confirm complete-account --confirm account-identity --confirm external-writers-paused --confirm complete-history --output runs/live-orders/attestation.json
+uv run python -m trading.live_attestation status --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --output runs/live-orders/attestation.json
+```
+
+口座全体の取得・約定履歴の完全性・口座本人性・外部操作の停止は、ソフトウェアが観測できない
+業者口座の状態です。以前は計画の作成時の`--confirm`をタスクの引数に永久に含めていましたが、
+登録時の宣言が以後のすべての実行に効き続けるため、期限付きのファイルに改めました（2026-10-04のレビュー対応）。
+
+- 宣言は台帳（`live_instance`）に結び付き、別の台帳では使えません。
+- 有効期間は1〜72時間です。同じパスに書き直すと更新になります。
+- 4つの確認がすべて揃わない宣言は作れません。ファイルを編集して期間を延ばした場合や形式が違う場合は拒否します。
+- 宣言は運用者の申告であり、内容が正しいことを証明するものではありません。状況が変わったら
+  ファイルを削除してください。次の実行から失敗して止まります。
+
 ## タスクの内容
 
 - 実行: 毎時1分（次の正時の1分から1時間ごと）。前回の実行中は重ねて起動しません。上限は5分です。
 - コマンド: `live_cycle`を`--prepare`・`--flatten`なしで、`--notify`と`--result-output`付きで実行します。
-- 確認項目: 計画の作成時に4つの確認をすべて要求し、タスクのコマンドに含めます。
-  外部操作の停止や口座本人性の確認を、タスクを登録している間ずっと維持する宣言になります。
-  これを満たさなくなったらタスクを無効にしてください。
+- 確認項目: 4つの確認はタスクの引数に含めません。運用者が期限付きの宣言ファイル（`-Attestation`）を
+  作り、毎時の実行はそれが有効な間だけ使います。期限が切れると、サイクルは何も読まずに
+  `attestation_expired`で失敗し（失敗通知は理由が変わるまで1回）、更新するまで止まります。
+  期限の24時間前に「定期実行の確認宣言が24時間以内に失効します」と1回通知します。
+  計画の作成時にも宣言が有効であることを確かめます。
 - 戦略: `-Ledger`・`-Hypothesis`で[実運用に昇格した凍結候補](promotion.md)の指定が必須です。
 - 入力の検査: 毎時の実行で必ず拒否される値は、計画の作成時に拒否します。`-MaxSlippage`は正の値、
   `-ValuationTolerance`は0より大きく1以下、固定の`-Units`は台帳の最小・最大と単位の倍数に限ります。

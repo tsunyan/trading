@@ -6,12 +6,14 @@ import os
 import socket
 import sqlite3
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from test_live_flow import running as flow_running
 
 from trading import live_cycle, live_tasks
+from trading.live_attestation import attest
 from trading.live_cycle import CYCLE_CONFIRMATIONS
 from trading.live_tasks import LiveTaskError, task_plan
 from trading.provenance import source_sha256
@@ -39,6 +41,19 @@ def promoted(tmp_path, monkeypatch):
     return live_ledger(tmp_path / "candidate", stage="live", monkeypatch=monkeypatch)
 
 
+def attestation(journal, tmp_path, hours=24):
+    path = tmp_path / "attestation.json"
+    attest(
+        journal,
+        path,
+        confirmations=CYCLE_CONFIRMATIONS,
+        required=CYCLE_CONFIRMATIONS,
+        hours=hours,
+        now=datetime.now(UTC),
+    )
+    return path
+
+
 def inputs(running, tmp_path, **changes):
     values, live, _ = running
     config = tmp_path / "fx live.toml"
@@ -53,7 +68,7 @@ def inputs(running, tmp_path, **changes):
         "max_slippage": "0.02",
         "quote_output": tmp_path / "quote.json",
         "result_output": tmp_path / "cycle.json",
-        "confirmations": CYCLE_CONFIRMATIONS,
+        "attestation": attestation(live[3], tmp_path),
         "ledger": tmp_path / "candidate" / "ledger.sqlite",
         "hypothesis": "H001",
         **changes,
@@ -72,7 +87,8 @@ def test_plan_runs_the_cycle_hourly_without_prepare_and_changes_nothing(running,
     assert "trading.live_cycle" in arguments and "--notify" in arguments
     assert "--prepare" not in arguments and "--flatten" not in arguments
     assert "--valuation-tolerance 0.05" in arguments
-    assert all(f"--confirm {item}" in arguments for item in CYCLE_CONFIRMATIONS)
+    # Account statements travel as the expiring attestation file, never as --confirm.
+    assert "--attestation" in arguments and "--confirm" not in arguments
     assert '"' in arguments  # The config path with a space stays one argument.
     assert spec["execution_limit_seconds"] == 300
     assert live[3].snapshot() == before and running[0][3].reads == []
@@ -81,7 +97,7 @@ def test_plan_runs_the_cycle_hourly_without_prepare_and_changes_nothing(running,
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        ({"confirmations": set()}, "cycle_confirmations_required"),
+        ({"attestation": "missing-attestation.json"}, "attestation_unavailable"),
         ({"credential_reference": "../x"}, "invalid_credential_reference"),
         ({"units": 0}, "invalid_units"),
         ({"max_slippage": "inf"}, "invalid_decimal_option"),
@@ -130,7 +146,8 @@ def test_unregistered_journal_cannot_be_scheduled(tmp_path, capsys):
             str(tmp_path / "q.json"),
             "--result-output",
             str(tmp_path / "r.json"),
-            *[item for c in sorted(CYCLE_CONFIRMATIONS) for item in ("--confirm", c)],
+            "--attestation",
+            str(tmp_path / "attestation.json"),
         ]
     )
     assert code == 1
@@ -254,8 +271,8 @@ def test_install_script_plan_only_round_trip(running, tmp_path):
             str(values["quote_output"]),
             "-ResultOutput",
             str(values["result_output"]),
-            "-Confirm",
-            ",".join(sorted(CYCLE_CONFIRMATIONS)),
+            "-Attestation",
+            str(values["attestation"]),
             "-HistoryOutput",
             str(tmp_path / "cycles.jsonl"),
             "-DashboardOutput",

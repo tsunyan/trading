@@ -27,6 +27,7 @@
 | `trading.live_dashboard` | 状態ページの書き出し（[説明](live-dashboard.md)） | なし | なし | なし |
 | `trading.promotion status/check/set-criteria/judge/promote/revoke` | 戦略候補の合否条件・判定・昇格管理（[説明](promotion.md)） | なし | なし | 実験台帳（status・checkは変更なし） |
 | `trading.live_tasks plan` / `scripts/install-live-cycle.ps1` | 毎時サイクルのタスク計画・登録（[説明](live-tasks.md)） | なし | なし | なし |
+| `trading.live_attestation attest` / `status` | 定期実行の確認を期限付きで宣言・確認（[説明](live-tasks.md)） | なし | なし | なし |
 | `trading.private_tasks plan` / `scripts/install-private-watchdog.ps1` | 監視・同期続行のタスク計画・登録（[説明](private-operations.md)） | なし | なし | なし |
 
 注文・取消のPOSTを送るのは`order_runtime submit/cancel`だけです（同期は通知用トークンの操作だけを行います）。どちらも、事前に表示した実行内容の

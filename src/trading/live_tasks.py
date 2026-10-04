@@ -9,11 +9,14 @@ import argparse
 import json
 import re
 import subprocess
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 from trading.config import load_settings
 from trading.live_account import LiveAccountError, _valuation_tolerance
+from trading.live_attestation import LiveAttestationError
+from trading.live_attestation import require as require_attestation
 from trading.live_cycle import CYCLE_CONFIRMATIONS
 from trading.order_runtime import OrderRuntime
 from trading.paper_runner import scheduled_process_args
@@ -35,7 +38,7 @@ def task_plan(
     max_slippage,
     quote_output,
     result_output,
-    confirmations,
+    attestation,
     valuation_tolerance=None,
     ledger=None,
     hypothesis=None,
@@ -43,10 +46,6 @@ def task_plan(
     dashboard_output=None,
     doctor_interval_seconds=None,
 ):
-    if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(confirmations) != set(
-        CYCLE_CONFIRMATIONS
-    ):
-        raise LiveTaskError("cycle_confirmations_required")
     if not isinstance(credential_reference, str) or not re.fullmatch(
         r"[a-f0-9]{32}", credential_reference
     ):
@@ -75,6 +74,15 @@ def task_plan(
     # Only a registered original journal (sync/watchdog prerequisites) can be scheduled.
     journal = OrderRuntime(directory, read_control_directory, scope).journal
     binding = journal.credential_binding()
+    # The account statements are an expiring attestation file, never permanent task
+    # arguments: the task fails closed once it expires until the operator renews it.
+    attestation = Path(attestation).resolve()
+    try:
+        require_attestation(
+            attestation, journal, required=CYCLE_CONFIRMATIONS, now=datetime.now(UTC)
+        )
+    except LiveAttestationError as error:
+        raise LiveTaskError(str(error)) from None
     limits = journal.limits
     if units != "auto" and (
         not limits.min_units <= units <= limits.max_units or units % limits.unit_step
@@ -120,8 +128,7 @@ def task_plan(
     # Fail at planning, not every hour, if the candidate is not promoted for live.
     require_live(Path(ledger), hypothesis, load_settings(config))
     args += ["--ledger", Path(ledger).resolve(), "--hypothesis", hypothesis]
-    for item in sorted(CYCLE_CONFIRMATIONS):
-        args += ["--confirm", item]
+    args += ["--attestation", attestation]
     if doctor_interval_seconds is not None and (
         type(doctor_interval_seconds) is not int or not 300 <= doctor_interval_seconds <= 3600
     ):
@@ -200,7 +207,7 @@ def main(argv=None):
     parser.add_argument("--doctor-interval-seconds", type=int)
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
-    parser.add_argument("--confirm", action="append", default=[])
+    parser.add_argument("--attestation", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         plan = task_plan(
@@ -213,7 +220,7 @@ def main(argv=None):
             max_slippage=args.max_slippage,
             quote_output=args.quote_output,
             result_output=args.result_output,
-            confirmations=args.confirm,
+            attestation=args.attestation,
             valuation_tolerance=args.valuation_tolerance,
             ledger=args.ledger,
             hypothesis=args.hypothesis,

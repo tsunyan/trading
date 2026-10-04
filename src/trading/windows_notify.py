@@ -93,6 +93,9 @@ LABELS = {
     "live_doctor_blocked": "実発注の送信を止めている条件があります",
     "live_doctor_ready": "実発注の送信を止めていた条件が解消しました",
     "live_cycle_approval_expiring": "実発注の許可が24時間以内に失効します。受入を更新してください",
+    "live_cycle_attestation_expiring": (
+        "定期実行の確認宣言が24時間以内に失効します。更新してください"
+    ),
 }
 
 

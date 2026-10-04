@@ -16,6 +16,9 @@ from pathlib import Path
 
 from trading.config import load_settings
 from trading.live_account import ACCOUNT_CONFIRMATIONS, LiveAccountError, LiveAccountRefresh
+from trading.live_attestation import LiveAttestationError
+from trading.live_attestation import load as load_attestation
+from trading.live_attestation import require as require_attestation
 from trading.live_order_sync import (
     ACCEPTED,
     HISTORY_CONFIRMATIONS,
@@ -220,6 +223,15 @@ def write_result(result, path):
 APPROVAL_NOTICE_SECONDS = 24 * 3600
 
 
+def attestation_expiry(path):
+    if path is None:
+        return None
+    try:
+        return load_attestation(path).expires_at
+    except LiveAttestationError:
+        return None
+
+
 def approval_expiry(cycle):
     if cycle is None:
         return None
@@ -268,14 +280,23 @@ def main(argv=None, *, send=None):
     parser.add_argument("--ledger", type=Path)
     parser.add_argument("--hypothesis")
     parser.add_argument("--confirm", action="append", default=[])
+    parser.add_argument("--attestation", type=Path)
     args = parser.parse_args(argv)
     finished = lambda: datetime.now(UTC).isoformat()  # noqa: E731
     cycle = None
     try:
         cycle = LiveCycle(args.directory, args.read_control_directory, args.scope)
+        confirmations = args.confirm
+        if args.attestation is not None:
+            # Unattended runs: the operator's expiring statement replaces --confirm.
+            if args.confirm:
+                raise LiveCycleError("confirm_or_attestation_not_both")
+            confirmations = require_attestation(
+                args.attestation, cycle.journal, required=CYCLE_CONFIRMATIONS, now=datetime.now(UTC)
+            ).confirmations
         result = cycle.run(
             args.credential_reference,
-            confirmations=args.confirm,
+            confirmations=confirmations,
             cfg=load_settings(args.config),
             units=args.units,
             max_slippage=args.max_slippage,
@@ -324,6 +345,7 @@ def main(argv=None, *, send=None):
             LiveSignalError,
             LiveQuoteError,
             PromotionError,
+            LiveAttestationError,
         )
         reason = str(error) if isinstance(error, fixed) else type(error).__name__
         result = {"ok": False, "reason": reason, "orders_sent": False, "finished_at": finished()}
@@ -334,7 +356,21 @@ def main(argv=None, *, send=None):
     previous = read_result(args.result_output)
     if expiry is not None and previous.get("approval_notice_for") == expiry.isoformat():
         result["approval_notice_for"] = previous["approval_notice_for"]
+    attested = attestation_expiry(args.attestation)
+    if attested is not None:
+        result["attestation_expires_at"] = attested.isoformat()
+        if previous.get("attestation_notice_for") == attested.isoformat():
+            result["attestation_notice_for"] = previous["attestation_notice_for"]
     if args.notify:
+        remaining = (attested - datetime.now(UTC)).total_seconds() if attested else None
+        if (
+            remaining is not None
+            and 0 < remaining < APPROVAL_NOTICE_SECONDS
+            and "attestation_notice_for" not in result
+        ):
+            hours = f"{int(remaining // 3600)}h left"
+            if notify("live_cycle_attestation_expiring", hours, send=send):
+                result["attestation_notice_for"] = attested.isoformat()
         left = (expiry - datetime.now(UTC)).total_seconds() if expiry is not None else None
         if (
             left is not None

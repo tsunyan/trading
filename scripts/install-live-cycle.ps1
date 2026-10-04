@@ -14,7 +14,7 @@ param(
     [int]$DoctorIntervalSeconds = 0,
     [string]$Ledger,
     [string]$Hypothesis,
-    [string[]]$Confirm = @(),
+    [Parameter(Mandatory = $true)][string]$Attestation,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -41,10 +41,7 @@ if ($DashboardOutput) { $arguments += @('--dashboard-output', $DashboardOutput) 
 if ($HistoryOutput) { $arguments += @('--history-output', $HistoryOutput) }
 if ($Ledger) { $arguments += @('--ledger', (Resolve-Path -LiteralPath $Ledger).Path) }
 if ($Hypothesis) { $arguments += @('--hypothesis', $Hypothesis) }
-# -File passes one string; accept comma separated confirmations as well.
-foreach ($item in ($Confirm -join ',' -split ',')) {
-    if ($item) { $arguments += @('--confirm', $item.Trim()) }
-}
+$arguments += @('--attestation', (Resolve-Path -LiteralPath $Attestation).Path)
 Push-Location $workspace
 try {
     $planText = & $python @arguments
