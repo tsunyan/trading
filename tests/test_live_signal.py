@@ -314,3 +314,58 @@ def test_auto_units_follow_the_paper_rule_and_journal_limits(tmp_path):
 def test_zero_units_hold_instead_of_failing():
     decision = run(RISING, units=0)
     assert decision["action"] == "hold" and decision["reason"] == "size_below_minimum"
+
+
+def test_decision_invariants_over_random_holdings_quotes_and_bars():
+    import random
+
+    rng = random.Random(20261004)
+    for _ in range(300):
+        side = rng.choice(["BUY", "SELL", None])
+        lots = (
+            ()
+            if side is None
+            else tuple(
+                Position(
+                    position_id=400 + i,
+                    side=side,
+                    units=rng.choice([1000, 2000, 3000]),
+                    average_price="150",
+                )
+                for i in range(rng.randint(1, 4))
+            )
+        )
+        bid = Decimal("149") + Decimal(rng.randint(0, 2000)) / 1000
+        spread = Decimal(rng.randint(1, 80)) / 1000
+        current = quote(bid=str(bid), ask=str(bid + spread))
+        closes = [150 + rng.uniform(-1, 1) for _ in range(6)]
+        decision = decide(
+            bars(closes),
+            current,
+            settings(allow_short=rng.random() < 0.5),
+            positions=lots,
+            pending=rng.random() < 0.1,
+            units=1000,
+            max_slippage="0.02",
+            limits=LIMITS,
+            now=NOW,
+            flatten=rng.random() < 0.2,
+            entry_halted=rng.random() < 0.2,
+        )
+        intent = decision["intent"]
+        if decision["action"] == "hold":
+            assert intent is None
+            continue
+        assert intent.kind == "MARKET" and intent.bound % LIMITS.price_tick == 0
+        if intent.side == "BUY":
+            assert current.ask <= intent.bound <= current.ask + Decimal("0.02")
+        else:
+            assert current.bid - Decimal("0.02") <= intent.bound <= current.bid
+        if lots:
+            # Holding: only a close of every lot on the held side, never a new entry.
+            assert decision["action"] == "close" and intent.effect == "CLOSE"
+            assert intent.units == sum(p.units for p in lots)
+            assert intent.side != side
+        else:
+            assert decision["action"] == "open" and intent.effect == "OPEN"
+            assert intent.units == 1000 and current.ask - current.bid <= Decimal("0.05")
