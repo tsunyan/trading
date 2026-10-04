@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 import threading
@@ -286,6 +287,16 @@ def _configuration(state):
             sort_keys=True,
             separators=(",", ":"),
         )
+    )
+
+
+def _not_sent_payload(payload):
+    """A fixed local reason code, never a message or a value."""
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"reason"}
+        and isinstance(payload["reason"], str)
+        and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", payload["reason"]) is not None
     )
 
 
@@ -588,7 +599,8 @@ class LiveOrderJournal(OrderJournal):
             intent = OrderIntent.model_validate_json(row["intent_json"])
             plan = order_request(intent, state.limits)
             if row["state"] in {"PREPARED", "ABANDONED"}:
-                self._unclaimed(conn, row["client_id"], plan)
+                if not self._not_sent(conn, row["client_id"]):
+                    self._unclaimed(conn, row["client_id"], plan)
                 continue
             evidence = OrderEvidence.model_validate_json(row["evidence_json"])
             validate_evidence(evidence)
@@ -981,6 +993,49 @@ class LiveOrderJournal(OrderJournal):
                 hashlib.sha256(plan.body).hexdigest(),
             )
 
+    def record_not_sent(self, client_id, plan, reason):
+        """Close a claim whose request provably never reached HTTP send in this process.
+
+        Only the dispatching thread, still holding the POST operation, may call this. The
+        order becomes ABANDONED: never resent, its client ID never reused, and the account
+        is unchanged. Anything after send (or a crash) stays an unknown outcome.
+        """
+        if not isinstance(reason, str) or not _not_sent_payload({"reason": reason}):
+            reason = "dispatch_refused"
+        with self._mutation(), self._transaction() as conn:
+            row = self._row(conn, client_id)
+            intent = OrderIntent.model_validate_json(row["intent_json"])
+            if (
+                row["state"] != "SUBMITTING"
+                or row["evidence_json"]
+                or plan != order_request(intent, self.limits)
+                or self._receipt(conn, client_id) is not None
+                or self._not_sent(conn, client_id)
+            ):
+                raise LiveOrderError("live_not_sent_claim_mismatch")
+            self.posts.require_operation(
+                "order" if plan.path == "/v1/order" else "close_order",
+                hashlib.sha256(plan.body).hexdigest(),
+            )
+            conn.execute("UPDATE orders SET state='ABANDONED' WHERE client_id=?", (client_id,))
+            self._event(conn, client_id, "SUBMISSION_NOT_SENT", {"reason": reason})
+
+    @staticmethod
+    def _not_sent(conn, client_id):
+        rows = conn.execute(
+            "SELECT id,kind,payload_json FROM events WHERE client_id=? "
+            "AND kind IN ('SUBMITTING','SUBMISSION_NOT_SENT') ORDER BY id",
+            (client_id,),
+        ).fetchall()
+        if not any(r[1] == "SUBMISSION_NOT_SENT" for r in rows):
+            return False
+        if [r[1] for r in rows] != ["SUBMITTING", "SUBMISSION_NOT_SENT"] or not (
+            _submitting_payload(json.loads(rows[0][2]))
+            and _not_sent_payload(json.loads(rows[1][2]))
+        ):
+            raise LiveOrderError("live_not_sent_integrity_failed")
+        return True
+
     def reconcile(self, evidence):
         with self._mutation():
             return super().reconcile(evidence)
@@ -993,7 +1048,8 @@ class LiveOrderJournal(OrderJournal):
             history = {}
             for event in conn.execute(
                 "SELECT id,client_id,kind,payload_json FROM events "
-                "WHERE kind IN ('PREPARED','SUBMITTING','SUBMISSION_ACK','RECONCILED') ORDER BY id"
+                "WHERE kind IN ('PREPARED','SUBMITTING','SUBMISSION_ACK','RECONCILED',"
+                "'SUBMISSION_NOT_SENT') ORDER BY id"
             ):
                 history.setdefault(event["client_id"], {}).setdefault(event["kind"], []).append(
                     event
@@ -1025,8 +1081,20 @@ class LiveOrderJournal(OrderJournal):
                 ):
                     raise LiveOrderError("live_catalog_order_integrity_failed")
                 if row["state"] in {"PREPARED", "ABANDONED"}:
-                    if submitted or receipt is not None or evidence is not None:
+                    refused = events.get("SUBMISSION_NOT_SENT", [])
+                    if receipt is not None or evidence is not None:
                         raise LiveOrderError("live_catalog_order_integrity_failed")
+                    if submitted or refused:
+                        # Only an ABANDONED claim refused before HTTP send may carry these.
+                        if (
+                            row["state"] != "ABANDONED"
+                            or len(submitted) != 1
+                            or len(refused) != 1
+                            or refused[0]["id"] <= submitted[0]["id"]
+                            or not _submitting_payload(json.loads(submitted[0]["payload_json"]))
+                            or not _not_sent_payload(json.loads(refused[0]["payload_json"]))
+                        ):
+                            raise LiveOrderError("live_catalog_order_integrity_failed")
                     continue
                 if row["state"] not in {
                     "SUBMITTING",

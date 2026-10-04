@@ -331,9 +331,7 @@ def test_response_receipt_is_saved_when_code_changes_after_dispatch(setup, monke
     assert posts.snapshot()["phase"] == "READY" and not saved["live_enabled"]
 
 
-def test_code_change_at_last_dispatch_check_sends_no_http_and_still_records_stop(
-    setup, monkeypatch
-):
+def test_code_change_at_last_dispatch_check_sends_no_http_and_closes_the_claim(setup, monkeypatch):
     clock, _, posts, journal = setup
     order = ready(setup)
     original = journal.validate_dispatch
@@ -344,12 +342,13 @@ def test_code_change_at_last_dispatch_check_sends_no_http_and_still_records_stop
 
     monkeypatch.setattr(journal, "validate_dispatch", changed)
     with client(setup, lambda request: pytest.fail("code change dispatched HTTP")) as sender:
-        with pytest.raises(OrderTransportError):
+        with pytest.raises(OrderTransportError, match="order_not_sent:"):
             sender.submit(order.client_id, quote=quote(clock.now))
-    saved = journal.snapshot()
-    assert saved["halted"] and saved["live_control"]["phase"] == "STOPPED"
-    assert saved["orders"][0]["state"] == "UNKNOWN"
-    assert posts.snapshot()["phase"] == "STOPPED"
+    # Refused before the HTTP send: not an unknown outcome, and nothing to resolve.
+    assert journal.snapshot()["orders"][0]["state"] == "ABANDONED"
+    assert posts.snapshot()["phase"] == "READY" and posts.snapshot()["claim"] is None
+    # The changed code still cannot send anything until it is newly approved.
+    assert not journal.snapshot()["live_enabled"]
 
 
 def test_unavailable_code_fingerprint_does_not_prevent_diagnostics_or_emergency_stop(
@@ -605,7 +604,7 @@ def test_http_or_receipt_failure_stops_both_domains_and_never_retries(setup, fai
     assert b"remote secret" not in journal.path.read_bytes()
 
 
-def test_stop_after_risk_claim_before_http_persists_unknown_without_sending(setup, monkeypatch):
+def test_stop_after_risk_claim_before_http_closes_the_claim_without_sending(setup, monkeypatch):
     clock, _, posts, journal = setup
     order = ready(setup)
     calls = []
@@ -618,10 +617,39 @@ def test_stop_after_risk_claim_before_http_persists_unknown_without_sending(setu
 
     monkeypatch.setattr("trading.private_order.sign_request", stop)
     with client(setup, lambda request: calls.append(request)) as sender:
-        with pytest.raises(OrderTransportError):
+        with pytest.raises(OrderTransportError, match="order_not_sent:"):
             sender.submit(order.client_id, quote=quote(clock.now))
-    assert calls == [] and posts.snapshot()["phase"] == "STOPPED"
+    assert calls == [] and posts.snapshot()["phase"] == "READY"
+    saved = journal.snapshot()
+    # The operator's stop stays; the never-sent order is closed, not unknown.
+    assert saved["halted"] and saved["orders"][0]["state"] == "ABANDONED"
+
+
+def test_failure_to_record_not_sent_stays_an_unknown_outcome(setup, monkeypatch):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+
+    def refuse(*args):
+        raise LiveOrderError("live_dispatch_claim_mismatch")
+
+    def broken(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(journal, "validate_dispatch", refuse)
+    monkeypatch.setattr(journal, "record_not_sent", broken)
+    with client(setup, lambda request: pytest.fail("dispatched HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="order_submission_unknown"):
+            sender.submit(order.client_id, quote=quote(clock.now))
+    assert posts.snapshot()["phase"] == "STOPPED"
     assert journal.snapshot()["orders"][0]["state"] == "UNKNOWN"
+
+
+def test_record_not_sent_requires_the_live_claim_and_the_held_post_operation(setup):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+    plan = journal.request(order.client_id)
+    with pytest.raises(LiveOrderError, match="live_not_sent_claim_mismatch"):
+        journal.record_not_sent(order.client_id, plan, "x")  # Still PREPARED.
 
 
 def test_foreign_thread_cannot_reuse_same_limiter_object_owner(setup):
@@ -835,3 +863,34 @@ c.submit('Buy001', quote=AccountQuote(bid='150',ask='150.01',observed_at=stamp,m
     with client(setup, lambda request: pytest.fail("resend after process death")) as sender:
         with pytest.raises(OrderTransportError):
             sender.submit(order.client_id, quote=quote(clock.now))
+
+
+def test_a_not_sent_order_does_not_block_catalog_or_restart(setup, monkeypatch):
+    clock, _, posts, journal = setup
+    order = ready(setup)
+    monkeypatch.setattr(
+        journal,
+        "validate_dispatch",
+        lambda *a: (_ for _ in ()).throw(LiveOrderError("live_authorization_expired")),
+    )
+    with client(setup, lambda request: pytest.fail("dispatched HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="order_not_sent:live_authorization_expired"):
+            sender.submit(order.client_id, quote=quote(clock.now))
+    monkeypatch.undo()
+    journal.catalog_orders()
+    journal.halt()
+    try:
+        journal.restart_context()
+    except LiveOrderError as error:
+        # Other restart prerequisites may be missing here, never the refused claim.
+        assert "claim" not in str(error) and "unresolved" not in str(error)
+    # Tampering with the recorded refusal is detected.
+    import sqlite3
+
+    with sqlite3.connect(journal.path) as conn:
+        conn.execute(
+            'UPDATE events SET payload_json=\'{"reason":"Sent anyway"}\' '
+            "WHERE kind='SUBMISSION_NOT_SENT'"
+        )
+    with pytest.raises(LiveOrderError):
+        journal.catalog_orders()

@@ -297,17 +297,26 @@ def test_health_is_rechecked_after_wait_and_after_submission_claim(setup, monkey
 
         monkeypatch.setattr(live[3], "begin_submission", begin)
     with client(live, lambda request: calls.append(request)) as sender:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as raised:
             sender.submit(order.client_id, quote=quote(live[0].now))
     assert calls == []
     post = live[2].snapshot()
     journal = live[3].snapshot()
+    assert post["phase"] == "READY" and post["claim"] is None
+    assert not journal["halted"]
     if boundary == "post_wait":
-        assert post["phase"] == "READY" and post["claim"] is None
-        assert journal["orders"][0]["state"] == "PREPARED" and not journal["halted"]
+        assert journal["orders"][0]["state"] == "PREPARED"
     else:
-        assert post["phase"] == "STOPPED" and post["claim"] is not None
-        assert journal["orders"][0]["state"] == "UNKNOWN" and journal["halted"]
+        # Claimed, then refused before the HTTP send: provably not sent, so the claim is
+        # closed instead of becoming an unresolvable unknown outcome.
+        assert str(raised.value) == "order_not_sent:live_sync_owner_missing"
+        assert journal["orders"][0]["state"] == "ABANDONED"
+        refused = [e for e in journal["events"] if e["kind"] == "SUBMISSION_NOT_SENT"]
+        assert [e["payload"] for e in refused] == [{"reason": "live_sync_owner_missing"}]
+        assert live[3].catalog_orders()  # The catalog accepts the recorded refusal.
+        # The client ID is never prepared or sent again.
+        assert live[3].prepare(order) == "ABANDONED"
+        assert live[3].snapshot()["orders"][0]["state"] == "ABANDONED"
     assert monitor.status()["conditions"] == []
 
 

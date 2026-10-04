@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -34,6 +35,21 @@ def _credential(value):
     if not text.isascii() or any(ord(c) < 33 or ord(c) == 127 for c in text):
         raise OrderTransportError("invalid_order_credentials")
     return value
+
+
+class NotSent(Exception):
+    """Raised only before the request is handed to the HTTP client."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _reason(error):
+    text = str(error)
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", text):
+        return text
+    return "dispatch_refused"
 
 
 class PrivateOrderClient:
@@ -146,14 +162,18 @@ class PrivateOrderClient:
             if type(started) not in {int, float} or not math.isfinite(started) or started < 0:
                 raise OrderTransportError("invalid_order_transport_clock")
             is_cancel = plan.path == "/v1/cancelOrders"
-            if is_cancel:
-                self.journal.validate_cancel_dispatch(
-                    client_id, plan, authorization_sha256=cancellation_authorization
-                )
-            else:
-                self.journal.validate_dispatch(client_id, plan)
-            if self._elapsed(started) > 1:
-                raise OrderTransportError("order_dispatch_deadline_exceeded")
+            try:
+                if is_cancel:
+                    self.journal.validate_cancel_dispatch(
+                        client_id, plan, authorization_sha256=cancellation_authorization
+                    )
+                else:
+                    self.journal.validate_dispatch(client_id, plan)
+                if self._elapsed(started) > 1:
+                    raise OrderTransportError("order_dispatch_deadline_exceeded")
+            except Exception as error:
+                # Nothing has been handed to the HTTP client yet.
+                raise NotSent(_reason(error)) from None
             response = self._client.send(request, stream=True, follow_redirects=False)
             if response.status_code != 200:
                 raise OrderTransportError("unexpected_order_http_status")
@@ -246,6 +266,7 @@ class PrivateOrderClient:
             refused = False
             claimed = False
             entered = False
+            not_sent = None
             try:
                 with self.posts.operation(
                     kind, request_sha256=hashlib.sha256(plan.body).hexdigest()
@@ -268,13 +289,22 @@ class PrivateOrderClient:
                         claimed = True
                         if current != plan:
                             raise OrderTransportError("order_plan_changed")
-                        receipt = self._http(client_id, current)
-                        self.journal.acknowledge_submission(receipt)
+                        try:
+                            receipt = self._http(client_id, current)
+                        except NotSent as error:
+                            # Provably never sent: close the claim instead of halting on an
+                            # unknown outcome. If recording fails, it stays unknown.
+                            self.journal.record_not_sent(client_id, current, error.reason)
+                            not_sent = error.reason
+                        else:
+                            self.journal.acknowledge_submission(receipt)
                 if refused:
                     raise OrderTransportError("order_preflight_refused")
+                if not_sent is not None:
+                    raise OrderTransportError(f"order_not_sent:{not_sent}")
                 return receipt
             except OrderTransportError:
-                if entered and not refused:
+                if entered and not refused and not_sent is None:
                     self._unknown(client_id)
                 raise
             except PostControlError:
