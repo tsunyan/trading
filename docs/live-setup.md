@@ -73,6 +73,15 @@
 
 手順6〜9は[運用サイクル](live-cycle.md)の1回のコマンドで行えます。送信だけは別のコマンドです。
 
+## 未送信の注文の破棄
+
+```powershell
+uv run python -m trading.live_setup abandon --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --client-id <client_id> --confirm-abandon
+```
+
+準備済み（PREPARED）で送信claimを一度も取っていない注文だけを破棄できます。送信された可能性がある
+注文は拒否します。準備したまま送らない注文は、次の提案や準備を止めるため破棄してください。
+
 ## 状態確認と停止
 
 ```powershell

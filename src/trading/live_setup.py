@@ -92,7 +92,16 @@ def status(journal):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("create", "status", "prepare", "activation-context", "activate", "stop")
+        "command",
+        choices=(
+            "create",
+            "status",
+            "prepare",
+            "abandon",
+            "activation-context",
+            "activate",
+            "stop",
+        ),
     )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
@@ -103,6 +112,8 @@ def main(argv=None):
     parser.add_argument("--expected-revision", type=int)
     parser.add_argument("--confirm", action="append", default=[])
     parser.add_argument("--confirm-stop", action="store_true")
+    parser.add_argument("--client-id")
+    parser.add_argument("--confirm-abandon", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "create":
@@ -123,6 +134,12 @@ def main(argv=None):
                 intent = _load(args.intent, OrderIntent)
                 journal.prepare(intent)
                 result = {"client_id": intent.client_id, "state": "PREPARED"}
+            elif args.command == "abandon":
+                # Only a never-claimed PREPARED intent; anything possibly sent is refused.
+                if not args.confirm_abandon or not args.client_id:
+                    raise LiveSetupError("explicit_abandon_confirmation_required")
+                journal.abandon(args.client_id)
+                result = {"client_id": args.client_id, "state": "ABANDONED"}
             elif args.command == "activation-context":
                 result = journal.activation_context()
             elif args.command == "activate":

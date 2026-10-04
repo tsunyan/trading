@@ -38,7 +38,18 @@ def _tick(value, tick, rounding):
 
 
 def decide(
-    frame, quote, cfg, *, positions, pending, units, max_slippage, limits, now, flatten=False
+    frame,
+    quote,
+    cfg,
+    *,
+    positions,
+    pending,
+    units,
+    max_slippage,
+    limits,
+    now,
+    flatten=False,
+    entry_halted=False,
 ):
     """A hold, open or close decision with its exact intent. Pure; no I/O.
 
@@ -99,6 +110,9 @@ def decide(
         settlements = tuple(Settlement(position_id=p.position_id, units=p.units) for p in lots)
         action = "close"
     else:
+        if entry_halted:
+            # The loss stop admits closes only; an open would be refused at the send gate.
+            return {**decision, "action": "hold", "reason": "entry_loss_halt"}
         if quote.ask - quote.bid > Decimal(str(cfg.max_spread)):
             return {**decision, "action": "hold", "reason": "spread_exceeds_entry_limit"}
         if (
@@ -127,6 +141,10 @@ def decide(
     )
     reason = "flatten_requested" if flatten else "signal_changed"
     return {**decision, "action": action, "reason": reason, "intent": intent}
+
+
+def entry_halted(journal):
+    return bool((journal.snapshot()["account_guard"] or {}).get("entry_halted"))
 
 
 def journal_state(journal, now):
@@ -191,6 +209,7 @@ def main(argv=None):
             limits=limits,
             now=now,
             flatten=args.flatten,
+            entry_halted=entry_halted(journal.journal),
         )
         if decision["intent"] is not None:
             write_intent(decision["intent"], args.output)

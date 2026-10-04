@@ -19,6 +19,10 @@ uv run python -m trading.order_runtime submit --directory runs/live-orders --rea
 5. `--prepare`を指定した場合だけ、提案を台帳に準備し、手順2の気配で実行内容を作って
    `checkpoint_sha256`・要求の本文・リスク評価を出力します。
 
+手順5で実行内容の作成が拒否された場合（リスク検査、同期・監視の不健全など）は、同じ実行で準備した
+未送信の注文を破棄（ABANDONED）し、`prepared_order_abandoned:<理由>`で失敗します。準備済みのまま残すと、
+以後の提案が`unsettled_local_order`で見送られ続けるためです。
+
 どの段階でも失敗すればそこで止まり、以降の段階を行いません。照合済みの注文や更新済みの
 口座証拠は台帳に残ります。読取専用キーは各段階で必要な時だけ読みます。
 

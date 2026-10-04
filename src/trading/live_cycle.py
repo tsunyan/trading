@@ -8,6 +8,7 @@ context. Sending stays a separate `order_runtime submit` with that context's SHA
 import argparse
 import json
 import os
+import re
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,10 +25,12 @@ from trading.live_quote import LiveQuoteError, fetch_quote, write_quote
 from trading.live_signal import (
     LiveSignalError,
     decide,
+    entry_halted,
     journal_state,
     recent_bars,
     write_intent,
 )
+from trading.order_journal import OrderBlocked
 from trading.windows_notify import send_toast
 
 CYCLE_CONFIRMATIONS = ACCOUNT_CONFIRMATIONS | HISTORY_CONFIRMATIONS
@@ -115,6 +118,7 @@ class LiveCycle:
             limits=limits,
             now=now,
             flatten=flatten,
+            entry_halted=entry_halted(self.journal),
         )
         intent = decision["intent"]
         result["decision"] = {
@@ -132,7 +136,16 @@ class LiveCycle:
         if state != "PREPARED":
             # The same signal bar and direction was already used by an earlier order.
             raise LiveCycleError("signal_client_id_already_used")
-        context = self.journal.execution_context(intent.client_id, quote=quote)
+        try:
+            context = self.journal.execution_context(intent.client_id, quote=quote)
+        except Exception as error:
+            # Prepared in this run and never claimed: abandon it so it cannot block later
+            # proposals. A fixed live code (e.g. a risk refusal) is reported as is.
+            self.journal.abandon(intent.client_id)
+            code = str(error)
+            if not isinstance(error, OrderBlocked) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
+                code = "context_refused"
+            raise LiveCycleError(f"prepared_order_abandoned:{code}") from None
         result.update(
             prepared=True,
             client_id=intent.client_id,

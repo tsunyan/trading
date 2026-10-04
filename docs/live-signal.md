@@ -31,6 +31,7 @@ uv run python -m trading.live_signal --config configs/fx.toml --directory runs/l
 | 保有の向きがシグナルと同じ | 見送り（`at_target`） |
 | 保有がありシグナルと違う | その向きの全建玉を建玉指定で決済（最大10建玉） |
 | 保有がなくシグナルが買い/売り | `--units`の新規成行注文 |
+| 新規で損失による新規停止中 | 見送り（`entry_loss_halt`）。決済の提案は続けます |
 | 新規でスプレッドが`max_spread`超 | 見送り（`spread_exceeds_entry_limit`） |
 | 買いと売りの建玉が両方ある | 拒否 |
 

@@ -200,3 +200,22 @@ def test_create_requires_post_control_and_inputs(controls, capsys, tmp_path):
     assert failure(controls, capsys, "prepare", "--intent", str(controls / "intent.json")) == (
         "invalid_input_file"
     )
+
+
+def test_abandon_requires_confirmation_and_only_unsent_orders(controls, capsys):
+    cli(controls, capsys, "create", "--config", str(controls / "config.json"))
+    (controls / "intent.json").write_text(intent().model_dump_json())
+    cli(controls, capsys, "prepare", "--intent", str(controls / "intent.json"))
+    assert (
+        failure(controls, capsys, "abandon", "--client-id", "Buy001")
+        == "explicit_abandon_confirmation_required"
+    )
+    result = cli(controls, capsys, "abandon", "--client-id", "Buy001", "--confirm-abandon")
+    assert result["state"] == "ABANDONED"
+    assert cli(controls, capsys, "status")["orders"] == [
+        {"client_id": "Buy001", "state": "ABANDONED"}
+    ]
+    assert (
+        failure(controls, capsys, "abandon", "--client-id", "Buy001", "--confirm-abandon")
+        == "live_setup_failed"
+    )

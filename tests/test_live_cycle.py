@@ -285,3 +285,27 @@ def test_cli_failure_reports_only_a_fixed_reason(running, tmp_path, capsys):
     assert raised.value.code == 2
     assert capsys.readouterr().err == "live_cycle_failed: cycle_confirmations_required\n"
     assert values[3].reads == [] and json.dumps({}) == "{}"
+
+
+def test_refused_context_abandons_the_order_prepared_in_the_same_run(
+    running, tmp_path, monkeypatch
+):
+    from trading.live_journal import LiveOrderJournal
+    from trading.order_journal import OrderBlocked
+
+    live = running[1]
+    cycle(running, tmp_path, prepare=False)
+    activate(running)
+
+    def refused(self, *args, **kwargs):
+        raise OrderBlocked("live_account_risk_refused")
+
+    monkeypatch.setattr(LiveOrderJournal, "execution_context", refused)
+    with pytest.raises(LiveCycleError, match="prepared_order_abandoned:live_account_risk_refused"):
+        cycle(running, tmp_path, prepare=True)
+    orders = live[3].snapshot()["orders"]
+    assert [row["state"] for row in orders] == ["ABANDONED"]
+    monkeypatch.undo()
+    # The abandoned row no longer counts as unsettled for later proposals.
+    later = cycle(running, tmp_path, prepare=False)
+    assert later["decision"]["reason"] != "unsettled_local_order"

@@ -251,3 +251,32 @@ def test_flatten_holds_when_flat_or_unsettled_and_still_checks_the_quote():
             now=NOW,
             flatten=1,
         )
+
+
+def test_loss_halt_holds_new_entries_but_still_proposes_closes():
+    halted = decide(
+        bars(RISING),
+        quote(),
+        settings(),
+        positions=(),
+        pending=False,
+        units=1000,
+        max_slippage="0.02",
+        limits=LIMITS,
+        now=NOW,
+        entry_halted=True,
+    )
+    assert halted["action"] == "hold" and halted["reason"] == "entry_loss_halt"
+    closing = decide(
+        bars(FALLING),
+        quote(),
+        settings(),
+        positions=(long(),),
+        pending=False,
+        units=1000,
+        max_slippage="0.02",
+        limits=LIMITS,
+        now=NOW,
+        entry_halted=True,
+    )
+    assert closing["action"] == "close"
