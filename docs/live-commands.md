@@ -31,3 +31,5 @@
 
 注文・取消のPOSTを送るのは`order_runtime submit/cancel`だけです（同期は通知用トークンの操作だけを行います）。どちらも、事前に表示した実行内容の
 SHA-256と発注用キーの参照、`--order-permission-confirmed`の指定を必要とします。
+
+提案をそのまま送信する自動送信は実装していません。判断材料は[設計案](live-autonomy-proposal.md)にまとめました。
