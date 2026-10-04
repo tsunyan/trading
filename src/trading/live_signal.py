@@ -93,6 +93,9 @@ def decide(
     }
     if pending:
         return {**decision, "action": "hold", "reason": "unsettled_local_order"}
+    if not quote.market_open:
+        # The send gate refuses a closed market anyway; do not raise a proposal for it.
+        return {**decision, "action": "hold", "reason": "market_closed"}
     if current == target:
         return {**decision, "action": "hold", "reason": "at_target"}
     # One proposal per signal bar (or flatten minute) and direction; repeats are refused.

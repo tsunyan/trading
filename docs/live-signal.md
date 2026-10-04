@@ -28,6 +28,7 @@ uv run python -m trading.live_signal --config configs/fx.toml --directory runs/l
 | 状態 | 提案 |
 | --- | --- |
 | 終わっていない注文が台帳にある（準備済み・送信中・有効・結果不明） | 見送り（`unsettled_local_order`） |
+| 気配の状態が市場閉鎖（`CLOSE`） | 見送り（`market_closed`）。手仕舞いも同じ |
 | 保有の向きがシグナルと同じ | 見送り（`at_target`） |
 | 保有がありシグナルと違う | その向きの全建玉を建玉指定で決済（最大10建玉） |
 | 保有がなくシグナルが買い/売り | `--units`の新規成行注文 |

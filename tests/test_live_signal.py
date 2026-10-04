@@ -280,3 +280,9 @@ def test_loss_halt_holds_new_entries_but_still_proposes_closes():
         entry_halted=True,
     )
     assert closing["action"] == "close"
+
+
+def test_closed_market_holds_signals_and_flatten():
+    closed = quote(market_open=False)
+    assert run(RISING, current=closed)["reason"] == "market_closed"
+    assert flatten((long(),), current=closed)["reason"] == "market_closed"
