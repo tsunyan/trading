@@ -36,9 +36,27 @@ uv run python -m trading.live_acceptance approval --directory runs/live-orders -
 `live_setup activate --expected-revision`に渡します。コードや設定が変わると実装・設定のSHA-256が
 変わるため、承認ファイルを作り直します。
 
+## 4. 再開・claim解消・対象限定取消の承認ファイル
+
+```powershell
+uv run python -m trading.live_acceptance restart-approval --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --evidence identity=... --evidence rules=... --evidence read_acceptance=... --evidence account_baseline=... --evidence history=... --stop-review evidence/stop-review.md --hours 72 --output restart-approval.json
+uv run python -m trading.live_acceptance resolution-approval --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --client-id Buy001 --evidence identity=... --evidence rules=... --evidence read_acceptance=... --evidence account_baseline=... --evidence history=... --minutes 10 --output resolution-approval.json
+uv run python -m trading.live_acceptance cancel-approval --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --client-id Buy001 --evidence identity=... --evidence rules=... --evidence read_acceptance=... --minutes 10 --output cancel-approval.json
+```
+
+- `restart-approval`: [明示再開](order-restart.md)のcontextのSHA-256、現在のコードでの新しい`LiveApproval`、
+  停止原因を確認した資料の指紋をまとめます。出力の`confirmations`が再開に必要な確認項目です。
+- `resolution-approval`: [claim解消](order-resolution.md)のcontextのSHA-256と5種類の証拠をまとめます。
+- `cancel-approval`: [対象限定の取消](live-cancel.md)のcontextのSHA-256と3種類（本人性・業者ルール・
+  読取受入）の証拠をまとめます。
+
+解消と取消の承認は有効期間が最大10分です。直前に作って、すぐに各手続きへ渡してください。
+どのコマンドも承認ファイルを書くだけで、再開・解消・取消は行いません。
+
 ## 検証
 
 `tests/test_live_acceptance.py`で、資料ファイルのSHA-256と不正な種類・空ファイルの拒否、読取の証拠の
 保存内容・台帳を変えないこと・上書きの拒否、作った承認ファイルで登録済み台帳を有効化できること、
 期限の範囲、証拠の種類の過不足、CLIで承認ファイルを書いても有効化しないことを検証します。
 追加8試験が合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
+再開・解消・取消の承認は`tests/test_live_acceptance_checkpoints.py`で、作った承認ファイルで実際に各手続きが通ることを含めて検証します（追加6試験）。
