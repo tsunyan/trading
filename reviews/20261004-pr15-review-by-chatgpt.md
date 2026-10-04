@@ -695,3 +695,421 @@ The main remaining risk is not “the HTTP POST code retries recklessly”; it i
 ---
 
 *Review by ChatGPT (GPT-5.6 Sol)*
+
+
+---
+
+# Re-review update — 2026-10-05
+
+Re-reviewed head: `fe95326ea399a02cec3d5a1c0e03eae72f6e26fa`  
+Previous reviewed head: `7d331fcd522d61275cf50591c48de6db0d974b4e`
+
+The implementation was re-reviewed after the response documented in
+[`20261004-pr15-review-response-by-claude.md`](20261004-pr15-review-response-by-claude.md).
+
+The purpose of this pass was not only to confirm that each previous finding had a corresponding
+patch, but also to follow the new invariants through their final consumption boundary. In
+particular, builder-side validation was checked against activation/dispatch-time validation,
+and the new promotion, attestation, stale-intent, backup and `NotSent` paths were reviewed for
+new bypasses.
+
+## CI status at re-review time
+
+At `fe95326e`:
+
+- CI: **success**
+- pytest: **2531 passed, 8 skipped, 2 warnings**
+- lint: **success**
+- secrets: **success**
+- CodeQL: **success**
+
+The previous Linux failure in the Windows notification tests has been resolved.
+
+## Status of the original 31 findings
+
+Most of the original findings were addressed correctly.
+
+Confirmed improvements include:
+
+- Windows notification payload generation separated from the Windows-only submission boundary
+- generic file evidence no longer accepts the two read-evidence kinds
+- read-evidence schema, freshness and journal binding checks
+- read collection now detects journal changes during network I/O
+- frozen research `code_sha256` is checked before live strategy use
+- fixed forward-OOS criteria are mandatory for ordinary live promotion
+- judge origin is represented structurally rather than inferred from reason text
+- non-flatten live strategy cycles require a promoted candidate
+- task confirmations moved from permanent command-line flags to expiring attestations
+- order discovery has a post-GET checkpoint fence
+- live warm-up calculation no longer silently truncates large valid settings
+- exact Decimal live sizing
+- richer proposal-notification identity
+- result file is written after auxiliary history/dashboard outputs
+- bounded tail reads and process locking for cycle history
+- mutable dispatch sidecar removed; reviewed quote evidence moved into the journal
+- backup no-overwrite TOCTOU and whole-file hashing fixed
+- non-finite promotion criteria rejected
+- promotion report size bounded
+- closing-order statistics named accurately
+- rule evidence flushed/fsynced
+
+Original finding #27 (whole sealed-archive verification on watchdog reopen) was intentionally not
+changed. The documented measurement of approximately 0.14 seconds for about 100 MB of sealed
+archive bytes is acceptable for the current expected scale. This should be revisited if archives
+grow into multi-gigabyte range or watchdog latency begins approaching its operational interval.
+
+The re-review nevertheless found the following remaining or newly exposed issues.
+
+---
+
+## Re-review findings
+
+### R1. HIGH — Acceptance invariants are still enforced only by the builder, not the activation model
+
+**Files:** `src/trading/live_journal.py:175-193`, `src/trading/live_setup.py`
+
+The new `live_acceptance` builder correctly rejects duplicate evidence hashes and validates
+read-evidence documents. However, the final consumer accepts a `LiveApproval` JSON directly.
+
+`LiveApproval.coherent()` validates:
+
+- time bounds
+- evidence count
+- evidence kind set
+
+but does **not** reject duplicate evidence SHA-256 values.
+
+The current tests still construct synthetic hand-written approvals where every evidence item uses
+the same SHA-256 and successfully activate with them. This means a caller can bypass the builder
+and provide a manually constructed approval that does not satisfy the builder's evidence
+independence rule.
+
+The same issue applies to `CancelApproval` and `OrderResolutionApproval`: safety properties
+defined only in a convenience builder are not invariant at the consumption boundary.
+
+**Recommended fix**
+
+Move all structurally enforceable approval invariants into the approval models or the journal
+authorization methods themselves. At minimum, reject duplicate evidence SHA-256 values in
+`LiveApproval`, `CancelApproval` and `OrderResolutionApproval`.
+
+If actual read-evidence provenance is meant to be security-significant, the approval needs more
+than `reference + sha256`; see R2.
+
+---
+
+### R2. HIGH — Read evidence proves schema/binding, but not that the artifact was actually issued by the collector
+
+**File:** `src/trading/live_acceptance.py:42-161`
+
+`ReadEvidence` contains:
+
+- format
+- kind
+- collected_at
+- account_id
+- configuration SHA
+- account report
+- a fixed `account_identity_verified=false`
+
+This is enough to validate the document's shape and current journal binding, but it does not
+authenticate its origin.
+
+A regular collection can be copied and its `kind` changed from `read_acceptance` to
+`account_baseline`. The bytes and SHA then differ, so the duplicate-evidence check passes even
+though both artifacts came from the same broker collection.
+
+Likewise, a completely hand-constructed JSON document that exactly matches the strict schema and
+current account/config/time constraints cannot be distinguished from one produced by
+`read_evidence()`.
+
+This conflicts with the documentation statement that the two read kinds “can only be created by”
+the collection command and that hand-written JSON cannot be used.
+
+**Recommended fix**
+
+If provenance matters, persist and validate an issuance identity such as:
+
+- random `collection_id`
+- collector implementation SHA
+- journal revision/checkpoint
+- read-control instance
+- optionally an issuance record in the journal/read-control store
+
+and require the approval path to match an actually issued collection.
+
+If local operator editing is explicitly trusted, weaken the documentation instead: the current
+code validates format, binding and recency, not collector authenticity.
+
+---
+
+### R3. HIGH — Stale intent cleanup occurs after promotion/attestation validation
+
+**Files:** `src/trading/live_signal.py:264-275`, `src/trading/live_cycle.py:87-94`
+
+The stale-intent fix is correct for normal hold/maintenance outcomes, but cleanup happens only
+after the run has passed its preconditions.
+
+For `live_signal`:
+
+1. candidate/ledger pair is checked
+2. `require_live()` is called
+3. only then is `clear_intent(args.output)` executed
+
+For `LiveCycle.run()`, the promoted candidate is also checked before `clear_intent()`. At the
+CLI level, attestation validation occurs before entering `run()` at all.
+
+Therefore an old actionable `intent.json` remains when the new run fails because of:
+
+- candidate revocation
+- code SHA change
+- config mismatch
+- missing/corrupt ledger
+- expired/invalid attestation
+
+Those are specifically situations where the old strategy-generated intent should no longer be
+considered current.
+
+A separate `live_setup prepare --intent` command accepts an `OrderIntent` file without
+rechecking strategy promotion, so an operator can accidentally prepare the stale file.
+
+**Recommended fix**
+
+Invalidate/remove the previous mutable intent artifact before any validation that can prevent a
+new intent from being generated. A stronger design would use an intent envelope containing the
+candidate identity, generation checkpoint and timestamp, and validate those again at prepare time.
+
+---
+
+### R4. HIGH — Forward criteria may still be chosen after observing post-freeze market data via `mixed` runs
+
+**Files:** `src/trading/promotion.py:103-123`, `src/trading/ledger.py:_period`
+
+`set_criteria()` prevents registration only after an entry whose period is exactly
+`forward_oos` exists.
+
+However, the ledger classifies an evaluation that crosses the freeze boundary as `mixed`. Such
+a run contains post-freeze observations.
+
+This permits:
+
+1. freeze candidate
+2. run a `mixed` evaluation that reveals post-freeze outcomes
+3. inspect the result
+4. choose favorable forward criteria
+5. call `set_criteria()`, which still succeeds
+6. evaluate later `forward_oos` data
+
+`modified_after_freeze` entries can similarly expose post-freeze market behavior before criteria
+selection.
+
+That weakens the intended “criteria fixed before viewing the forward period” rule.
+
+**Recommended fix**
+
+For the same hypothesis, refuse criteria registration once any post-freeze-bearing entry has been
+recorded. A simple conservative rule is to require all existing entries to be `research` when
+criteria are fixed.
+
+---
+
+### R5. MEDIUM-HIGH — Revoke → paper → live can reuse the old pre-revoke forward-OOS pass
+
+**File:** `src/trading/promotion.py:219-258`
+
+After a live candidate is revoked, `promote(..., "paper")` is allowed.
+
+The subsequent `paper -> live` transition calls `_forward_advanced()`, which searches the
+hypothesis for any current judged `advance` entry satisfying the criteria. It does not require
+that the qualifying judgment occurred after the latest revoke or new paper promotion.
+
+Thus a candidate revoked because of live losses or changed confidence can immediately return to
+live using the exact same historical forward-OOS success:
+
+```
+revoke
+promote paper
+promote live
+```
+
+No new paper observation or forward evidence is required.
+
+**Recommended fix**
+
+Define the semantics explicitly.
+
+If revoke means only an administrative pause and old evidence remains sufficient, document that.
+If “start again from paper” is intended to require new validation, only accept a qualifying
+judgment recorded after the most recent revoke or most recent paper promotion.
+
+---
+
+### R6. MEDIUM-HIGH — Expiring attestation is checked only at cycle start
+
+**Files:** `src/trading/live_cycle.py:312-320`, `src/trading/live_attestation.py:82-93`
+
+The scheduled task may run for up to 300 seconds. The attestation is checked once before
+`LiveCycle.run()`.
+
+An attestation with one second of validity remaining can therefore be accepted, after which order
+history/account network reads may take significant time. The run can still use
+`complete-history`, `complete-account`, `account-identity`, and
+`external-writers-paused` after the declared validity has expired.
+
+**Recommended fix**
+
+Either:
+
+- revalidate the attestation immediately before each operation that consumes the confirmations, or
+- require enough remaining lifetime to cover the maximum cycle duration before starting.
+
+This is especially important for `complete-history`, whose semantics apply to the retrieval
+being promoted as complete.
+
+---
+
+### R7. MEDIUM-HIGH — Failure to write the canonical cycle result still exits successfully
+
+**File:** `src/trading/live_cycle.py:472-480`
+
+The canonical result file is now correctly written last. However, if `write_result()` raises
+`OSError`, the code only sets:
+
+```python
+result["result_written"] = False
+```
+
+in memory.
+
+If the trading cycle itself succeeded, the process still exits with status 0.
+
+The result file is the operational heartbeat consumed by the doctor. If it cannot be replaced,
+the doctor continues seeing stale state while Task Scheduler records a successful execution.
+Because scheduled runs use `pythonw.exe`, stdout is not a reliable fallback monitoring channel.
+
+**Recommended fix**
+
+Treat failure to persist the canonical result as a failed scheduled run and return non-zero, or
+provide another durable failure channel that the doctor/task monitoring explicitly consumes.
+
+---
+
+### R8. HIGH — Mutable output paths are not checked for collisions with each other or critical inputs
+
+**File:** `src/trading/live_tasks.py:96-132`
+
+Task planning validates only that output parent directories exist.
+
+It does not reject path collisions such as:
+
+- `attestation == result_output`
+- `history_output == result_output`
+- `dashboard_output == attestation`
+- `quote_output == config`
+- `quote_output == ledger`
+
+This can cause destructive behavior.
+
+For example, if `attestation == result_output`, the first run may successfully read the
+attestation and then replace the same file with the cycle result. Every later run fails because
+the attestation has disappeared.
+
+More seriously, if `quote_output == ledger`, promotion can be checked successfully before
+`write_quote()` atomically replaces the experiment SQLite ledger with quote JSON.
+
+The new stale-intent cleanup also makes an incorrectly chosen output path destructive because it
+uses unlink.
+
+**Recommended fix**
+
+At task-plan time, require every mutable artifact path to be mutually distinct and distinct from:
+
+- config
+- research ledger
+- attestation
+- live/order/read/post/sync databases and manifests
+
+Prefer placing mutable runtime artifacts under a dedicated validated directory.
+
+---
+
+### R9. MEDIUM — Submit handles pre-HTTP `NotSent` as a known outcome, but cancel does not
+
+**File:** `src/trading/private_order.py:323-386`
+
+The new submit path correctly distinguishes a final dispatch refusal that happens before
+`httpx.Client.send()`:
+
+- `_http()` raises `NotSent`
+- submit records `SUBMISSION_NOT_SENT`
+- the order is abandoned as a known “never sent” result rather than an unknown broker outcome
+
+The cancel path does not catch `NotSent`.
+
+If final cancel dispatch validation fails after `begin_cancel()` has committed
+`CANCEL_PENDING`, `NotSent` falls through to the generic error handling and calls
+`_unknown()`. The underlying live order becomes `UNKNOWN` and the live journal is halted even
+though the cancellation request is known never to have reached HTTP.
+
+This is fail-safe, but it unnecessarily destroys the distinction the new submit path was designed
+to preserve and can make emergency cancellation recovery harder.
+
+**Recommended fix**
+
+Add a cancel-side known-not-sent transition/event that records the failed local cancel claim and
+restores the pre-cancel known broker lifecycle state, while still consuming the failed
+authorization/claim so it cannot be replayed.
+
+---
+
+### R10. LOW-MEDIUM — Rules evidence is fsynced but still written directly to its final path
+
+**File:** `src/trading/live_rules.py:93-98`
+
+The original missing-fsync issue is fixed.
+
+However, `open("xb")` writes directly to the final evidence pathname. If the process or machine
+fails during the write, a partial but non-empty final file can remain.
+
+The generic operator-document evidence path later treats rules evidence as opaque bytes and can
+fingerprint that truncated file.
+
+**Recommended fix**
+
+Use the same durable publication pattern as the acceptance writer:
+
+1. create temporary file in the same directory
+2. write
+3. flush + fsync
+4. install with exclusive link/no-replace
+5. remove temporary file
+
+This ensures that a visible final evidence path always represents a completed write.
+
+---
+
+## Re-review merge assessment
+
+The PR is substantially stronger than at the first review, and the CI blocker is resolved.
+
+However, this re-review does **not** recommend merge yet because several remaining findings affect
+the meaning of the live-safety gates rather than cosmetic or performance concerns.
+
+Recommended priority:
+
+1. **R1 / R2** — make acceptance evidence guarantees true at the consumption boundary, or narrow
+   the documented threat model
+2. **R3** — invalidate stale strategy intents even when promotion/attestation checks fail
+3. **R4** — prevent post-freeze observation leakage before criteria registration
+4. **R8** — reject destructive path aliasing
+5. **R5 / R6 / R7 / R9** — make re-promotion, expiring confirmations, scheduler heartbeat failure,
+   and cancel-not-sent behavior explicit and safe
+6. **R10** — complete the evidence publication durability hardening
+
+The core POST path remains conservative: ambiguity is generally preserved rather than retried.
+The remaining concerns are primarily about whether the surrounding evidence, promotion and
+operational-artifact gates mean exactly what their documentation claims.
+
+---
+
+*Re-review by ChatGPT (GPT-5.6 Sol)*
