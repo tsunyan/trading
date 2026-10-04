@@ -220,10 +220,21 @@ def clear_intent(path):
     Path(path).unlink(missing_ok=True)
 
 
+MAX_HISTORY_DAYS = 90  # One public GET per day; keeps the hourly run well inside its limit.
+
+
 def history_days(cfg: Settings):
-    """Calendar days covering the strategy warm-up plus weekends and multi-day closures."""
-    hours_per_day = 86_400 // cfg.bar_seconds
-    return min(-(-cfg.warmup_bars // hours_per_day) + 7, 30)
+    """Calendar days covering the strategy warm-up plus weekends and multi-day closures.
+
+    Trading days are stretched by 7/5 for weekends, plus a week of slack for holidays.
+    A warm-up that does not fit the fetch budget is refused instead of silently truncated.
+    """
+    bars_per_day = 86_400 // cfg.bar_seconds
+    trading_days = -(-cfg.warmup_bars // bars_per_day)
+    days = -(-trading_days * 7 // 5) + 7
+    if days > MAX_HISTORY_DAYS:
+        raise LiveSignalError("strategy_warmup_exceeds_live_history")
+    return days
 
 
 def recent_bars(cfg: Settings, now, *, days=None, client=None):

@@ -395,7 +395,10 @@ def test_more_than_ten_lots_cannot_be_closed_in_one_order():
 
 
 def test_history_days_cover_the_warmup_and_closures():
-    assert live_signal.history_days(settings()) == 8  # 4 bars: one day plus a week of slack.
+    assert live_signal.history_days(settings()) == 9  # 4 bars: one day, weekends, a week.
     base = dict(market="fx", symbol="USD_JPY", bar_seconds=3600)
-    assert live_signal.history_days(Settings(**base, fast=24, slow=120)) == 12
-    assert live_signal.history_days(Settings(**base, fast=12, slow=1000)) == 30
+    assert live_signal.history_days(Settings(**base, fast=24, slow=120)) == 14
+    # 1000 hourly bars are 42 trading days, 59 calendar days with weekends, plus slack.
+    assert live_signal.history_days(Settings(**base, fast=12, slow=1000)) == 66
+    with pytest.raises(LiveSignalError, match="strategy_warmup_exceeds_live_history"):
+        live_signal.history_days(Settings(**base, fast=12, slow=2000))

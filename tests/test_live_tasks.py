@@ -522,3 +522,12 @@ def test_a_standing_proposal_is_noticed_once_until_it_changes(tmp_path, monkeypa
     proposal("S2026100511OB", "BUY", "OPEN", 0)  # Next bar, same standing proposal.
     proposal("S2026100512CS", "SELL", "CLOSE", 1)  # Changed: now closing a long.
     assert [a["id"].split()[0] for a in sent] == ["S2026100510OB", "S2026100512CS"]
+
+
+def test_plan_refuses_a_warmup_the_live_fetch_cannot_cover(running, tmp_path):
+    values = inputs(running, tmp_path)
+    values["config"].write_text(
+        'market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\nfast = 12\nslow = 2000\n'
+    )
+    with pytest.raises(LiveTaskError, match="strategy_warmup_exceeds_live_history"):
+        task_plan(**values)

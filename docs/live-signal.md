@@ -14,7 +14,7 @@ uv run python -m trading.live_signal --config configs/fx.toml --directory runs/l
 
 ## シグナル
 
-公開APIから戦略に必要な本数（`warmup_bars`）を日数に換算し、週末・連休に備えて7日を足した日数（最大30日）の1時間足を取得し、[ペーパー取引](paper-operations.md)と同じ規則で
+公開APIから戦略に必要な本数（`warmup_bars`）を取引日数に換算し、週末分として7/5倍し、連休に備えて7日を足した日数の1時間足を取得し（最大90日。超える設定は`strategy_warmup_exceeds_live_history`で拒否し、定期実行の計画も作りません）、[ペーパー取引](paper-operations.md)と同じ規則で
 完成した足だけを使います。足の確定は現在時刻と気配時刻の早い方で判定し、作成中の足は使いません。
 最新の確定足が`max_signal_age_seconds`より古い場合、気配が`max_quote_age_seconds`より古い・
 `max_future_quote_seconds`より未来の場合は拒否します。シグナルは`strategy.signal_direction`で、

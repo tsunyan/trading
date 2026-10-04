@@ -18,6 +18,7 @@ from trading.live_account import LiveAccountError, _valuation_tolerance
 from trading.live_attestation import LiveAttestationError
 from trading.live_attestation import require as require_attestation
 from trading.live_cycle import CYCLE_CONFIRMATIONS
+from trading.live_signal import LiveSignalError, history_days
 from trading.order_runtime import OrderRuntime
 from trading.paper_runner import scheduled_process_args
 from trading.promotion import PromotionError, require_live
@@ -70,7 +71,11 @@ def task_plan(
         Path(read_control_directory).resolve(),
         Path(config).resolve(),
     )
-    load_settings(config)  # A broken strategy config fails here, not every hour.
+    try:
+        # A broken config, or a warm-up the live fetch cannot cover, fails here, not hourly.
+        history_days(load_settings(config))
+    except LiveSignalError as error:
+        raise LiveTaskError(str(error)) from None
     # Only a registered original journal (sync/watchdog prerequisites) can be scheduled.
     journal = OrderRuntime(directory, read_control_directory, scope).journal
     binding = journal.credential_binding()
