@@ -272,6 +272,12 @@ def main(argv=None, *, send=None):
             if notify("live_cycle_approval_expiring", hours, send=send):
                 result["approval_notice_for"] = expiry.isoformat()
         decision = result.get("decision") or {}
+        # Each order reaches a final state once, so these notices never repeat.
+        for order in result.get("reconciled_orders") or []:
+            if order["state"] in {"FILLED", "CANCELED", "EXPIRED"}:
+                notify(
+                    "live_cycle_order_settled", f"{order['client_id']} {order['state']}", send=send
+                )
         waiting = result.get("waiting_prepared") or []
         if waiting and previous.get("prepared_notice_for") == waiting[0]:
             result["prepared_notice_for"] = waiting[0]

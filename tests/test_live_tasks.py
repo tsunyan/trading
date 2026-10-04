@@ -338,3 +338,19 @@ def test_unsent_prepared_order_is_noticed_once_per_order(tmp_path, monkeypatch):
         ("live_cycle_prepared_waiting", "S2026100510OB"),
         ("live_cycle_prepared_waiting", "S2026100511CS"),
     ]
+
+
+def test_settled_orders_are_noticed_with_their_final_state(tmp_path, monkeypatch):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    FakeCycle.outcome = {
+        "decision": {"action": "hold", "intent": None},
+        "reconciled_orders": [
+            {"client_id": "S2026100510OB", "state": "FILLED"},
+            {"client_id": "L001", "state": "WORKING"},
+        ],
+        "orders_sent": False,
+    }
+    sent = []
+    live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+    assert sent == [{"kind": "live_cycle_order_settled", "id": "S2026100510OB FILLED"}]
