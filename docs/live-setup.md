@@ -100,7 +100,7 @@ uv run python -m trading.live_setup backup --directory runs/live-orders --read-c
 ## 状態確認と停止
 
 送信を止めている条件をまとめて確認するには[送信前の状態診断](live-doctor.md)、損益とリスクの余裕は
-[損益レポート](live-report.md)を使います。
+[損益レポート](live-report.md)、まとめて見るには[状態ページ](live-dashboard.md)を使います。
 
 ```powershell
 uv run python -m trading.live_setup status --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope>
