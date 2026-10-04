@@ -105,3 +105,38 @@ def test_cli_checks_a_config_and_saves_immutable_evidence(tmp_path, monkeypatch,
     with pytest.raises(SystemExit):
         live_rules.main(["check"])
     assert "config_or_journal_required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    [
+        (httpx.Response(503), "unexpected_public_symbols_status"),
+        (
+            httpx.Response(200, content=b"<html>", headers={"content-type": "text/html"}),
+            "expected_public_symbols_json",
+        ),
+        (
+            httpx.Response(
+                200,
+                content=b"x" * (live_rules.MAX_SYMBOLS_BYTES + 1),
+                headers={"content-type": "application/json"},
+            ),
+            "public_symbols_too_large",
+        ),
+    ],
+)
+def test_fetch_refusals(response, reason):
+    with pytest.raises(LiveRulesError, match=reason):
+        fetch_rules(transport=httpx.MockTransport(lambda request: response))
+
+
+def test_transport_error_and_slow_body():
+    def down(request):
+        raise httpx.ConnectError("down")
+
+    with pytest.raises(LiveRulesError, match="public_symbols_unavailable"):
+        fetch_rules(transport=httpx.MockTransport(down))
+    ticks = iter([0, 6])
+    ok = httpx.Response(200, content=body(row()), headers={"content-type": "application/json"})
+    with pytest.raises(LiveRulesError, match="public_symbols_deadline_exceeded"):
+        fetch_rules(transport=httpx.MockTransport(lambda r: ok), monotonic=lambda: next(ticks))
