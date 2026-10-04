@@ -44,6 +44,8 @@
    [送信前の同期・監視検査](live-operations.md)）。`private_sync register-live-orders`で
    台帳の注文を同期の既知注文へ登録します（[注文登録](live-order-catalog.md)）。
 4. 同期を開始し、`private_operations watchdog`を定期実行します。照合成功と監視の確認を待ちます。
+   `install-private-watchdog.ps1 -SyncDurationSeconds 86400`で、監視と同期の自動続行（正常終了からだけ）を
+   Windowsタスクにできます（[定期監視](private-operations.md)）。
 5. 発注用キーを保存します（[発注用キー](order-runtime.md)）。
 
    ```powershell
@@ -74,6 +76,7 @@
     次の注文の前に[口座証拠を更新](live-account.md)します。
 
 手順6〜9は[運用サイクル](live-cycle.md)の1回のコマンドで行えます。送信だけは別のコマンドです。
+毎時の提案と通知は[運用サイクルの定期実行](live-tasks.md)、戦略の限定は[昇格管理](promotion.md)を使います。
 
 ## 未送信の注文の破棄
 
