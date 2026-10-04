@@ -6,6 +6,7 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 採用方針と根拠は [docs/architecture.md](docs/architecture.md)、現在の不足機能と実装順は
 [docs/roadmap.md](docs/roadmap.md) を参照してください。
 USD/JPYの実用化に向けた進行中の作業は [docs/fx-practical-plan.md](docs/fx-practical-plan.md)、
+最新の完了項目と残件は [docs/remaining-work.md](docs/remaining-work.md)、
 定期観測・watchdog・Windows通知の使い方は [docs/paper-operations.md](docs/paper-operations.md) を参照してください。
 
 ## 実装済みの範囲

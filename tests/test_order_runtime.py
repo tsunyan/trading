@@ -2,6 +2,7 @@
 
 import ctypes
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -276,6 +277,43 @@ def test_changed_review_refuses_before_reading_credentials_or_claiming(setup, ch
     assert backend.reads == [] and calls == []
     assert live[3].snapshot() == before and live[2].snapshot()["claim"] is None
     assert live[2].snapshot()["revision"] == posts["revision"]
+
+
+@pytest.mark.parametrize("stage", ["before_credentials", "during_credentials"])
+def test_low_capacity_refuses_reviewed_dispatch_before_http(setup, monkeypatch, stage):
+    _, live, _, order, _ = setup
+    backend, vault, reference = stored(setup)
+    run = runtime(setup)
+    current = quote(live[0].now)
+    expected = run.context(order.client_id, quote=current)["checkpoint_sha256"]
+    low = stage == "before_credentials"
+    monkeypatch.setattr(
+        "trading.storage_capacity.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=512 * 2**20 if low else 2**31),
+    )
+    original = backend.read
+
+    def read(ref):
+        nonlocal low
+        low = True
+        return original(ref)
+
+    backend.read = read
+    before = live[3].snapshot()
+    posts = live[2].snapshot()
+    calls = []
+    with pytest.raises(OrderRuntimeError):
+        run.dispatch(
+            order.client_id,
+            expected_sha256=expected,
+            credential_reference=reference,
+            quote=current,
+            order_permission_confirmed=True,
+            vault=vault,
+            transport=transport(calls, live),
+        )
+    assert backend.reads == ([] if stage == "before_credentials" else [reference])
+    assert calls == [] and live[3].snapshot() == before and live[2].snapshot() == posts
 
 
 def test_stop_arriving_during_credential_read_is_rechecked_before_any_client(setup):

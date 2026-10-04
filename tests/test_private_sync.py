@@ -903,5 +903,5 @@ def test_cli_review_delivery_requires_its_confirmation_and_an_uncertain_segment(
     # Nothing was captured, so there is no uncertainty to review.
     with pytest.raises(SystemExit):
         main([*args, "--delivery-uncertainty-reviewed"])
-    assert "Private sync failed" in capsys.readouterr().err
+    assert "reason=journal_review_not_required" in capsys.readouterr().err
     assert workspace.control.snapshot() == state and backend.reads == []

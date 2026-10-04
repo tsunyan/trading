@@ -39,6 +39,7 @@ from trading.live_operations import LiveOperations, LiveOperationsError, Operati
 from trading.order_journal import SCHEMA, OrderBlocked, OrderJournal
 from trading.order_receipts import CancellationReceipt, SubmissionReceipt
 from trading.post_control import PersistentPostLimiter
+from trading.storage_capacity import StorageCapacityError, require_capacity
 from trading.storage_init import new_storage_directory
 
 MODE = "live-execution-v1"
@@ -113,6 +114,7 @@ CODE_FILES = (
     "private_stream_token.py",
     "read_control.py",
     "storage_init.py",
+    "storage_capacity.py",
     "live_operations.py",
     "private_operations.py",
     "private_sync.py",
@@ -833,7 +835,17 @@ class LiveOrderJournal(OrderJournal):
                 "complete": False,
             }
 
+    def require_storage_capacity(self):
+        """Check each original dispatch store, including separate mounted volumes."""
+        try:
+            require_capacity(
+                (self.path.parent, self.posts.path.parent, self.posts.reads.path.parent)
+            )
+        except StorageCapacityError as error:
+            raise LiveOrderError(str(error)) from None
+
     def _authorize(self, conn, now):
+        self.require_storage_capacity()
         state = self._live_state(conn)
         if (
             state.phase != "ENABLED"
@@ -2005,6 +2017,7 @@ class LiveOrderJournal(OrderJournal):
     def _authorize_cancel(self, conn, client_id, now, authorization_sha256, *, claimed=False):
         if authorization_sha256 is None:
             return self._authorize(conn, now)
+        self.require_storage_capacity()
         saved = conn.execute(
             "SELECT id,payload_json FROM events WHERE client_id=? AND kind='CANCEL_AUTHORIZED' "
             "ORDER BY id DESC LIMIT 1",

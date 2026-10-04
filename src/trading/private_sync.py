@@ -19,6 +19,7 @@ from trading.account_reader import AccountReader
 from trading.broker_contracts import Contract
 from trading.credential_store import CredentialVault
 from trading.event_capture import JournaledEventCapture
+from trading.event_journal import JournalError
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
@@ -892,7 +893,9 @@ def main(argv=None):
     except Exception as error:
         # These types carry fixed local codes only; anything else stays generic.
         reason = str(error)
-        known = isinstance(error, (PrivateSyncError, StreamControlError, SupervisorError))
+        known = isinstance(
+            error, (PrivateSyncError, StreamControlError, SupervisorError, JournalError)
+        )
         suffix = f" reason={reason}" if known and re.fullmatch(r"[a-z0-9_]{1,64}", reason) else ""
         parser.exit(2, f"Private sync failed; inspect local control state.{suffix}\n")
     finally:
