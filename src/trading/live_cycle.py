@@ -358,7 +358,15 @@ def main(argv=None, *, send=None):
                 for key in ("client_id", "side", "effect", "units")
                 if intent.get(key) is not None
             )
-            result["notified"] = notify("live_cycle_proposal", reference or "proposal", send=send)
+            # The same standing proposal (side, effect, holdings) is announced once, not hourly.
+            key = f"{intent.get('side')}:{intent.get('effect')}:{decision.get('current')}"
+            if previous.get("proposal_notice_for") == key:
+                result["proposal_notice_for"] = key
+            elif notify("live_cycle_proposal", reference or "proposal", send=send):
+                result["notified"] = True
+                result["proposal_notice_for"] = key
+            else:
+                result["notified"] = False
     if args.result_output is not None:
         try:
             write_result(result, args.result_output)

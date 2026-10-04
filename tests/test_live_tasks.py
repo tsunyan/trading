@@ -454,3 +454,25 @@ def test_proposal_notice_names_side_effect_and_units(tmp_path, monkeypatch):
     sent = []
     live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
     assert sent == [{"kind": "live_cycle_proposal", "id": "S2026100510OB BUY OPEN 1000"}]
+
+
+def test_a_standing_proposal_is_noticed_once_until_it_changes(tmp_path, monkeypatch):
+    (tmp_path / "fx.toml").write_text('market = "fx"\nsymbol = "USD_JPY"\nbar_seconds = 3600\n')
+    monkeypatch.setattr(live_cycle, "LiveCycle", FakeCycle)
+    sent = []
+
+    def proposal(client_id, side, effect, current):
+        FakeCycle.outcome = {
+            "decision": {
+                "action": "open" if effect == "OPEN" else "close",
+                "current": current,
+                "intent": {"client_id": client_id, "side": side, "effect": effect, "units": 1000},
+            },
+            "orders_sent": False,
+        }
+        live_cycle.main(cycle_args(tmp_path), send=lambda alert, source: sent.append(alert))
+
+    proposal("S2026100510OB", "BUY", "OPEN", 0)
+    proposal("S2026100511OB", "BUY", "OPEN", 0)  # Next bar, same standing proposal.
+    proposal("S2026100512CS", "SELL", "CLOSE", 1)  # Changed: now closing a long.
+    assert [a["id"].split()[0] for a in sent] == ["S2026100510OB", "S2026100512CS"]
