@@ -392,3 +392,10 @@ def test_more_than_ten_lots_cannot_be_closed_in_one_order():
     lots = tuple(long(pid=400 + i) for i in range(11))
     with pytest.raises(LiveSignalError, match="too_many_positions_to_close"):
         run(FALLING, positions=lots)
+
+
+def test_history_days_cover_the_warmup_and_closures():
+    assert live_signal.history_days(settings()) == 8  # 4 bars: one day plus a week of slack.
+    base = dict(market="fx", symbol="USD_JPY", bar_seconds=3600)
+    assert live_signal.history_days(Settings(**base, fast=24, slow=120)) == 12
+    assert live_signal.history_days(Settings(**base, fast=12, slow=1000)) == 30

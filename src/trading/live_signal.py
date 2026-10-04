@@ -215,7 +215,14 @@ def write_intent(intent, path):
         raise
 
 
-def recent_bars(cfg: Settings, now, *, days=10, client=None):
+def history_days(cfg: Settings):
+    """Calendar days covering the strategy warm-up plus weekends and multi-day closures."""
+    hours_per_day = 86_400 // cfg.bar_seconds
+    return min(-(-cfg.warmup_bars // hours_per_day) + 7, 30)
+
+
+def recent_bars(cfg: Settings, now, *, days=None, client=None):
+    days = history_days(cfg) if days is None else days
     with client or httpx.Client(follow_redirects=False, trust_env=False) as http:
         end = now.date()
         return GmoPublic(http).candles(cfg, end - timedelta(days=days), end, now)
