@@ -226,7 +226,9 @@ def test_permission_checked_after_pacing_without_consuming_cancel_attempt(
 
 
 @pytest.mark.parametrize("change", ["expiry", "halt", "code"])
-def test_permission_final_gate_failure_retains_both_claims(setup, monkeypatch, change):
+def test_permission_final_gate_failure_closes_the_claim_and_spends_the_permission(
+    setup, monkeypatch, change
+):
     clock, _, posts, journal = setup
     order, _ = working(setup)
     journal.halt()
@@ -245,11 +247,16 @@ def test_permission_final_gate_failure_retains_both_claims(setup, monkeypatch, c
 
     monkeypatch.setattr(journal, "begin_cancel", begin)
     with client(setup, lambda _: pytest.fail("final gate refusal HTTP")) as sender:
-        with pytest.raises(OrderTransportError):
+        with pytest.raises(OrderTransportError, match="cancel_not_sent:"):
             sender.cancel(order.client_id, authorization_sha256=token)
-    assert events(journal, "CANCEL_CLAIMED")
-    assert posts.snapshot()["claim"] and posts.snapshot()["phase"] == "STOPPED"
-    assert journal.snapshot()["orders"][0]["state"] == "UNKNOWN"
+    assert events(journal, "CANCEL_CLAIMED") and events(journal, "CANCEL_NOT_SENT")
+    assert posts.snapshot()["claim"] is None and posts.snapshot()["phase"] == "READY"
+    assert journal.snapshot()["orders"][0]["state"] == "WORKING"
+    monkeypatch.undo()
+    # The permission was spent by its claim; the same token can never cancel again.
+    with client(setup, lambda _: pytest.fail("replayed permission HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="cancel_preflight_refused"):
+            sender.cancel(order.client_id, authorization_sha256=token)
 
 
 @pytest.mark.parametrize("change", ["expiry", "halt", "code"])

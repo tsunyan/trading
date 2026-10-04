@@ -341,6 +341,7 @@ class PrivateOrderClient:
             except Exception:
                 raise OrderTransportError("cancel_preflight_refused") from None
             entered = claimed = refused = False
+            not_sent = None
             try:
                 with self.posts.operation(
                     "cancel", request_sha256=hashlib.sha256(plan.body).hexdigest()
@@ -361,15 +362,23 @@ class PrivateOrderClient:
                         claimed = True
                         if current != plan:
                             raise OrderTransportError("cancel_plan_changed")
-                        receipt = self._http(
-                            client_id, current, cancellation_authorization=authorization_sha256
-                        )
-                        self.journal.acknowledge_cancel(receipt)
+                        try:
+                            receipt = self._http(
+                                client_id, current, cancellation_authorization=authorization_sha256
+                            )
+                        except NotSent as error:
+                            # Provably never sent: the order is still as its evidence shows.
+                            self.journal.record_cancel_not_sent(client_id, current, error.reason)
+                            not_sent = error.reason
+                        else:
+                            self.journal.acknowledge_cancel(receipt)
                 if refused:
                     raise OrderTransportError("cancel_preflight_refused")
+                if not_sent is not None:
+                    raise OrderTransportError(f"cancel_not_sent:{not_sent}")
                 return receipt
             except OrderTransportError:
-                if entered and not refused:
+                if entered and not refused and not_sent is None:
                     self._unknown(client_id)
                 raise
             except PostControlError:

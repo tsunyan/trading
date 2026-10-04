@@ -448,9 +448,7 @@ def test_real_get_report_can_cancel_without_promoting_account_or_clearing_entry_
     assert journal.snapshot()["account_guard"] == proof and proof["entry_halted"]
 
 
-def test_code_change_at_final_cancel_gate_sends_no_http_and_keeps_consumed_claim(
-    setup, monkeypatch
-):
+def test_code_change_at_final_cancel_gate_sends_no_http_and_closes_the_claim(setup, monkeypatch):
     clock, _, posts, journal = setup
     order, _ = working(setup)
     original = journal.begin_cancel
@@ -462,10 +460,15 @@ def test_code_change_at_final_cancel_gate_sends_no_http_and_keeps_consumed_claim
 
     monkeypatch.setattr(journal, "begin_cancel", changed)
     with client(setup, lambda _: pytest.fail("HTTP after code drift")) as sender:
-        with pytest.raises(OrderTransportError):
+        with pytest.raises(OrderTransportError, match="cancel_not_sent:"):
             sender.cancel(order.client_id)
-    assert posts.snapshot()["operation"] == "cancel" and posts.snapshot()["claim"]
-    assert journal.snapshot()["orders"][0]["state"] == "UNKNOWN" and journal.snapshot()["halted"]
+    # Refused before the HTTP send: the order is still working at the broker as its
+    # evidence shows; the consumed claim stays in the history, closed as never sent.
+    assert posts.snapshot()["phase"] == "READY" and posts.snapshot()["claim"] is None
+    saved = journal.snapshot()
+    assert saved["orders"][0]["state"] == "WORKING" and not saved["halted"]
+    kinds = [e["kind"] for e in saved["events"] if e["kind"].startswith("CANCEL_")]
+    assert kinds == ["CANCEL_CLAIMED", "CANCEL_NOT_SENT"]
 
 
 @pytest.mark.parametrize("failure", ["timeout", "empty"])
@@ -692,3 +695,58 @@ sender.cancel("Buy001")
         journal.snapshot()["halted"]
         and journal.snapshot()["orders"][0]["state"] == "CANCEL_PENDING"
     )
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_a_cancel_refused_before_send_can_be_claimed_and_sent_again(setup, monkeypatch, partial):
+    clock, _, posts, journal = setup
+    order, _ = working(setup, partial=partial)
+    original = journal.validate_cancel_dispatch
+
+    def refuse(*args, **kwargs):
+        raise LiveOrderError("live_sync_owner_missing")
+
+    monkeypatch.setattr(journal, "validate_cancel_dispatch", refuse)
+    with client(setup, lambda _: pytest.fail("refused cancel HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="cancel_not_sent:live_sync_owner_missing"):
+            sender.cancel(order.client_id)
+    assert journal.snapshot()["orders"][0]["state"] == ("PARTIAL" if partial else "WORKING")
+    monkeypatch.setattr(journal, "validate_cancel_dispatch", original)
+    calls = []
+
+    def accepted(request):
+        calls.append(request)
+        return httpx.Response(200, json=envelope(clock))
+
+    with client(setup, accepted) as sender:
+        sender.cancel(order.client_id)
+        with pytest.raises(OrderTransportError):
+            sender.cancel(order.client_id)  # The sent claim stays open: never twice.
+    assert len(calls) == 1
+    kinds = [e["kind"] for e in journal.snapshot()["events"] if e["kind"].startswith("CANCEL_")]
+    assert kinds == ["CANCEL_CLAIMED", "CANCEL_NOT_SENT", "CANCEL_CLAIMED", "CANCEL_RECEIPT"]
+    assert posts.snapshot()["phase"] == "READY"
+
+
+def test_tampered_cancel_claim_history_is_refused(setup, monkeypatch):
+    import sqlite3
+
+    clock, _, posts, journal = setup
+    order, _ = working(setup)
+    monkeypatch.setattr(
+        journal,
+        "validate_cancel_dispatch",
+        lambda *a, **k: (_ for _ in ()).throw(LiveOrderError("live_orders_not_enabled")),
+    )
+    with client(setup, lambda _: pytest.fail("HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="cancel_not_sent:"):
+            sender.cancel(order.client_id)
+    monkeypatch.undo()
+    with sqlite3.connect(journal.path) as conn:
+        conn.execute(
+            'UPDATE events SET payload_json=\'{"reason":"x","state":"FILLED"}\' '
+            "WHERE kind='CANCEL_NOT_SENT'"
+        )
+    with client(setup, lambda _: pytest.fail("HTTP")) as sender:
+        with pytest.raises(OrderTransportError, match="cancel_preflight_refused"):
+            sender.cancel(order.client_id)

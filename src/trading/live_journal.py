@@ -308,6 +308,15 @@ def _not_sent_payload(payload):
     )
 
 
+def _cancel_not_sent_payload(payload):
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"reason", "state"}
+        and _not_sent_payload({"reason": payload["reason"]})
+        and payload["state"] in {"WORKING", "PARTIAL"}
+    )
+
+
 def _submitting_payload(payload):
     """Empty (journals before quotes were recorded) or exactly one valid reviewed quote."""
     if payload == {}:
@@ -1260,13 +1269,9 @@ class LiveOrderJournal(OrderJournal):
                 raise LiveOrderError("order_recovery_claim_mismatch")
             plan = cancel_request(evidence.root_order_id)
             operation = "cancel"
-            claims = conn.execute(
-                "SELECT payload_json FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'",
-                (client_id,),
-            ).fetchall()
-            if len(claims) != 1:
+            saved = self._open_cancel_claim(conn, client_id)
+            if saved is None:
                 raise LiveOrderError("order_recovery_claim_mismatch")
-            saved = json.loads(claims[0][0])
             if (
                 not isinstance(saved, dict)
                 or set(saved)
@@ -1632,12 +1637,7 @@ class LiveOrderJournal(OrderJournal):
         receipt = self._receipt(conn, client_id)
         if receipt is not None:
             self._check_receipt_evidence(receipt, evidence)
-        if (
-            not claimed
-            and conn.execute(
-                "SELECT 1 FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'", (client_id,)
-            ).fetchone()
-        ):
+        if not claimed and self._open_cancel_claim(conn, client_id) is not None:
             raise LiveOrderError("live_cancel_already_claimed")
         return cancel_request(evidence.root_order_id), evidence
 
@@ -1771,11 +1771,32 @@ class LiveOrderJournal(OrderJournal):
             )
             return plan
 
-    def _cancel_claim(self, conn, client_id, plan, evidence):
+    @staticmethod
+    def _open_cancel_claim(conn, client_id):
+        """The cancel claim not yet closed as never sent, if any.
+
+        Claims and never-sent records must alternate, starting with a claim; a claim that
+        was (or may have been) sent stays open forever and refuses another cancel.
+        """
         rows = conn.execute(
-            "SELECT payload_json FROM events WHERE client_id=? AND kind='CANCEL_CLAIMED'",
+            "SELECT kind,payload_json FROM events WHERE client_id=? "
+            "AND kind IN ('CANCEL_CLAIMED','CANCEL_NOT_SENT') ORDER BY id",
             (client_id,),
         ).fetchall()
+        expected = "CANCEL_CLAIMED"
+        for kind, payload in rows:
+            if kind != expected or (
+                kind == "CANCEL_NOT_SENT" and not _cancel_not_sent_payload(json.loads(payload))
+            ):
+                raise LiveOrderError("live_cancel_claim_integrity_failed")
+            expected = "CANCEL_NOT_SENT" if kind == "CANCEL_CLAIMED" else "CANCEL_CLAIMED"
+        if rows and rows[-1][0] == "CANCEL_CLAIMED":
+            return json.loads(rows[-1][1])
+        return None
+
+    def _cancel_claim(self, conn, client_id, plan, evidence):
+        saved = self._open_cancel_claim(conn, client_id)
+        rows = [] if saved is None else [(json.dumps(saved),)]
         post = self.posts.snapshot()
         expected = {
             "post_claim": post["claim"],
@@ -1817,6 +1838,25 @@ class LiveOrderJournal(OrderJournal):
         if receipt.client_id != client_id:
             raise LiveOrderError("live_cancel_receipt_conflict")
         return receipt
+
+    def record_cancel_not_sent(self, client_id, plan, reason):
+        """Close a cancel claim whose request provably never reached HTTP send.
+
+        The order returns to the working state its evidence shows. The claim stays in the
+        history and its authorization is spent (the event head moved), so a further cancel
+        needs a new authorization and claim.
+        """
+        if not isinstance(reason, str) or not _not_sent_payload({"reason": reason}):
+            reason = "dispatch_refused"
+        with self._mutation(), self._transaction() as conn:
+            current, evidence = self._cancel_plan(conn, client_id, claimed=True)
+            if current != plan or self._cancel_receipt(conn, client_id) is not None:
+                raise LiveOrderError("live_cancel_not_sent_claim_mismatch")
+            self._cancel_claim(conn, client_id, plan, evidence)
+            self.posts.require_operation("cancel", hashlib.sha256(plan.body).hexdigest())
+            state = "PARTIAL" if evidence.executions else "WORKING"
+            conn.execute("UPDATE orders SET state=? WHERE client_id=?", (state, client_id))
+            self._event(conn, client_id, "CANCEL_NOT_SENT", {"reason": reason, "state": state})
 
     def acknowledge_cancel(self, receipt):
         receipt = CancellationReceipt.model_validate(receipt.model_dump())
