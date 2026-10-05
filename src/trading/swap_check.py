@@ -11,7 +11,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from trading.account_reader import AccountReadReport
+from trading.account_reader import POSITIONS, AccountReadReport
 from trading.config import Settings
 from trading.swap import read_swap_schedule, require_swap_coverage, swap_credit_between
 
@@ -27,7 +27,12 @@ def swap_check(report: AccountReadReport, schedule: pd.DataFrame, *, tolerance_j
     tolerance = Decimal(str(tolerance_jpy))
     if not tolerance.is_finite() or tolerance < 0:
         raise ValueError("invalid_swap_tolerance")
-    observed = pd.Timestamp(min(o.response_at for o in report.observations))
+    # The returned positions come from the second sweep. Its positions read, not the
+    # first assets read, is when their totalSwap was observed (rollover boundary).
+    positions_read = [o.response_at for o in report.observations if o.path == POSITIONS]
+    if not positions_read:
+        raise ValueError("positions_observation_required")
+    observed = pd.Timestamp(max(positions_read))
     rows, uncovered = [], []
     for position in report.positions:
         opened = pd.Timestamp(position.timestamp)

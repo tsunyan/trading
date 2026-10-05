@@ -1,13 +1,13 @@
 """Independent swap recalculation for held positions, reported and never enforced."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
 import pytest
-from test_live_account import report
+from test_live_account import report as account_report
 
-from trading.account_reader import HeldPosition
+from trading.account_reader import POSITIONS, HeldPosition, Observation
 from trading.gmo import rollover_time
 from trading.swap_check import swap_check
 
@@ -29,6 +29,24 @@ def schedule(days=("2026-09-28", "2026-09-29", "2026-09-30"), long="150", short=
     frame = pd.DataFrame(rows)
     frame["timestamp"] = pd.to_datetime(frame.timestamp, utc=True)
     return frame
+
+
+def observation(path, when):
+    return Observation(path=path, query=(), response_at=when, received_at=when, sha256="a" * 64)
+
+
+def report(when, *, first_assets=None, **values):
+    """Two sweeps; the second sweep's positions read is at `when`."""
+    first_assets = when - timedelta(seconds=2) if first_assets is None else first_assets
+    reads = (
+        observation("/v1/account/assets", first_assets),
+        observation(POSITIONS, when - timedelta(seconds=1)),
+        observation("/v1/account/assets", when - timedelta(seconds=1)),
+        observation("/v1/account/assets", when - timedelta(seconds=1)),
+        observation(POSITIONS, when),
+        observation("/v1/account/assets", when),
+    )
+    return account_report(when, **values).model_copy(update={"observations": reads})
 
 
 def held(position_id=401, side="BUY", units=2000, swap="90"):
@@ -72,3 +90,22 @@ def test_a_schedule_with_a_missing_rollover_is_not_treated_as_zero_carry(cfg):
 def test_tolerance_must_be_finite_and_non_negative(tolerance):
     with pytest.raises(ValueError, match="invalid_swap_tolerance"):
         swap_check(report(OBSERVED), schedule(), tolerance_jpy=tolerance)
+
+
+def test_a_collection_that_starts_before_the_rollover_uses_the_positions_read(cfg):
+    rollover = pd.Timestamp(rollover_time(pd.Timestamp("2026-10-01").date())).to_pydatetime()
+    # First assets read before the rollover; both positions reads already include it.
+    result = swap_check(
+        report(
+            rollover + timedelta(seconds=30),
+            first_assets=rollover - timedelta(seconds=1),
+            positions=(held(swap="120"),),
+        ),
+        schedule(days=("2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01")),
+    )
+    assert result["outside_tolerance"] == [] and result["checked"] == 1
+
+
+def test_a_report_without_a_positions_read_is_refused():
+    with pytest.raises(ValueError, match="positions_observation_required"):
+        swap_check(account_report(OBSERVED), schedule())

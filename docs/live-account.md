@@ -85,6 +85,8 @@ claim解消とその後の新しい口座観測・再開は[取消の結果不�
 2026-10-05追加。`--swap-schedule`に`fetch-swap`で取得した公式スワップ履歴を指定すると、
 読み取った建玉ごとに、建玉時刻より後で観測時刻までのロールオーバー（06:00 JST）の付与額を合計し、
 業者が返す建玉ごとの累計スワップと比べます。結果は出力の`swap_check`に出ます。
+観測時刻は、採用した2回目の取得で建玉を読んだ時刻です。取得の開始がロールオーバー前でも、
+建玉を読んだ時点で付与済みなら期待値に含めます。
 
 ```powershell
 uv run python -m trading.live_account --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --credential-reference <read_only_reference> --swap-schedule data/usdjpy_swap.csv --swap-tolerance 1 --confirm ...
