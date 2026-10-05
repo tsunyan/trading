@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
@@ -92,6 +92,10 @@ RESOLUTION_CONFIRMATIONS = frozenset(
 )
 # A still-active accepted order is confirmed as such, never as a terminal one.
 ACTIVE_RESOLUTION_CONFIRMATIONS = (RESOLUTION_CONFIRMATIONS - {"terminal-order"}) | {"active-order"}
+ACTIVE_CANCEL_RESOLUTION_CONFIRMATIONS = ACTIVE_RESOLUTION_CONFIRMATIONS | {
+    "cancel-outcome-unknown",
+    "no-repeat-cancel",
+}
 # An unknown submission with no broker trace: the account shows no effect of it at all.
 ABSENCE_RESOLUTION_CONFIRMATIONS = (RESOLUTION_CONFIRMATIONS - {"terminal-order"}) | {
     "order-absent"
@@ -476,6 +480,28 @@ class LiveOrderJournal(OrderJournal):
                     raise ValueError
             # An absent order is ABANDONED only by a POST-committed, approved resolution.
             resolved_ids = {r["reference"]["prepared_id"]: r["reference"] for r in resolutions}
+            completed_cancels = set()
+            for item in conn.execute(
+                "SELECT client_id,payload_json FROM events WHERE kind='ACTIVE_CANCEL_RESOLVED'"
+            ):
+                done = json.loads(item["payload_json"])
+                reference = resolved_ids.get(done["prepared_id"])
+                prepared = conn.execute(
+                    "SELECT payload_json FROM events WHERE id=?", (done["prepared_id"],)
+                ).fetchone()
+                payload = json.loads(prepared[0]) if prepared is not None else {}
+                context = payload.get("context", {})
+                if (
+                    reference is None
+                    or reference["client_id"] != item["client_id"]
+                    or context.get("cancel_outcome_unknown") is not True
+                    or payload.get("post", {}).get("operation") != "cancel"
+                    or done != {**reference, "active_state": context.get("active_state")}
+                    or done["prepared_id"] in completed_cancels
+                    or self._open_cancel_claim(conn, item["client_id"]) is None
+                ):
+                    raise ValueError
+                completed_cancels.add(done["prepared_id"])
             for item in conn.execute(
                 "SELECT client_id,payload_json FROM events WHERE kind='ORDER_ABSENCE_RESOLVED'"
             ):
@@ -525,12 +551,11 @@ class LiveOrderJournal(OrderJournal):
 
     @contextmanager
     def _mutation(self):
-        with self._lock:
-            if self.posts.owns_operation():
-                yield
-            else:
-                with self.posts._ownership():
-                    yield
+        with self._lock, nullcontext() if self.posts.owns_operation() else self.posts._ownership():
+            with self._transaction() as conn:
+                if self._pending_active_cancel(conn) is not None:
+                    raise LiveOrderError("active_cancel_resolution_incomplete")
+            yield
 
     def _write_live(self, conn, state, **changes):
         updated = LiveState.model_validate(
@@ -615,6 +640,8 @@ class LiveOrderJournal(OrderJournal):
 
     def _restart_context(self, conn, now, *, event_id=None):
         state = self._live_state(conn)
+        if self._pending_active_cancel(conn) is not None:
+            raise LiveOrderError("active_cancel_resolution_incomplete")
         post = {
             k: v
             for k, v in self.posts.snapshot().items()
@@ -1475,7 +1502,7 @@ class LiveOrderJournal(OrderJournal):
                 "complete": False,
             }
 
-    def _resolution_context(self, conn, client_id, now, *, event_id=None):
+    def _resolution_context(self, conn, client_id, now, *, event_id=None, active_cancel=False):
         recovery = self._order_recovery_context(conn, client_id, event_id=event_id)
         state = self._live_state(conn)
         row = self._row(conn, client_id)
@@ -1485,12 +1512,18 @@ class LiveOrderJournal(OrderJournal):
         ):
             raise LiveOrderError("order_resolution_stop_required")
         terminal = row["state"] in {"FILLED", "CANCELED", "EXPIRED"}
-        # An accepted, still-active order resolves only a submission claim. A cancel
-        # attempt whose order is still active is not known to have failed or succeeded.
-        active = row["state"] in {"WORKING", "PARTIAL"} and recovery["post_operation"] in {
-            "order",
-            "close_order",
-        }
+        # An active submission uses the normal account gate. An uncertain cancel
+        # needs its separate observation and review; its broker outcome stays unknown.
+        active = (
+            row["state"] in {"WORKING", "PARTIAL"}
+            and recovery["post_operation"] in {"order", "close_order"}
+        ) or (
+            active_cancel
+            and row["state"] in {"WORKING", "PARTIAL", "CANCEL_PENDING"}
+            and recovery["post_operation"] == "cancel"
+        )
+        if active_cancel and not (active and recovery["post_operation"] == "cancel"):
+            raise LiveOrderError("active_cancel_evidence_required")
         if not (terminal or active) or not row["evidence_json"]:
             raise LiveOrderError("order_resolution_terminal_evidence_required")
         evidence = OrderEvidence.model_validate_json(row["evidence_json"])
@@ -1512,7 +1545,10 @@ class LiveOrderJournal(OrderJournal):
         )
         if (
             not evidence.executions_complete
+            or active_cancel
+            and expected not in {"WORKING", "PARTIAL"}
             or row["state"] != expected
+            and not (active_cancel and row["state"] == "CANCEL_PENDING")
             or (not terminal and filled >= evidence.intent.units)
             or evidence.intent != OrderIntent.model_validate_json(row["intent_json"])
             or (
@@ -1524,11 +1560,25 @@ class LiveOrderJournal(OrderJournal):
             != {"state": row["state"], "evidence": evidence.model_dump(mode="json")}
         ):
             raise LiveOrderError("order_resolution_terminal_evidence_required")
-        self._account_proof(conn)
-        proof = json.loads(self._gate(conn)["proof_json"])
+        rows = [dict(r) for r in conn.execute("SELECT * FROM orders")]
+        if active_cancel:
+            observed = conn.execute(
+                "SELECT id,payload_json FROM events WHERE client_id=? "
+                "AND kind='ACTIVE_CANCEL_ACCOUNT_OBSERVED' ORDER BY id DESC LIMIT 1",
+                (client_id,),
+            ).fetchone()
+            if observed is None:
+                raise LiveOrderError("active_cancel_account_required")
+            proof = json.loads(observed["payload_json"])
+            post = self.posts.snapshot()
+            if (proof["post_claim"], proof["post_revision"]) != (post["claim"], post["revision"]):
+                raise LiveOrderError("order_resolution_complete_account_required")
+            rows = [{**r, "state": expected} if r["client_id"] == client_id else r for r in rows]
+        else:
+            self._account_proof(conn)
+            proof = json.loads(self._gate(conn)["proof_json"])
         snapshot = AccountSnapshot.model_validate(proof["snapshot"])
         quote = AccountQuote.model_validate(proof["quote"])
-        rows = [dict(r) for r in conn.execute("SELECT * FROM orders")]
         post = self.posts.snapshot()
         if (
             self.posts.reads.status()["blocked"]
@@ -1543,10 +1593,116 @@ class LiveOrderJournal(OrderJournal):
             "implementation_sha256": self._current_implementation(),
             "account_gate_sha256": self._checkpoint(dict(self._gate(conn))),
             "terminal_state": row["state"] if terminal else None,
-            "active_state": None if terminal else row["state"],
+            "active_state": None if terminal else expected,
             "evidence_sha256": _hash(evidence.model_dump_json()),
         }
+        if active_cancel:
+            context.update(
+                cancel_outcome_unknown=True,
+                cancel_retry_allowed=False,
+                row_sha256=self._checkpoint(dict(row)),
+                observation_id=observed["id"],
+                observation_sha256=_hash(observed["payload_json"]),
+            )
         return {**context, "checkpoint_sha256": self._checkpoint(context)}
+
+    def active_cancel_context(self, client_id):
+        """Review an active order without asserting the cancellation failed or finished."""
+        with self._transaction() as conn:
+            return self._resolution_context(
+                conn, client_id, self._clock(self.clock()), active_cancel=True
+            )
+
+    def record_active_cancel_account(self, client_id, snapshot, quote, *, now=None):
+        """Store a complete review observation without changing the normal account gate."""
+        snapshot = AccountSnapshot.model_validate(snapshot.model_dump())
+        quote = AccountQuote.model_validate(quote.model_dump())
+        with self._mutation(), self._transaction() as conn:
+            now = self._clock(now if now is not None else self.clock())
+            row = self._row(conn, client_id)
+            evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+            target = "PARTIAL" if evidence.executions else "WORKING"
+            rows = [
+                {**dict(r), "state": target} if r["client_id"] == client_id else dict(r)
+                for r in conn.execute("SELECT * FROM orders")
+            ]
+            post = self.posts.snapshot()
+            self._event(
+                conn,
+                client_id,
+                "ACTIVE_CANCEL_ACCOUNT_OBSERVED",
+                {
+                    "snapshot": snapshot.model_dump(mode="json"),
+                    "quote": quote.model_dump(mode="json"),
+                    "revision": revision(rows),
+                    "post_claim": post["claim"],
+                    "post_revision": post["revision"],
+                },
+            )
+            context = self._resolution_context(conn, client_id, now, active_cancel=True)
+        return {
+            "client_id": client_id,
+            "checkpoint_sha256": context["checkpoint_sha256"],
+            "cancel_outcome_unknown": True,
+            "cancel_retry_allowed": False,
+            "account_gate_updated": False,
+            "live_enabled": False,
+            "complete": False,
+        }
+
+    def _pending_active_cancel(self, conn, client_id=None):
+        done = {
+            json.loads(r[0])["prepared_id"]
+            for r in conn.execute(
+                "SELECT payload_json FROM events WHERE kind='ACTIVE_CANCEL_RESOLVED'"
+            )
+        }
+        for resolved in self.posts.trade_resolutions():
+            reference = resolved["reference"]
+            if reference["prepared_id"] in done or (
+                client_id is not None and reference["client_id"] != client_id
+            ):
+                continue
+            prepared = conn.execute(
+                "SELECT kind,payload_json FROM events WHERE id=?", (reference["prepared_id"],)
+            ).fetchone()
+            if prepared is not None and prepared[0] == "ORDER_RESOLUTION_PREPARED":
+                if json.loads(prepared[1])["context"].get("cancel_outcome_unknown") is True:
+                    return resolved
+        return None
+
+    def _complete_active_cancel(self, conn, client_id, reference):
+        payload = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM events WHERE id=?", (reference["prepared_id"],)
+            ).fetchone()[0]
+        )
+        context = payload["context"]
+        row = dict(self._row(conn, client_id))
+        if (
+            reference["client_id"] != client_id
+            or context.get("cancel_outcome_unknown") is not True
+            or context["active_state"] not in {"WORKING", "PARTIAL"}
+            or self._checkpoint(row) != context["row_sha256"]
+        ):
+            raise LiveOrderError("live_journal_integrity_or_binding_failed")
+        conn.execute(
+            "UPDATE orders SET state=? WHERE client_id=?", (context["active_state"], client_id)
+        )
+        # Normalize local pending state only; retain the consumed cancel claim forever.
+        evidence = OrderEvidence.model_validate_json(row["evidence_json"])
+        self._event(
+            conn,
+            client_id,
+            "RECONCILED",
+            {"state": context["active_state"], "evidence": evidence.model_dump(mode="json")},
+        )
+        self._event(
+            conn,
+            client_id,
+            "ACTIVE_CANCEL_RESOLVED",
+            {**reference, "active_state": context["active_state"]},
+        )
 
     def order_resolution_context(self, client_id):
         """Local diagnostic; requires separately established terminal and account completeness."""
@@ -1556,14 +1712,40 @@ class LiveOrderJournal(OrderJournal):
     def resolve_order_claim(self, client_id, approval, *, confirmations):
         approval = OrderResolutionApproval.model_validate(approval.model_dump())
         confirmations = frozenset(confirmations)
-        if confirmations not in {RESOLUTION_CONFIRMATIONS, ACTIVE_RESOLUTION_CONFIRMATIONS}:
+        if confirmations not in {
+            RESOLUTION_CONFIRMATIONS,
+            ACTIVE_RESOLUTION_CONFIRMATIONS,
+            ACTIVE_CANCEL_RESOLUTION_CONFIRMATIONS,
+        }:
             raise LiveOrderError("explicit_order_resolution_confirmations_required")
+        active_cancel = confirmations == ACTIVE_CANCEL_RESOLUTION_CONFIRMATIONS
         with self._sync_idle(), self._lock, self.posts._ownership() as owner:
             with self._transaction() as conn:
+                pending = self._pending_active_cancel(conn, client_id)
+                if pending is not None:
+                    if not active_cancel:
+                        raise LiveOrderError("explicit_order_resolution_confirmations_required")
+                    self._complete_active_cancel(conn, client_id, pending["reference"])
+                    return {
+                        "client_id": client_id,
+                        "post_claim_resolved": True,
+                        "post_revision": pending["post_after"]["revision"],
+                        "post_phase": "STOPPED",
+                        "cancel_outcome_unknown": True,
+                        "cancel_retry_allowed": False,
+                        "completed_interrupted_resolution": True,
+                        "live_enabled": False,
+                        "restart_required": True,
+                        "complete": False,
+                    }
                 now = self._clock(self.clock())
-                context = self._resolution_context(conn, client_id, now)
+                context = self._resolution_context(
+                    conn, client_id, now, active_cancel=active_cancel
+                )
                 if confirmations != (
-                    ACTIVE_RESOLUTION_CONFIRMATIONS
+                    ACTIVE_CANCEL_RESOLUTION_CONFIRMATIONS
+                    if active_cancel
+                    else ACTIVE_RESOLUTION_CONFIRMATIONS
                     if context["active_state"]
                     else RESOLUTION_CONFIRMATIONS
                 ):
@@ -1593,7 +1775,11 @@ class LiveOrderJournal(OrderJournal):
                 now = self._clock(self.clock())
                 # Ignore only our own prepared event while comparing the full checkpoint.
                 current = self._resolution_context(
-                    conn, client_id, now, event_id=context["recovery"]["event_id"]
+                    conn,
+                    client_id,
+                    now,
+                    event_id=context["recovery"]["event_id"],
+                    active_cancel=active_cancel,
                 )
                 prepared = conn.execute(
                     "SELECT client_id,kind,payload_json FROM events WHERE id=?", (prepared_id,)
@@ -1608,7 +1794,16 @@ class LiveOrderJournal(OrderJournal):
                     or json.loads(prepared["payload_json"]) != payload
                 ):
                     raise LiveOrderError("order_resolution_checkpoint_changed")
-                proof = json.loads(self._gate(conn)["proof_json"])
+                proof = (
+                    json.loads(
+                        conn.execute(
+                            "SELECT payload_json FROM events WHERE id=?",
+                            (context["observation_id"],),
+                        ).fetchone()[0]
+                    )
+                    if active_cancel
+                    else json.loads(self._gate(conn)["proof_json"])
+                )
                 snapshot = AccountSnapshot.model_validate(proof["snapshot"])
                 quote = AccountQuote.model_validate(proof["quote"])
 
@@ -1637,6 +1832,18 @@ class LiveOrderJournal(OrderJournal):
                     owner=owner,
                     validate=validate_commit,
                 )
+                if active_cancel:
+                    self._complete_active_cancel(
+                        conn,
+                        client_id,
+                        {
+                            "live_instance": state.instance,
+                            "live_path": str(self.path.parent),
+                            "client_id": client_id,
+                            "prepared_id": prepared_id,
+                            "prepared_sha256": self._checkpoint(payload),
+                        },
+                    )
             return {
                 "client_id": client_id,
                 "post_claim_resolved": True,
@@ -1645,6 +1852,11 @@ class LiveOrderJournal(OrderJournal):
                 "live_enabled": False,
                 "restart_required": True,
                 "complete": False,
+                **(
+                    {"cancel_outcome_unknown": True, "cancel_retry_allowed": False}
+                    if active_cancel
+                    else {}
+                ),
             }
 
     def _absent_rows(self, conn, client_id):

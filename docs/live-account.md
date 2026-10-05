@@ -72,6 +72,14 @@ uv run python -m trading.live_account --directory runs/live-orders --read-contro
 照合に成功すると、台帳の口座証拠・peak・損失による新規停止が更新され、
 [確認済み送信](order-runtime.md)の`context`で新しい口座証拠を使えます。
 
+## 有効取消の結果不明レビュー
+
+取消結果不明で有効なまま残る注文のレビューには`--active-cancel CLIENT_ID`を指定します。
+通常と同じ口座確認項目・読取専用キー・GET制御を使い、完全な注文履歴と対象を含む口座照合が必要です。
+結果は`cancel_outcome_unknown=true`、`cancel_retry_allowed=false`、`account_gate_updated=false`です。
+通常の口座ゲートを更新せず、取消の専用観測だけを保存します。`--absent-order`とは同時に指定できません。
+claim解消とその後の新しい口座観測・再開は[取消の結果不明解消](order-resolution.md)を参照してください。
+
 ## スワップの独立再計算（診断）
 
 2026-10-05追加。`--swap-schedule`に`fetch-swap`で取得した公式スワップ履歴を指定すると、

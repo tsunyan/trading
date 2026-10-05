@@ -238,6 +238,12 @@ def checkpoint_approval(journal, kind, client_id, evidence, *, minutes, now):
             OrderResolutionApproval,
             EVIDENCE_KINDS,
         )
+    elif kind == "active-cancel":
+        context, model, kinds = (
+            journal.active_cancel_context(client_id),
+            OrderResolutionApproval,
+            EVIDENCE_KINDS,
+        )
     elif kind == "cancel":
         context, model, kinds = (
             journal.cancel_context(client_id),
@@ -287,6 +293,7 @@ def main(argv=None):
             "approval",
             "restart-approval",
             "resolution-approval",
+            "active-cancel-approval",
             "absence-approval",
             "cancel-approval",
         ),
@@ -323,10 +330,15 @@ def main(argv=None):
                 items = documents(
                     [item.partition("=")[::2] for item in args.evidence], journal, now=now
                 )
-                if args.command in {"resolution-approval", "absence-approval", "cancel-approval"}:
+                if args.command in {
+                    "resolution-approval",
+                    "active-cancel-approval",
+                    "absence-approval",
+                    "cancel-approval",
+                }:
                     built = checkpoint_approval(
                         journal,
-                        args.command.split("-")[0],
+                        args.command.removesuffix("-approval"),
                         args.client_id,
                         items,
                         minutes=args.minutes,

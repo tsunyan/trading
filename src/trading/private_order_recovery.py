@@ -53,6 +53,9 @@ class PrivateOrderRecovery:
     def resolution_context(self, client_id):
         return self.journal.order_resolution_context(client_id)
 
+    def active_cancel_context(self, client_id):
+        return self.journal.active_cancel_context(client_id)
+
     def resolve(self, client_id, approval, *, confirmations):
         return self.journal.resolve_order_claim(client_id, approval, confirmations=confirmations)
 
@@ -143,6 +146,7 @@ def main(argv=None):
             "context",
             "reconcile",
             "resolution-context",
+            "active-cancel-context",
             "resolve",
             "absence-context",
             "resolve-absence",
@@ -165,6 +169,8 @@ def main(argv=None):
             result = recovery.context(args.client_id)
         elif args.command == "resolution-context":
             result = recovery.resolution_context(args.client_id)
+        elif args.command == "active-cancel-context":
+            result = recovery.active_cancel_context(args.client_id)
         elif args.command == "absence-context":
             result = recovery.absence_context(args.client_id)
         elif args.command in {"resolve", "resolve-absence"}:

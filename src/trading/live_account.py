@@ -152,9 +152,12 @@ class LiveAccountRefresh:
         quote_transport=None,
         valuation_tolerance=None,
         absent_order=None,
+        active_cancel=None,
         swap_schedule=None,
         swap_tolerance="1",
     ):
+        if absent_order is not None and active_cancel is not None:
+            raise LiveAccountError("one_account_review_target_required")
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
         ) != set(ACCOUNT_CONFIRMATIONS):
@@ -211,6 +214,10 @@ class LiveAccountRefresh:
         if absent_order is not None:
             # The account must reconcile as if the unknown order never existed.
             return self.journal.record_absence_account(absent_order, snapshot, quote, now=now)
+        if active_cancel is not None:
+            return self.journal.record_active_cancel_account(
+                active_cancel, snapshot, quote, now=now
+            )
         # A diagnostic computed before the journal decides; it never halts or refuses.
         swaps = (
             swap_check(report, swap_schedule, tolerance_jpy=swap_tolerance)
@@ -239,7 +246,9 @@ def main(argv=None):
     parser.add_argument("--quote", type=Path)
     parser.add_argument("--confirm", action="append", default=[])
     parser.add_argument("--valuation-tolerance")
-    parser.add_argument("--absent-order", metavar="CLIENT_ID")
+    review = parser.add_mutually_exclusive_group()
+    review.add_argument("--absent-order", metavar="CLIENT_ID")
+    review.add_argument("--active-cancel", metavar="CLIENT_ID")
     parser.add_argument("--swap-schedule", type=Path)
     parser.add_argument("--swap-tolerance", default="1")
     args = parser.parse_args(argv)
@@ -251,6 +260,7 @@ def main(argv=None):
             quote=_quote(args.quote) if args.quote is not None else None,
             valuation_tolerance=args.valuation_tolerance,
             absent_order=args.absent_order,
+            active_cancel=args.active_cancel,
             swap_schedule=(
                 read_schedule(args.swap_schedule) if args.swap_schedule is not None else None
             ),

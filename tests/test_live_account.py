@@ -582,6 +582,82 @@ def test_absent_order_with_a_position_is_refused(setup):
         live[3].order_absence_context(order.client_id)
 
 
+@pytest.mark.parametrize("active_present", [False, True])
+def test_active_cancel_get_observation_preserves_pending_state_and_normal_gate(
+    setup, active_present
+):
+    from test_private_order import client
+
+    from trading.broker_contracts import cancel_request
+
+    values, live, _, order, _ = setup
+    clock, _, posts, journal = live
+    with client(live, lambda request: response(clock, request)) as sender:
+        sender.submit(order.client_id, quote=quote(clock.now))
+    journal.reconcile(fixture_evidence(order, 101, 201, "ORDERED", [], clock.now))
+    with pytest.raises(RuntimeError):
+        with posts.operation(
+            "cancel",
+            request_sha256=__import__("hashlib").sha256(cancel_request(101).body).hexdigest(),
+        ):
+            journal.begin_cancel(order.client_id)
+            raise RuntimeError("interrupted cancellation")
+    journal.halt()
+    clock.advance(1)
+    journal.reconcile(fixture_evidence(order, 101, 201, "ORDERED", [], clock.now))
+    before, post = journal.snapshot(), posts.snapshot()
+    wire = {
+        "rootOrderId": 101,
+        "orderId": 201,
+        "clientOrderId": order.client_id,
+        "symbol": "USD_JPY",
+        "side": order.side,
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": order.effect,
+        "size": str(order.units),
+        "price": str(order.price),
+        "status": "ORDERED",
+        "timestamp": clock.now.isoformat(),
+    }
+    calls = []
+
+    def observe():
+        return refresher(setup).refresh(
+            values[5].plan.credential_reference,
+            confirmations=ACCOUNT_CONFIRMATIONS,
+            quote=quote(clock.now),
+            vault=values[4],
+            transport=broker(values[0], calls, orders=[wire] if active_present else []),
+            active_cancel=order.client_id,
+        )
+
+    if active_present:
+        result = observe()
+        assert result["cancel_outcome_unknown"] and not result["account_gate_updated"]
+        assert journal.active_cancel_context(order.client_id)["active_state"] == "WORKING"
+    else:
+        with pytest.raises(ValueError, match="complete_account_required"):
+            observe()
+        assert journal.snapshot() == before
+    after = journal.snapshot()
+    assert after["orders"][0]["state"] == "CANCEL_PENDING" and after["halted"]
+    assert after["account_guard"] == before["account_guard"] and posts.snapshot() == post
+    assert calls and {request.method for request in calls} == {"GET"}
+
+
+def test_account_review_targets_are_mutually_exclusive_before_get(setup):
+    values = setup[0]
+    with pytest.raises(LiveAccountError, match="one_account_review_target_required"):
+        refresher(setup).refresh(
+            values[5].plan.credential_reference,
+            confirmations=ACCOUNT_CONFIRMATIONS,
+            absent_order="Buy001",
+            active_cancel="Buy001",
+        )
+    assert values[3].reads == []
+
+
 def test_swap_diagnostic_is_reported_without_affecting_the_reconciliation(setup):
     from test_swap_check import schedule
 

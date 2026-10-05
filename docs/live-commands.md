@@ -18,7 +18,7 @@
 | `trading.live_cycle` | 照合・気配・口座証拠・提案・準備をまとめて実行（[説明](live-cycle.md)） | 読取専用 | GET・公開GET | あり（送信なし） |
 | `trading.order_runtime context/submit/cancel-context/cancel` | 実行内容の確認と送信（[説明](order-runtime.md)） | 発注用 | POST | あり |
 | `trading.live_order_sync` | 受付済み注文のGET照合（[説明](live-order-sync.md)） | 読取専用 | GET | 注文状態 |
-| `trading.private_order_recovery context/reconcile/resolution-context/resolve/absence-context/resolve-absence` | 結果不明の調査とclaim解消（[説明](order-recovery.md)、[解消](order-resolution.md)、[不在](order-absence.md)） | 読取専用 | GET | あり |
+| `trading.private_order_recovery context/reconcile/resolution-context/active-cancel-context/resolve/absence-context/resolve-absence` | 結果不明の調査とclaim解消（[説明](order-recovery.md)、[解消](order-resolution.md)、[不在](order-absence.md)） | 読取専用（reconcileのみ） | GET（reconcileのみ） | あり |
 | `trading.order_discovery` | 結果不明注文の業者ID発見（[説明](order-discovery.md)） | 読取専用 | GET | なし |
 | `trading.private_order_restart context/restart` | 停止後の明示再開（[説明](order-restart.md)） | なし | なし | あり |
 | `trading.live_acceptance read-evidence/file-evidence/approval/...` | 受入証拠と承認ファイルの作成（[説明](live-acceptance.md)） | 読取専用（read-evidenceのみ） | GET（read-evidenceのみ） | なし |
