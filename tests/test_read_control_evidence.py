@@ -180,3 +180,161 @@ def test_upgrade_digest_match_requires_actual_text_and_valid_digest(
     ]
     assert row["digest_matches_body"] is matched
     assert reads.path.read_bytes() == before
+
+
+def metadata_store(tmp_path):
+    reads = PersistentReadLimiter.create(tmp_path / "reads", "synthetic")
+    bound_path = tmp_path / "absent-post"
+    reads.bind_post("a" * 32, bound_path)
+    reads.bind_stream("b" * 32)
+    reads.stop()
+    return reads, bound_path
+
+
+def test_valid_bindings_are_sampled_without_opening_or_resolving_bound_path(tmp_path, monkeypatch):
+    reads, bound_path = metadata_store(tmp_path)
+    before = reads.path.read_bytes()
+    original_resolve = type(bound_path).resolve
+    original_stat = type(bound_path).stat
+
+    def resolve(path, *args, **kwargs):
+        assert path != bound_path, "bound path must not be resolved"
+        return original_resolve(path, *args, **kwargs)
+
+    def stat(path, *args, **kwargs):
+        assert path != bound_path, "bound path must not be probed"
+        return original_stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(type(bound_path), "resolve", resolve)
+        guarded.setattr(type(bound_path), "stat", stat)
+        result = evidence.capture(reads.path.parent, "synthetic")
+    tables = result["payload"]["tables_unverified"]
+    assert tables["post_binding"] == [{"id": 1, "instance": "a" * 32, "path": str(bound_path)}]
+    assert tables["stream_binding"] == [{"id": 1, "supervisor_id": "b" * 32}]
+    assert reads.path.read_bytes() == before and not bound_path.exists()
+    assert not result["payload"]["recovery_authorized"]
+
+
+@pytest.mark.parametrize(
+    "table,column,value",
+    [
+        ("owner_file", "device", "synthetic-sensitive-metadata"),
+        ("owner_file", "inode", "synthetic-sensitive-metadata"),
+        ("owner_file", "device", "１２"),
+        ("owner_file", "inode", "-1"),
+        ("owner_file", "inode", None),
+        ("post_binding", "instance", "synthetic-sensitive-metadata"),
+        ("post_binding", "instance", "A" * 32),
+        ("post_binding", "instance", "a" * 31),
+        ("post_binding", "instance", "a" * 33),
+        ("post_binding", "instance", None),
+        ("post_binding", "path", "synthetic-sensitive-metadata"),
+        ("post_binding", "path", None),
+        ("post_binding", "path", "D:/synthetic-sensitive-metadata\0"),
+        ("stream_binding", "supervisor_id", "synthetic-sensitive-metadata"),
+        ("stream_binding", "supervisor_id", "B" * 32),
+        ("stream_binding", "supervisor_id", "b" * 31),
+        ("stream_binding", "supervisor_id", "b" * 33),
+        ("stream_binding", "supervisor_id", 123),
+    ],
+)
+def test_malformed_optional_metadata_is_refused_without_echo_or_source_changes(
+    tmp_path, capsys, table, column, value
+):
+    reads, bound_path = metadata_store(tmp_path)
+    # Remove NOT NULL constraints to represent damaged/older storage too.
+    with closing(sqlite3.connect(reads.path)) as conn, conn:
+        columns = evidence.TABLES[table]
+        conn.execute(f"CREATE TABLE malformed AS SELECT {columns} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE malformed RENAME TO {table}")
+        conn.execute(f"UPDATE {table} SET {column}=?", (value,))
+    before = reads.path.read_bytes()
+    owner_before = (reads.path.parent / "read-owner.lock").read_bytes()
+    output = tmp_path / "evidence.json"
+    with pytest.raises(SystemExit) as refused:
+        evidence.main(
+            ["--directory", str(reads.path.parent), "--scope", "synthetic", "--output", str(output)]
+        )
+    printed = capsys.readouterr()
+    assert refused.value.code == 2
+    assert printed.out == "" and printed.err == "read_evidence_metadata_shape_invalid\n"
+    assert "synthetic-sensitive-metadata" not in printed.err
+    assert not output.exists() and not bound_path.exists()
+    assert reads.path.read_bytes() == before
+    assert (reads.path.parent / "read-owner.lock").read_bytes() == owner_before
+
+
+@pytest.mark.parametrize("table", ["owner_file", "post_binding", "stream_binding"])
+@pytest.mark.parametrize("shape", ["missing", "empty", "wrong_id", "text_id", "duplicate"])
+def test_optional_singleton_shapes_preserve_missing_and_empty_metadata(tmp_path, table, shape):
+    reads, _ = metadata_store(tmp_path)
+    with closing(sqlite3.connect(reads.path)) as conn, conn:
+        columns = evidence.TABLES[table]
+        conn.execute(f"CREATE TABLE malformed AS SELECT {columns} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE malformed RENAME TO {table}")
+        if shape == "missing":
+            conn.execute(f"DROP TABLE {table}")
+        elif shape == "empty":
+            conn.execute(f"DELETE FROM {table}")
+        elif shape == "duplicate":
+            conn.execute(f"INSERT INTO {table} SELECT * FROM {table}")
+        else:
+            conn.execute(
+                f"UPDATE {table} SET id=?",
+                (2 if shape == "wrong_id" else "synthetic-sensitive-metadata",),
+            )
+    before = reads.path.read_bytes()
+    if shape in {"missing", "empty"}:
+        sampled = evidence.capture(reads.path.parent, "synthetic")["payload"]["tables_unverified"]
+        assert sampled[table] == (None if shape == "missing" else [])
+    else:
+        with pytest.raises(evidence.EvidenceError, match="^read_evidence_metadata_shape_invalid$"):
+            evidence.capture(reads.path.parent, "synthetic")
+    assert reads.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_legacy_versions_without_optional_tables_remain_sampleable(tmp_path, version):
+    _, upgrade = legacy(tmp_path)
+    with closing(sqlite3.connect(upgrade.reads.path)) as conn, conn:
+        conn.execute("UPDATE control SET version=?", (version,))
+        for table in ("owner_file", "post_binding", "stream_binding"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+    before = upgrade.reads.path.read_bytes()
+    result = evidence.capture(upgrade.reads.path.parent, "synthetic")
+    assert result["payload"]["tables_unverified"]["control"][0]["version"] == version
+    assert all(
+        result["payload"]["tables_unverified"][table] is None
+        for table in ("owner_file", "post_binding", "stream_binding")
+    )
+    assert upgrade.reads.path.read_bytes() == before and not upgrade.owner_path.exists()
+
+
+@pytest.mark.parametrize("column", ["id", "wall_ns"])
+def test_audit_numeric_fields_cannot_expose_arbitrary_text(tmp_path, column):
+    reads = PersistentReadLimiter.create(tmp_path / "reads", "synthetic")
+    with closing(sqlite3.connect(reads.path)) as conn, conn:
+        conn.execute("CREATE TABLE malformed AS SELECT * FROM events")
+        conn.execute("DROP TABLE events")
+        conn.execute("ALTER TABLE malformed RENAME TO events")
+        conn.execute(f"UPDATE events SET {column}='synthetic-sensitive-metadata'")
+    before = reads.path.read_bytes()
+    with pytest.raises(evidence.EvidenceError, match="^read_evidence_audit_shape_invalid$"):
+        evidence.capture(reads.path.parent, "synthetic")
+    assert reads.path.read_bytes() == before
+
+
+def test_upgrade_row_id_cannot_expose_arbitrary_text(tmp_path):
+    reads = PersistentReadLimiter.create(tmp_path / "reads", "synthetic")
+    with closing(sqlite3.connect(reads.path)) as conn, conn:
+        conn.execute("CREATE TABLE read_owner_upgrade(id TEXT,body TEXT,digest TEXT)")
+        conn.execute(
+            "INSERT INTO read_owner_upgrade VALUES('synthetic-sensitive-metadata',NULL,NULL)"
+        )
+    before = reads.path.read_bytes()
+    with pytest.raises(evidence.EvidenceError, match="^read_evidence_upgrade_shape_invalid$"):
+        evidence.capture(reads.path.parent, "synthetic")
+    assert reads.path.read_bytes() == before

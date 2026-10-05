@@ -112,6 +112,37 @@ def _rows(conn, table, columns, *, order="", limit=2):
     return [dict(zip(fields, row, strict=True)) for row in values]
 
 
+def _metadata_shapes(tables):
+    # Missing/empty optional tables remain useful evidence for legacy or damaged stores.
+    # Reject malformed values rather than exposing arbitrary strings as identifiers.
+    for name in ("owner_file", "post_binding", "stream_binding"):
+        rows = tables[name]
+        if rows is None or not rows:
+            continue
+        if len(rows) != 1 or type(rows[0]["id"]) is not int or rows[0]["id"] != 1:
+            raise EvidenceError("read_evidence_metadata_shape_invalid")
+        row = rows[0]
+        if name == "owner_file":
+            valid = all(
+                isinstance(row[key], str) and re.fullmatch(r"[0-9]+", row[key])
+                for key in ("device", "inode")
+            )
+        elif name == "post_binding":
+            valid = (
+                isinstance(row["instance"], str)
+                and re.fullmatch(r"[a-f0-9]{32}", row["instance"])
+                and isinstance(row["path"], str)
+                and "\0" not in row["path"]
+                and Path(row["path"]).is_absolute()
+            )
+        else:
+            valid = isinstance(row["supervisor_id"], str) and re.fullmatch(
+                r"[a-f0-9]{32}", row["supervisor_id"]
+            )
+        if not valid:
+            raise EvidenceError("read_evidence_metadata_shape_invalid")
+
+
 def _owner(path, instance):
     result = {"path": str(path), "owner_absence_established": False}
     try:
@@ -149,6 +180,7 @@ def capture(directory, scope):
                 if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                     raise EvidenceError("read_evidence_copy_invalid")
                 tables = {name: _rows(conn, name, fields) for name, fields in TABLES.items()}
+                _metadata_shapes(tables)
                 control = tables["control"]
                 if control is None or len(control) != 1 or control[0]["id"] != 1:
                     raise EvidenceError("read_evidence_control_missing")
@@ -188,6 +220,8 @@ def capture(directory, scope):
                 if events is None:
                     raise EvidenceError("read_evidence_audit_missing")
                 for event in events:
+                    if any(type(event[key]) is not int for key in ("id", "wall_ns")):
+                        raise EvidenceError("read_evidence_audit_shape_invalid")
                     token = event.pop("token")
                     event["token_sha256"] = (
                         hashlib.sha256(token.encode()).hexdigest()
@@ -207,6 +241,8 @@ def capture(directory, scope):
                 plan = _rows(conn, "read_owner_upgrade", "id,body,digest")
                 if plan is not None:
                     for row in plan:
+                        if type(row["id"]) is not int:
+                            raise EvidenceError("read_evidence_upgrade_shape_invalid")
                         body = row.pop("body")
                         row["body_sha256"] = (
                             hashlib.sha256(body.encode()).hexdigest()
