@@ -299,7 +299,7 @@ from trading.read_control import PersistentReadLimiter
 control = PersistentReadLimiter(Path(sys.argv[1]), sys.argv[2])
 with control.slot():
     Path(sys.argv[3]).write_text('entered')
-    time.sleep(1.5)
+    time.sleep(0.5)
 """
     child = subprocess.Popen(
         [sys.executable, "-c", script, str(control.path.parent), SCOPE, str(marker)],

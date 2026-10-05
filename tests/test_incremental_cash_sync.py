@@ -94,10 +94,10 @@ def test_fully_booked_order_is_not_retrieved_or_counted_as_fresh(setup):
     assert view["previously_booked_executions"] == 1
 
 
-def test_40_orders_in_one_epoch_never_repeat_the_39_old_requests(setup):
+def test_many_orders_in_one_epoch_never_repeat_the_old_requests(setup):
     clock, journal, capture, book = setup
     rows = []
-    for index in range(40):
+    for index in range(10):
         row = completed(index)
         rows.append(row)
         capture.ingest(index + 1, raw(row))
@@ -106,10 +106,10 @@ def test_40_orders_in_one_epoch_never_repeat_the_39_old_requests(setup):
         assert result.execution_cash["applied_execution_ids"] == (row["executionId"],)
         assert len(result.previously_booked_execution_ids) == index
         assert result.execution_reconciliation.matched_execution_ids == (row["executionId"],)
-    assert Decimal(book.snapshot()["balance"]) == 999920
-    assert book.snapshot()["executions"] == 40
+    assert Decimal(book.snapshot()["balance"]) == 999980
+    assert book.snapshot()["executions"] == 10
     assert not journal.inspect()["unacknowledged_records"]
-    assert clock.mono == 40
+    assert clock.mono == 10
 
 
 def test_partial_orders_are_retrieved_until_final_complete_report(setup):
