@@ -305,7 +305,7 @@ def test_unresolved_delivery_blocks_even_newly_collected_valuation(setup):
 
 def test_journal_guard_prevents_epoch_takeover_during_comparison(setup, monkeypatch):
     clock, journal, capture, book = setup
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     original = book.compare_valuation
 
     def checked(*args, **kwargs):

@@ -391,7 +391,7 @@ os._exit(17)
 
 
 def test_busy_write_is_retried_once_without_duplicate(journal, monkeypatch):
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     session = start(journal)
     lock = sqlite3.connect(journal.path)
     waits = []
@@ -412,7 +412,7 @@ def test_busy_write_is_retried_once_without_duplicate(journal, monkeypatch):
 
 
 def test_busy_exhaustion_is_not_treated_as_corruption(journal, monkeypatch):
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     session = start(journal)
     before = journal.inspect()
     waits = []

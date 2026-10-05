@@ -243,7 +243,7 @@ def test_journal_takeover_during_collection_prevents_comparison(setup, monkeypat
 
 def test_journal_epoch_is_reserved_during_comparison(setup, monkeypatch):
     clock, journal, capture, book = setup
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     original = book.compare_reservations
 
     def checked(*args, **kwargs):

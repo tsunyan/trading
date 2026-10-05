@@ -321,7 +321,7 @@ def test_diagnostic_reader_during_capture_does_not_poison_delivery(setup, monkey
 
 
 def test_busy_status_read_reports_unknown_state_without_stopping_capture(setup, monkeypatch):
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     _, journal, capture = setup
     journal._wait = lambda seconds: None
     with sqlite3.connect(journal.path) as lock:
@@ -345,7 +345,7 @@ def test_busy_status_read_reports_unknown_state_without_stopping_capture(setup, 
 
 
 def test_transient_busy_during_delivery_is_retried(setup, monkeypatch):
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     _, journal, capture = setup
     begin(journal, capture)
     lock = sqlite3.connect(journal.path)

@@ -151,7 +151,7 @@ def test_changes_during_comparison_fail_without_undoing_cash(setup, monkeypatch,
 
 def test_journal_is_reserved_while_inventory_is_compared(setup, monkeypatch):
     clock, journal, capture, book = setup
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     result = capture.resync(lambda: account(now=clock.wall))
     original = book.compare_positions
 

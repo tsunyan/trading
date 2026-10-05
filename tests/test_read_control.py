@@ -337,7 +337,7 @@ def test_local_cli_status_and_stop_no_reset(tmp_path, capsys):
 
 
 def test_busy_finish_retries_without_repeating_get_or_poisoning_control(tmp_path, monkeypatch):
-    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0)
     clock = Clock()
     control = create(tmp_path, clock)
     lock = sqlite3.connect(control.path)
@@ -362,7 +362,7 @@ def test_busy_finish_retries_without_repeating_get_or_poisoning_control(tmp_path
 
 
 def test_busy_finish_exhaustion_keeps_durable_claim_and_readable_status(tmp_path, monkeypatch):
-    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0)
     control = create(tmp_path)
     with sqlite3.connect(control.path) as lock:
         with pytest.raises(PrivateReadError, match="storage_busy"), control.slot():
@@ -374,7 +374,7 @@ def test_busy_finish_exhaustion_keeps_durable_claim_and_readable_status(tmp_path
 
 
 def test_failed_stop_under_busy_cannot_release_claim_or_resume(tmp_path, monkeypatch):
-    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.read_control.BUSY_TIMEOUT_SECONDS", 0)
     control = create(tmp_path)
     with sqlite3.connect(control.path) as lock:
         with pytest.raises(PrivateReadError), control.slot():

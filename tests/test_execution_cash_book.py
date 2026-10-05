@@ -433,7 +433,7 @@ def test_each_posting_stores_only_the_evidence_for_its_new_executions(tmp_path):
 
 
 def test_busy_write_is_retried_once_without_duplicate(tmp_path, monkeypatch):
-    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0)
     book = create(tmp_path)
     reader = sqlite3.connect(book.path)
     waits = []
@@ -455,7 +455,7 @@ def test_busy_write_is_retried_once_without_duplicate(tmp_path, monkeypatch):
 
 
 def test_busy_exhaustion_is_not_treated_as_corruption(tmp_path, monkeypatch):
-    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.execution_cash_book.BUSY_TIMEOUT_SECONDS", 0)
     book = create(tmp_path)
     before = book.snapshot()
     waits = []

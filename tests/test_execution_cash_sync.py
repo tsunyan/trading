@@ -235,7 +235,7 @@ def test_journal_takeover_after_collection_cannot_post(setup, monkeypatch):
 
 def test_journal_epoch_is_reserved_through_cash_commit(setup, monkeypatch):
     clock, journal, capture, book = setup
-    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr("trading.event_journal.BUSY_TIMEOUT_SECONDS", 0)
     original = book.apply
     head = journal.inspect()["head"]
 
