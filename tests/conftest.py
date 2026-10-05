@@ -14,9 +14,14 @@ _sqlite_connect = sqlite3.connect
 class _UnsyncedConnection(sqlite3.Connection):
     # synchronous=FULL protects committed rows from power loss; the tests only simulate
     # process exits, which keep OS-buffered writes, so skipping the flushes is safe here.
+    # Likewise the on-disk rollback journal only matters if this process dies mid-commit.
+    # Real crashes happen in child processes, which keep it, and hot journals they leave
+    # are still rolled back on open. WAL databases created by a test keep their mode.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         super().execute("PRAGMA synchronous=OFF")
+        if super().execute("PRAGMA journal_mode").fetchone()[0] == "delete":
+            super().execute("PRAGMA journal_mode=MEMORY")
 
     def execute(self, sql, *args):
         if sql == "PRAGMA synchronous=FULL":
