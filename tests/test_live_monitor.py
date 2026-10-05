@@ -189,7 +189,7 @@ def test_success_between_sampling_and_stop_defers_the_stop(setup, monkeypatch):
     assert not live[3].snapshot()["halted"] and monitor_events(live[3]) == []
 
 
-@pytest.mark.parametrize("damage", ["manifest", "journal"])
+@pytest.mark.parametrize("damage", ["manifest", "control", "catalog", "journal"])
 def test_cached_target_can_stop_when_original_sync_workspace_is_unavailable(setup, damage):
     values, live, monitor, _ = setup
     ready(live)

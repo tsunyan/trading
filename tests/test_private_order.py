@@ -529,6 +529,8 @@ def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
 @pytest.mark.parametrize(
     "failure",
     [
+        # 429 stays because a rate limit is where a retry would most likely be added;
+        # other error statuses take the same non-200 path.
         429,
         302,
         "timeout",
@@ -536,6 +538,7 @@ def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
         "duplicate",
         "identity",
         "encoding",
+        "content_type",
         "oversize",
         "clock",
         "cleanup",
@@ -576,6 +579,8 @@ def test_http_or_receipt_failure_stops_both_domains_and_never_retries(setup, fai
             )
         if failure == "encoding":
             result.headers["content-encoding"] = "gzip"
+        elif failure == "content_type":
+            result.headers["content-type"] = "text/plain"
         elif failure == "oversize":
             result.headers["content-length"] = "64001"
         elif failure == "clock":
@@ -782,7 +787,7 @@ def test_transport_uses_secure_defaults_without_environment_configuration(setup,
     assert transport_options == [{"verify": True, "trust_env": False, "retries": 0}]
 
 
-@pytest.mark.parametrize("phase", ["response", "receipt"])
+@pytest.mark.parametrize("phase", ["claim", "response", "receipt", "post_completion"])
 def test_actual_process_exit_across_dispatch_boundaries_keeps_order_and_post_claim(setup, phase):
     clock, reads, posts, journal = setup
     order = ready(setup)

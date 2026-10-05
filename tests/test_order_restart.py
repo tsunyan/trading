@@ -100,7 +100,9 @@ def confirmations(setup):
     "resolved,reason",
     [
         (False, None),
+        (False, "operator_stop"),
         (True, "operation_unknown"),
+        (True, "clock_invalid"),
         (False, "order_cleanup_failed"),
     ],
 )
@@ -226,8 +228,11 @@ def test_restart_known_working_order_after_cleanup_failure_enables_its_cancellat
     "change",
     [
         "checkpoint",
+        "account",
+        "config",
         "implementation",
         "expired",
+        "future",
         "confirm",
         "clock_confirm",
         "reuse_approval",
@@ -241,14 +246,29 @@ def test_restart_rejects_invalid_operator_acceptance_without_changes(setup, chan
     confirms = confirmations(setup)
     if change == "checkpoint":
         accepted = accepted.model_copy(update={"checkpoint_sha256": "b" * 64})
-    elif change == "implementation":
+    elif change in {"account", "config", "implementation"}:
+        key = {
+            "account": "account_id",
+            "config": "configuration_sha256",
+            "implementation": "implementation_sha256",
+        }[change]
         accepted = accepted.model_copy(
             update={
-                "approval": accepted.approval.model_copy(update={"implementation_sha256": "b" * 64})
+                "approval": accepted.approval.model_copy(
+                    update={key: "foreign" if change == "account" else "b" * 64}
+                )
             }
         )
     elif change == "expired":
         clock.advance(3600)
+    elif change == "future":
+        accepted = accepted.model_copy(
+            update={
+                "approval": accepted.approval.model_copy(
+                    update={"accepted_at": clock.now + timedelta(seconds=1)}
+                )
+            }
+        )
     elif change == "reuse_approval":
         accepted = accepted.model_copy(
             update={
@@ -364,7 +384,7 @@ def test_checkpoint_changes_between_preparation_and_restart_leave_both_stopped(
     assert not posts.execution_restarts() and event_rows(journal, "LIVE_RESTART_PREPARED")
 
 
-@pytest.mark.parametrize("change", ["code", "expiry"])
+@pytest.mark.parametrize("change", ["code", "expiry", "read_stop"])
 def test_last_post_validation_rolls_back_live_permission_and_post_restart(
     setup, monkeypatch, change
 ):
@@ -395,7 +415,9 @@ def test_last_post_validation_rolls_back_live_permission_and_post_restart(
     )
 
 
-@pytest.mark.parametrize("phase", ["post_before_commit", "post_after_commit"])
+@pytest.mark.parametrize(
+    "phase", ["prepared", "post_before_commit", "post_after_commit", "completed"]
+)
 def test_actual_process_exit_keeps_stopped_live_permission_or_completed_restart(setup, phase):
     setup = stopped(setup)
     clock, reads, posts, journal = setup
@@ -503,7 +525,7 @@ def test_cli_is_local_and_requires_explicit_restart_file_and_confirmations(
     assert reopen(setup)[3].snapshot()["live_enabled"]
 
 
-@pytest.mark.parametrize("change", ["code", "expiry"])
+@pytest.mark.parametrize("change", ["code", "expiry", "read_stop"])
 def test_failure_after_post_commit_keeps_live_stopped_with_persistent_preparation(
     setup, monkeypatch, change
 ):
@@ -533,16 +555,22 @@ def test_failure_after_post_commit_keeps_live_stopped_with_persistent_preparatio
     assert not event_rows(journal, "LIVE_RESTARTED")
 
 
-@pytest.mark.parametrize("damage", ["delete", "body", "marker", "prepared", "completed"])
+@pytest.mark.parametrize(
+    "damage", ["drop", "delete", "body", "marker", "prepared", "completed", "completed_duplicate"]
+)
 def test_restart_history_missing_or_changed_refuses_reopen(setup, damage):
     setup = stopped(setup)
     journal = setup[3]
     journal.restart(acceptance(setup), confirmations=confirmations(setup))
     setup = reopen(setup)
     _, _, posts, journal = setup
-    path = journal.path if damage in {"prepared", "completed"} else posts.path
+    path = (
+        journal.path if damage in {"prepared", "completed", "completed_duplicate"} else posts.path
+    )
     with sqlite3.connect(path) as conn:
-        if damage == "delete":
+        if damage == "drop":
+            conn.execute("DROP TABLE execution_restarts")
+        elif damage == "delete":
             conn.execute("DELETE FROM execution_restarts")
         elif damage == "body":
             conn.execute("UPDATE execution_restarts SET body='{}'")
@@ -550,8 +578,14 @@ def test_restart_history_missing_or_changed_refuses_reopen(setup, damage):
             conn.execute("DELETE FROM events WHERE kind='EXECUTION_RESTARTED'")
         elif damage == "prepared":
             conn.execute("DELETE FROM events WHERE kind='LIVE_RESTART_PREPARED'")
-        else:
+        elif damage == "completed":
             conn.execute("DELETE FROM events WHERE kind='LIVE_RESTARTED'")
+        else:
+            conn.execute(
+                "INSERT INTO events(recorded_at,client_id,kind,payload_json) "
+                "SELECT recorded_at,client_id,kind,payload_json FROM events "
+                "WHERE kind='LIVE_RESTARTED'"
+            )
     with pytest.raises(ValueError):
         reopen(setup)
 

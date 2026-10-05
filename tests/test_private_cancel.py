@@ -196,7 +196,9 @@ def test_cancel_receipt_has_digest_clock_skew_and_strict_local_clocks(setup):
         )
 
 
-@pytest.mark.parametrize("failure", [401, "timeout", "api", "empty", "root", "oversize", "cleanup"])
+@pytest.mark.parametrize(
+    "failure", [401, "timeout", "api", "empty", "root", "duplicate", "oversize", "cleanup"]
+)
 def test_cancel_failure_keeps_both_claims_and_never_retries(setup, failure):
     clock, _, posts, journal = setup
     order, _ = working(setup)
@@ -216,7 +218,13 @@ def test_cancel_failure_keeps_both_claims_and_never_retries(setup, failure):
         elif failure == "root":
             data["data"]["success"][0]["rootOrderId"] = 102
         result = httpx.Response(200, json=data)
-        if failure == "oversize":
+        if failure == "duplicate":
+            result = httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=raw(data).replace(b'"status":0', b'"status":0,"status":1'),
+            )
+        elif failure == "oversize":
             result.headers["content-length"] = str(MAX_RECEIPT_BYTES + 1)
         elif failure == "cleanup":
             result.close = lambda: (_ for _ in ()).throw(RuntimeError("remote secret"))
@@ -239,7 +247,7 @@ def test_cancel_failure_keeps_both_claims_and_never_retries(setup, failure):
 
 @pytest.mark.parametrize(
     "refusal",
-    ["no_get", "expired", "code", "read_stop", "live_stop", "stale", "terminal"],
+    ["no_get", "expired", "code", "read_stop", "live_stop", "stale", "future", "terminal"],
 )
 def test_cancel_preflight_refuses_without_any_cancel_http_or_claim(setup, monkeypatch, refusal):
     clock, reads, posts, journal = setup
@@ -259,6 +267,8 @@ def test_cancel_preflight_refuses_without_any_cancel_http_or_claim(setup, monkey
             journal.halt()
         elif refusal == "stale":
             clock.advance(61)
+        elif refusal == "future":
+            clock.now -= timedelta(seconds=1)
         elif refusal == "terminal":
             clock.advance(0.1)
             journal.reconcile(
@@ -579,7 +589,7 @@ def test_cancel_racing_with_terminal_get_keeps_partial_and_complete_account_requ
         sender.cancel(order.client_id)
 
 
-@pytest.mark.parametrize("phase", ["response", "receipt"])
+@pytest.mark.parametrize("phase", ["claim", "response", "receipt", "post_completion"])
 def test_process_death_retains_cancel_attempt_and_get_investigation_preserves_claim(setup, phase):
     clock, reads, posts, journal = setup
     order, _ = working(setup)

@@ -171,7 +171,7 @@ def test_positive_order_observation_preserves_claim_stop_and_incompleteness(setu
 
 @pytest.mark.parametrize(
     "failure",
-    ["missing", "client", "side", "changing", "fills", "stale", "api"],
+    ["missing", "client", "side", "quantity", "price", "changing", "fills", "stale", "http", "api"],
 )
 def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, failure):
     recovery, order, vault = unknown(setup)
@@ -187,16 +187,24 @@ def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, fail
             rows = data["data"]["list"]
             if failure == "missing":
                 rows.clear()
-            elif failure == "client":
-                rows[0]["clientOrderId"] = "Other"
-            elif failure == "side":
-                rows[0]["side"] = "SELL"
+            elif failure in {"client", "side", "quantity", "price"}:
+                key, value = {
+                    "client": ("clientOrderId", "Other"),
+                    "side": ("side", "SELL"),
+                    "quantity": ("size", "900"),
+                    "price": ("price", "149"),
+                }[failure]
+                rows[0][key] = value
             elif failure == "changing" and count == 3:
                 rows[0]["status"] = "CANCELED"
             elif failure == "fills":
                 rows[0]["status"] = "EXECUTED"
 
-    selected = transport(clock, order, [], mutate=mutate)
+    selected = (
+        httpx.MockTransport(lambda _: httpx.Response(401))
+        if failure == "http"
+        else transport(clock, order, [], mutate=mutate)
+    )
     with pytest.raises(ValueError) as caught:
         recovery.reconcile(
             order.client_id, 201, **checks(recovery, order), vault=vault, transport=selected
