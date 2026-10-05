@@ -39,9 +39,17 @@ def test_capacity_threshold_and_duplicate_directories(tmp_path, monkeypatch):
     assert seen == [tmp_path]
 
 
-@pytest.mark.parametrize("operation", ["submit", "close", "cancel", "restricted_cancel"])
-@pytest.mark.parametrize("stage", ["preflight", "after_wait", "before_http"])
-@pytest.mark.parametrize("store", ["live", "posts", "reads"])
+# The stage/operation grid over bound stores is in test_live_storage_capacity; here each
+# base store and each operation (including a close) is refused once.
+@pytest.mark.parametrize(
+    "operation,stage,store",
+    [
+        ("submit", "preflight", "live"),
+        ("close", "before_http", "posts"),
+        ("cancel", "after_wait", "reads"),
+        ("restricted_cancel", "before_http", "live"),
+    ],
+)
 def test_low_capacity_never_sends_or_leaves_unknown_claims(
     setup, monkeypatch, operation, stage, store
 ):

@@ -1,7 +1,20 @@
+from functools import cache
+
 import pandas as pd
 import pytest
 
+from trading import live_journal
 from trading.config import Settings
+
+_implementation_sha256 = cache(live_journal.implementation_sha256)
+
+
+@pytest.fixture(autouse=True)
+def cached_implementation_sha256(monkeypatch):
+    # The live code fingerprint rehashes source files and package metadata on every
+    # check; the files cannot change mid-test, so hash once. Tests that simulate a
+    # code update still monkeypatch the same attribute, which overrides this one.
+    monkeypatch.setattr(live_journal, "implementation_sha256", _implementation_sha256)
 
 
 @pytest.fixture

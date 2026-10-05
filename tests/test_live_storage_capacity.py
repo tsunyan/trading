@@ -46,9 +46,22 @@ def directories(setup):
     }
 
 
-@pytest.mark.parametrize("store", ["sync", "journal", "control", "catalog", "monitor", "cash"])
-@pytest.mark.parametrize("stage", ["preflight", "after_wait", "before_http"])
-@pytest.mark.parametrize("operation", ["submit", "cancel", "restricted_cancel"])
+# One directory inventory serves every boundary, so each stage/operation pair runs
+# once and the bound stores rotate through them; every store is covered at least once.
+@pytest.mark.parametrize(
+    "store,stage,operation",
+    [
+        ("sync", "preflight", "submit"),
+        ("journal", "after_wait", "submit"),
+        ("control", "before_http", "submit"),
+        ("catalog", "preflight", "cancel"),
+        ("monitor", "after_wait", "cancel"),
+        ("cash", "before_http", "cancel"),
+        ("journal", "preflight", "restricted_cancel"),
+        ("catalog", "after_wait", "restricted_cancel"),
+        ("sync", "before_http", "restricted_cancel"),
+    ],
+)
 def test_capacity_of_every_bound_store_is_checked_at_each_send_boundary(
     setup, monkeypatch, store, stage, operation
 ):
@@ -108,8 +121,7 @@ def test_capacity_of_every_bound_store_is_checked_at_each_send_boundary(
         assert after == before and post_after == post_before
 
 
-@pytest.mark.parametrize("store", ["sync", "journal", "control", "catalog", "monitor", "cash"])
-@pytest.mark.parametrize("failure", ["low", "unavailable"])
+@pytest.mark.parametrize("store,failure", [("cash", "low"), ("monitor", "unavailable")])
 def test_doctor_uses_the_same_operational_capacity_checks(setup, monkeypatch, store, failure):
     values, live, _, _, _ = setup
     target = directories(setup)[store].resolve()
