@@ -30,7 +30,8 @@ def encoded(value):
 
 class ReadOwnerUpgrade:
     def __init__(self, directory, scope, **clocks):
-        self.reads = PersistentReadLimiter(directory, scope, **clocks)
+        # No schema maintenance: status and prepare must not rewrite a legacy store.
+        self.reads = PersistentReadLimiter(directory, scope, maintain_schema=False, **clocks)
         self.owner_path = self.reads.path.parent / "read-owner.lock"
 
     def context(self):
@@ -47,6 +48,19 @@ class ReadOwnerUpgrade:
             "owner_artifact_present": os.path.lexists(self.owner_path),
             "network_used": False,
         }
+
+    @staticmethod
+    def _changed_since(conn, started_id):
+        """A later stop keeps the committed decision; anything else is a new checkpoint.
+
+        Stopping stays available while the upgrade is pending. When the control is
+        already stopped it only appends `STOP_*`, and `_source` still catches a stop
+        that changes the control state (for example `claim_mismatch`).
+        """
+        return conn.execute(
+            "SELECT 1 FROM events WHERE id>? AND substr(kind,1,5)<>'STOP_' LIMIT 1",
+            (started_id,),
+        ).fetchone() is not None
 
     def _source(self, conn):
         return {
@@ -201,7 +215,7 @@ class ReadOwnerUpgrade:
                 expected_sha256 != digest
                 or plan.get("confirmations") != sorted(UPGRADE_CHECKS)
                 or self._source(conn) != plan["source"]
-                or conn.execute("SELECT MAX(id) FROM events").fetchone()[0] != started["id"]
+                or self._changed_since(conn, started["id"])
             ):
                 raise PrivateReadError("read_owner_upgrade_checkpoint_changed")
             if os.path.lexists(self.owner_path):
@@ -231,7 +245,7 @@ class ReadOwnerUpgrade:
                 current = self.owner_path.lstat()
                 if (
                     self._source(conn) != plan["source"]
-                    or conn.execute("SELECT MAX(id) FROM events").fetchone()[0] != started_id
+                    or self._changed_since(conn, started_id)
                     or record is None
                     or tuple(record) != (body, digest)
                     or not self.reads._owner_upgrade_pending(conn)

@@ -34,8 +34,10 @@ def legacy(tmp_path, *, version=2, reason="operator_stop", bound=False):
         )
     original.stop(reason)
     # Build an old-format fixture. Production code never deletes/recreates an owner file.
+    # Stores from before the additive index lack it too.
     with sqlite3.connect(original.path) as conn:
         conn.execute("DROP TABLE owner_file")
+        conn.execute("DROP INDEX events_kind_id")
         conn.execute("UPDATE control SET version=?", (version,))
     (original.path.parent / "read-owner.lock").unlink()
     return clock, ReadOwnerUpgrade(original.path.parent, "synthetic", **clock.args())
@@ -190,7 +192,7 @@ def test_failure_after_upgrade_intent_blocks_recovery_and_never_adopts_the_parti
     original = upgrade._install
 
     def changed(*args):
-        upgrade.reads.stop("operator_stop")
+        upgrade.reads.stop("claim_mismatch")
         return original(*args)
 
     monkeypatch.setattr(upgrade, "_install", changed)
@@ -371,7 +373,7 @@ def test_cli_requires_interactive_explicit_approval_and_only_changes_local_stopp
     assert result["upgraded"] and result["stopped"] and not result["claim_resolved"]
 
 
-@pytest.mark.parametrize("change", ["digest", "checks", "new_stop"])
+@pytest.mark.parametrize("change", ["digest", "checks", "claim_mismatch"])
 def test_saved_upgrade_completion_requires_the_exact_unchanged_decision(
     tmp_path, monkeypatch, change
 ):
@@ -392,7 +394,7 @@ def test_saved_upgrade_completion_requires_the_exact_unchanged_decision(
     elif change == "checks":
         checks = UPGRADE_CHECKS
     else:
-        pending.reads.stop("operator_stop")
+        pending.reads.stop("claim_mismatch")
     before = pending.reads.path.read_bytes()
     with pytest.raises(PrivateReadError):
         pending.complete(digest, confirmations=checks)
@@ -431,3 +433,62 @@ def test_cli_completes_an_intent_without_creating_a_new_approval(tmp_path, monke
     )
     result = json.loads(capsys.readouterr().out)
     assert result["completed_recorded_upgrade"] and result["stopped"]
+
+
+def test_status_and_context_leave_a_pre_index_legacy_store_byte_identical(
+    tmp_path, monkeypatch, capsys
+):
+    from trading import read_owner_upgrade
+
+    clock, upgrade = legacy(tmp_path)
+    path = upgrade.reads.path
+    before = path.read_bytes()
+    upgrade.context()
+    ReadOwnerUpgrade(path.parent, "synthetic", **clock.args()).reads.status()
+    read_owner_upgrade.main(["status", "--directory", str(path.parent), "--scope", "synthetic"])
+    assert json.loads(capsys.readouterr().out)["version"] == 2
+    assert path.read_bytes() == before
+    assert not any(path.parent.glob("read-control.sqlite-*"))
+    with sqlite3.connect(path) as conn:
+        index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_kind_id'"
+        ).fetchone()
+    assert index is None
+
+
+@pytest.mark.parametrize("reason", ["operator_stop", "client_stop", "interrupted"])
+def test_a_stop_after_the_committed_intent_keeps_completion_available(tmp_path, reason):
+    clock, upgrade = legacy(tmp_path)
+    plan = upgrade.prepare()
+
+    def interrupted(*args):
+        raise RuntimeError("before filesystem mutation")
+
+    original = upgrade._install
+    upgrade._install = interrupted
+    with pytest.raises(RuntimeError):
+        approve(upgrade, plan)
+    upgrade._install = original
+    pending = ReadOwnerUpgrade(upgrade.reads.path.parent, "synthetic", **clock.args())
+    pending.reads.stop(reason)
+    result = pending.complete(pending.context()["intent_sha256"], confirmations=COMPLETION_CHECKS)
+    assert result["completed_recorded_upgrade"] and result["stopped"]
+    status = reopen(upgrade, clock).status()
+    assert status["version"] == 3 and status["stopped"] and status["reason"] == "operator_stop"
+    assert [kind for kind, _ in rows(upgrade)][-2:] == ["STOP_" + reason.upper(), "OWNER_UPGRADED"]
+
+
+def test_a_stop_racing_the_installation_does_not_strand_the_upgrade(tmp_path, monkeypatch):
+    clock, upgrade = legacy(tmp_path)
+    plan = upgrade.prepare()
+    original = upgrade._install
+
+    def raced(*args):
+        upgrade.reads.stop("operator_stop")
+        return original(*args)
+
+    monkeypatch.setattr(upgrade, "_install", raced)
+    result = approve(upgrade, plan)
+    assert result["upgraded"] and result["stopped"]
+    status = reopen(upgrade, clock).status()
+    assert status["version"] == 3 and status["stopped"] and not status["owner_upgrade_incomplete"]

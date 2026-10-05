@@ -58,6 +58,7 @@ class PersistentReadLimiter(AccountReadLimiter):
         wall_ns=time.time_ns,
         monotonic_ns=time.monotonic_ns,
         sleep=time.sleep,
+        maintain_schema=True,
     ):
         if not isinstance(scope, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", scope):
             raise PrivateReadError("invalid_control_scope")
@@ -73,8 +74,11 @@ class PersistentReadLimiter(AccountReadLimiter):
         with self._transaction() as conn:
             row = self._state(conn)
             self._instance = row["instance_id"]
-            # Additive index also accelerates databases created by older versions.
-            conn.execute("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind,id)")
+            # Additive index also accelerates databases created by older versions. The
+            # legacy upgrade inspects a store without it, so its bytes stay unchanged
+            # until the operator approves the migration.
+            if maintain_schema:
+                conn.execute("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind,id)")
             self._generation = self._current_generation(conn)
 
     @classmethod
