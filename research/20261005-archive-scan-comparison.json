@@ -1,0 +1,121 @@
+{
+  "format": "synthetic-archive-scan-comparison-v1",
+  "started_at": "2026-10-05T13:04:32.186978+00:00",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "script_sha256": "735c6e2b7615fb04a9d3e8b78dce92d6127d919589a5102c0faa142645f4e9e9",
+  "limitations": "One warm synthetic store; alternating order; one SQLite read snapshot; pure archive verifier only, not dispatch/deadline/freshness validation; no production capacity guarantee. Unchanged dependencies checked by AST; historical verifier methods compiled from the fixed local Git baseline.",
+  "baseline_commit": "daf0d23fb3e47dc6b5c16c6069effccbe9a3cca4",
+  "baseline_source_sha256": "fa5f383a8c30e72709c49747556ec411460541d1c5e56ed1af09b0e3436b0c37",
+  "current_source_sha256": "50927d9e2ced91c24d30e990eac24665d45e6fdd32242f227b48c8f55fd0b042",
+  "dependencies_ast_equal": true,
+  "source_sha256_before": "3a4531b236d5f0e61c138ad86ff1b617b249a7ba1feb94dbf91adb0ed7caed80",
+  "source_sha256_after": "3a4531b236d5f0e61c138ad86ff1b617b249a7ba1feb94dbf91adb0ed7caed80",
+  "state_sha256": "92af49e01c927b87631be3961e270f9e5c2ee6f786461ae9f1773834cb6098b4",
+  "alerts": 50000,
+  "archived_alerts": 49000,
+  "returned_latest": "2026-10-04T00:00:00+00:00",
+  "snapshot_query_only": true,
+  "trials": [
+    {
+      "pair": 1,
+      "version": "baseline",
+      "seconds": 0.26972290000412613
+    },
+    {
+      "pair": 1,
+      "version": "current",
+      "seconds": 0.2120619000052102
+    },
+    {
+      "pair": 2,
+      "version": "current",
+      "seconds": 0.1886153999948874
+    },
+    {
+      "pair": 2,
+      "version": "baseline",
+      "seconds": 0.2890235999948345
+    },
+    {
+      "pair": 3,
+      "version": "baseline",
+      "seconds": 0.28826539998408407
+    },
+    {
+      "pair": 3,
+      "version": "current",
+      "seconds": 0.18803770001977682
+    },
+    {
+      "pair": 4,
+      "version": "current",
+      "seconds": 0.19165950000751764
+    },
+    {
+      "pair": 4,
+      "version": "baseline",
+      "seconds": 0.3145444000256248
+    },
+    {
+      "pair": 5,
+      "version": "baseline",
+      "seconds": 0.31185260001802817
+    },
+    {
+      "pair": 5,
+      "version": "current",
+      "seconds": 0.2047145999968052
+    },
+    {
+      "pair": 6,
+      "version": "current",
+      "seconds": 0.19445870001800358
+    },
+    {
+      "pair": 6,
+      "version": "baseline",
+      "seconds": 0.29456629999913275
+    },
+    {
+      "pair": 7,
+      "version": "baseline",
+      "seconds": 0.29015030001755804
+    },
+    {
+      "pair": 7,
+      "version": "current",
+      "seconds": 0.18956299999263138
+    },
+    {
+      "pair": 8,
+      "version": "current",
+      "seconds": 0.2156043000286445
+    },
+    {
+      "pair": 8,
+      "version": "baseline",
+      "seconds": 0.2685607000021264
+    }
+  ],
+  "timings_seconds": {
+    "baseline": {
+      "min": 0.2685607000021264,
+      "median": 0.2895869500061963,
+      "max": 0.3145444000256248
+    },
+    "current": {
+      "min": 0.18803770001977682,
+      "median": 0.1930591000127606,
+      "max": 0.2156043000286445
+    }
+  },
+  "fixture_checks": {
+    "alerts": 50000,
+    "active_alerts": 1000,
+    "archive_count": 49,
+    "sqlite_bytes": 29519872
+  },
+  "finished_at": "2026-10-05T13:04:46.403285+00:00"
+}

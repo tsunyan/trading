@@ -1,0 +1,455 @@
+{
+  "started_at": "2026-10-05T12:48:37.155432+00:00",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "fixture": "Test composition fixtures; retained BEGIN/HEARTBEAT/ACK/END and sent test alerts; real local stores, bindings and checks; memory credentials and MockTransport",
+  "limitations": "Warm local synthetic paths. Frozen mode excludes elapsed time from freshness checks; elapsed mode includes it but no concurrent sync refresh. Real broker, Windows vault, cash/fill history and OS scheduling are not measured. No production deadline guarantee.",
+  "measurements": [
+    {
+      "clock_mode": "elapsed",
+      "alerts": 10000,
+      "size": 500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 0.48777399997925386,
+          "median": 0.5252674000221305,
+          "max": 0.5755875000031665
+        },
+        "dispatch_seconds": {
+          "min": 3.92573600000469,
+          "median": 3.965455199999269,
+          "max": 4.241346099996008
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T12:48:37.192814+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 0.5252674000221305,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 4.241346099996008,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 20.379607899987604
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T12:48:57.572931+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 0.48777399997925386,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 3.92573600000469,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 20.832865600008518
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T12:49:18.405801+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 0.5755875000031665,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 3.965455199999269,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 21.955423199979123
+        }
+      ]
+    },
+    {
+      "clock_mode": "elapsed",
+      "alerts": 50000,
+      "size": 2500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 1.7672749999910593,
+          "median": 1.8626602999866009,
+          "max": 1.9340736000449397
+        },
+        "dispatch_seconds": {
+          "min": 12.36129470000742,
+          "median": 14.314384999976028,
+          "max": 14.796630500000902
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T12:49:40.361325+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 1.8626602999866009,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 14.796630500000902,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 90.36163460003445
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T12:51:10.722757+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 1.9340736000449397,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 14.314384999976028,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 93.97215960000176
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T12:52:44.695113+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 1.7672749999910593,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 12.36129470000742,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 81.7572583000292
+        }
+      ]
+    },
+    {
+      "clock_mode": "elapsed",
+      "alerts": 100000,
+      "size": 5000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 3.350672400032636,
+          "median": 3.4128493000171147,
+          "max": 3.4293490999843925
+        },
+        "dispatch_seconds": {
+          "min": 22.793112299987115,
+          "median": 22.957053999998607,
+          "max": 25.708756699983496
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T12:54:06.452211+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 3.350672400032636,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 25.708756699983496,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 187.25776389997918
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T12:57:13.709477+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 3.4293490999843925,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 22.957053999998607,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 193.72858579998137
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T13:00:27.438837+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "c635050334fa680666c538215dd9c7dd691b7404db308943b67096421e2e8b1a",
+            "watchdog_seconds": 3.4128493000171147,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 22.793112299987115,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            },
+            "fixed_reason_events": [
+              {
+                "stage": "dispatch",
+                "reason": "order_dispatch_deadline_exceeded"
+              }
+            ],
+            "recheck_script_sha256": "e37bf06246e77d2f61d9c363e63d859802d6461664be7c56ce03a70521d04d3d"
+          },
+          "total_seconds": 170.44153279997408
+        }
+      ]
+    }
+  ],
+  "finished_at": "2026-10-05T13:03:17.879663+00:00"
+}

@@ -320,20 +320,35 @@ class PrivateOperations:
 
     @staticmethod
     def _verify_delivery(row, created_at):
-        if type(row["attempts"]) is not int or not 0 <= row["attempts"] < 2**63:
+        return PrivateOperations._verify_delivery_values(
+            created_at,
+            row["attempts"],
+            row["last_attempt_at"],
+            row["acknowledged_at"],
+            row["resolved_at"],
+            row["submitted_at"],
+            row["error"],
+        )
+
+    @staticmethod
+    def _verify_delivery_values(
+        created_at, attempts, last_attempt_at, acknowledged_at, resolved_at, submitted_at, error
+    ):
+        # Both hot named rows and archived positional rows use the same checks.
+        if type(attempts) is not int or not 0 <= attempts < 2**63:
             raise ValueError
-        if bool(row["attempts"]) != (row["last_attempt_at"] is not None):
+        if bool(attempts) != (last_attempt_at is not None):
             raise ValueError
         latest = created_at
-        for name in ("acknowledged_at", "resolved_at", "last_attempt_at", "submitted_at"):
-            if row[name] is not None:
-                stamp = datetime.fromisoformat(row[name])
+        for value in (acknowledged_at, resolved_at, last_attempt_at, submitted_at):
+            if value is not None:
+                stamp = datetime.fromisoformat(value)
                 if stamp.utcoffset() is None or stamp < created_at:
                     raise ValueError
                 latest = max(latest, stamp)
-        if row["submitted_at"] is not None and row["last_attempt_at"] is None:
+        if submitted_at is not None and last_attempt_at is None:
             raise ValueError
-        if row["error"] not in {None, "notification_failed"}:
+        if error not in {None, "notification_failed"}:
             raise ValueError
         return latest
 
@@ -391,12 +406,17 @@ class PrivateOperations:
                 or descriptor.sealed_at < previous_seal
             ):
                 raise ValueError
-            members = conn.execute(
-                "SELECT i.id,i.kind,i.created_at,i.digest AS original_digest,a.* "
+            cursor = conn.execute(
+                "SELECT i.id,i.kind,i.created_at,i.digest,a.body,a.digest,"
+                "a.acknowledged_at,a.resolved_at,a.last_attempt_at,a.attempts,"
+                "a.submitted_at,a.error "
                 "FROM alert_archive_index i "
                 "JOIN alerts a ON a.id=i.id WHERE i.archive=? ORDER BY i.id",
                 (index,),
-            ).fetchall()
+            )
+            # Keep the connection's row factory for other callers; this cursor has fixed columns.
+            cursor.row_factory = None
+            members = cursor.fetchall()
             identities = [[r[0], r[1], r[2], r[3]] for r in members]
             if (
                 len(members) != descriptor.records
@@ -413,34 +433,50 @@ class PrivateOperations:
             latest = max(latest, descriptor.sealed_at)
             previous_seal = descriptor.sealed_at
             for offset, row in enumerate(members):
-                created = datetime.fromisoformat(row[2])
+                (
+                    identity,
+                    kind,
+                    created_raw,
+                    original_digest,
+                    body,
+                    alert_digest,
+                    acknowledged,
+                    resolved,
+                    last_attempt,
+                    attempts,
+                    submitted,
+                    error,
+                ) = row
+                created = datetime.fromisoformat(created_raw)
                 if (
-                    not 1 <= row[0] <= state.alert_count
-                    or row[1] not in KINDS
+                    not 1 <= identity <= state.alert_count
+                    or kind not in KINDS
                     or created.utcoffset() is None
                     or created < state.created_at
-                    or row[3] != row["digest"]
-                    or row["body"] != ""
-                    or (row[1] in CONDITIONS and row["resolved_at"] is None)
-                    or not any(
-                        row[k] is not None
-                        for k in ("acknowledged_at", "resolved_at", "submitted_at")
-                    )
+                    or original_digest != alert_digest
+                    or body != ""
+                    or (kind in CONDITIONS and resolved is None)
+                    or (acknowledged is None and resolved is None and submitted is None)
                 ):
                     raise ValueError
-                latest = max(latest, self._verify_delivery(row, created))
+                latest = max(
+                    latest,
+                    self._verify_delivery_values(
+                        created, attempts, last_attempt, acknowledged, resolved, submitted, error
+                    ),
+                )
                 if full:
                     item = original[offset]
                     if (
                         type(item) is not list
                         or len(item) != 3
-                        or (item[0], item[2]) != (row[0], row[3])
+                        or (item[0], item[2]) != (identity, original_digest)
                     ):
                         raise ValueError
                     alert = self._parse_alert(item[1], state)
                     if _hash(item[1]) != item[2] or (alert.kind, alert.created_at.isoformat()) != (
-                        row[1],
-                        row[2],
+                        kind,
+                        created_raw,
                     ):
                         raise ValueError
             head, total = digest, total + descriptor.records
