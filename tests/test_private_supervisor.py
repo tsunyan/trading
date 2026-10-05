@@ -383,18 +383,16 @@ def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elap
 
     def join(timeout=None):
         waits.append(timeout)
+        # The join budget is asserted below (35s, not the old two-second budget), so the
+        # collection only needs to still be running when close() starts waiting.
+        release.set()
         return original(timeout=timeout)
 
     monkeypatch.setattr(runner._worker, "join", join)
-    # The join budget is asserted below (35s, not the old two-second budget), so the
-    # collection only needs to still be running when close() starts waiting.
-    timer = threading.Timer(0.05, release.set)
-    timer.start()
     try:
         runner.close()
     finally:
         release.set()
-        timer.join()
     assert waits[0] == pytest.approx(35 - elapsed)
     assert calls == ["collect"]  # Shutdown must not launch another collection.
     assert control.snapshot()["phase"] == "READY"

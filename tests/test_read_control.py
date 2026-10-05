@@ -291,7 +291,8 @@ with control.slot():
 
 def test_two_processes_cannot_overlap(tmp_path):
     control = PersistentReadLimiter.create(tmp_path / "control", SCOPE)
-    marker = tmp_path / "entered.txt"
+    marker, release = tmp_path / "entered.txt", tmp_path / "release.txt"
+    # The child holds its slot until the parent has checked the overlap, not for a fixed time.
     script = """
 import sys, time
 from pathlib import Path
@@ -299,10 +300,12 @@ from trading.read_control import PersistentReadLimiter
 control = PersistentReadLimiter(Path(sys.argv[1]), sys.argv[2])
 with control.slot():
     Path(sys.argv[3]).write_text('entered')
-    time.sleep(0.5)
+    deadline = time.monotonic() + 10
+    while not Path(sys.argv[4]).exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
 """
     child = subprocess.Popen(
-        [sys.executable, "-c", script, str(control.path.parent), SCOPE, str(marker)],
+        [sys.executable, "-c", script, str(control.path.parent), SCOPE, str(marker), str(release)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -315,6 +318,7 @@ with control.slot():
             pytest.fail("overlapping request")
         control.stop("operator_stop")
         assert control.status()["stopped"]
+        release.write_text("release")
         _, error = child.communicate(timeout=5)
         assert child.returncode == 0, error.decode()
         assert control.status()["stopped"] and not control.status()["in_flight"]
