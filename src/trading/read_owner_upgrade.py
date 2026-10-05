@@ -57,10 +57,13 @@ class ReadOwnerUpgrade:
         already stopped it only appends `STOP_*`, and `_source` still catches a stop
         that changes the control state (for example `claim_mismatch`).
         """
-        return conn.execute(
-            "SELECT 1 FROM events WHERE id>? AND substr(kind,1,5)<>'STOP_' LIMIT 1",
-            (started_id,),
-        ).fetchone() is not None
+        return (
+            conn.execute(
+                "SELECT 1 FROM events WHERE id>? AND substr(kind,1,5)<>'STOP_' LIMIT 1",
+                (started_id,),
+            ).fetchone()
+            is not None
+        )
 
     def _source(self, conn):
         return {
