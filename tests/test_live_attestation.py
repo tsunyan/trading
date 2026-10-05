@@ -56,10 +56,14 @@ def test_attestation_is_valid_only_until_it_expires(journal, tmp_path):
     assert require(path, journal, required=CYCLE_CONFIRMATIONS, now=later)
 
 
-@pytest.mark.parametrize("hours", [0, 73, True])
-def test_attestation_lifetime_is_short(journal, tmp_path, hours):
-    with pytest.raises(LiveAttestationError, match="attestation_hours_out_of_range"):
-        write(journal, tmp_path / "a.json", hours=hours)
+def test_attestation_lifetime_is_short(journal, tmp_path, subtests):
+    for hours in (0, 73, True):
+        with (
+            subtests.test(hours=hours),
+            pytest.raises(LiveAttestationError, match="attestation_hours_out_of_range"),
+        ):
+            write(journal, tmp_path / "a.json", hours=hours)
+    assert not (tmp_path / "a.json").exists()
 
 
 def test_partial_confirmations_cannot_be_attested(journal, tmp_path):
