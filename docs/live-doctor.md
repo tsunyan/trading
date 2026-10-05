@@ -14,7 +14,7 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 
 | 項目 | 理由の例 |
 | --- | --- |
-| `disk_space` | `disk_space_low:<空きMiB>`、`disk_space_unavailable`（実発注台帳・POST制御・GET制御の保存先を個別に検査。どれかの空きが1GiB未満、または取得不能） |
+| `disk_space` | `disk_space_low:<空きMiB>`、`disk_space_unavailable`、`live_operations_unavailable`（実発注台帳・POST・GETと、登録済みの同期・監視・現金台帳などの保存先を個別に検査。空きが1GiB未満、取得不能、計画の差替えや保存先欠落で拒否） |
 | `read_control` | `read_control_blocked`（GET制御の停止・未完了claim） |
 | `post_control` | `post_stopped:<停止理由>`、`post_claim_in_flight` |
 | `approval` | `phase_disabled`、`phase_stopped`、`journal_halted`、`implementation_changed`、`approval_expired` |
@@ -35,8 +35,10 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 ## 判定の範囲
 
 2026-10-05、容量検査を送信経路へ接続しました。キー読込前後、POST待機後、HTTP直前で新規・決済・取消を
-拒否し、停止中の対象限定取消にも適用します。実発注台帳・POST・GETの保存先が別ドライブでも検査します。
-同期・監視・現金台帳だけが別ドライブにある場合は対象外です。空き容量を予約する機能ではなく、検査後に
+拒否し、停止中の対象限定取消にも適用します。実発注台帳・POST・GETに加え、登録済み同期のルート・
+イベント記録・制御・注文カタログ・監視・現金台帳の保存先が別ドライブでも検査します。
+元の計画の指紋と保存先を確認し、容量検査で履歴を走査したり同期を開始したりしません。
+空き容量を予約する機能ではなく、検査後に
 容量が減る可能性は残るため、書込み失敗時の既存の停止・結果不明処理も維持します。
 
 気配の鮮度・口座リスク（注文額・余力・損失上限など）は注文と気配ごとに決まるため、この診断では
@@ -54,5 +56,8 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 `tests/test_storage_capacity.py`で検証します。新規・決済・通常取消・停止中の対象限定取消について、
 HTTPを送らず、未送信のclaimを結果不明にしないことを確認します。`tests/test_order_runtime.py`で
 キー読込前後の拒否も確認します。実資格情報・業者通信は使いません。
+
+`tests/test_live_storage_capacity.py`では登録済みの全保存先について、診断と送信境界の拒否、
+計画差替え時の拒否、検査が同期の開始や履歴走査を行わないことを確認します。
 
 `--notify-state <ファイル>`を指定すると、送信を止めている条件の組が変わった時だけWindows通知します（[定期実行](live-tasks.md)）。

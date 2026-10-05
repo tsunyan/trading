@@ -99,6 +99,36 @@ class LiveOperations:
             raise LiveOperationsError("live_operations_binding_changed")
         return workspace, monitor, reads
 
+    def storage_directories(self):
+        """Locate original stores from the bound plan without scanning journal histories.
+
+        This is only a capacity check. The dispatch still requires the full original
+        enrollment and health checks, and a restricted cancellation retains its own
+        authorization checks. No workspace or store is created here.
+        """
+        from trading.private_sync import SyncPlan, _digest, _read_json
+
+        try:
+            directory = Path(self.binding.sync_directory)
+            manifest = _read_json(directory / "sync-plan.json")
+            plan = SyncPlan.model_validate(manifest["plan"])
+            if _digest(plan) != self.binding.plan_sha256 or not plan.cash_directory.is_absolute():
+                raise ValueError
+            directories = (
+                directory,
+                directory / "journal",
+                directory / "control",
+                directory / "catalog",
+                directory / "private-operations",
+                plan.cash_directory,
+            )
+            resolved = tuple(path.resolve(strict=True) for path in directories)
+            if not all(path.is_dir() for path in resolved):
+                raise ValueError
+            return resolved
+        except (ValueError, OSError, KeyError, TypeError):
+            raise LiveOperationsError("live_operations_unavailable") from None
+
     @staticmethod
     def _fresh(stamp, now, limit):
         return (

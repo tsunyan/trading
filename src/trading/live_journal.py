@@ -835,18 +835,27 @@ class LiveOrderJournal(OrderJournal):
                 "complete": False,
             }
 
-    def require_storage_capacity(self):
+    def require_storage_capacity(self, *, state=None):
         """Check each original dispatch store, including separate mounted volumes."""
         try:
-            require_capacity(
-                (self.path.parent, self.posts.path.parent, self.posts.reads.path.parent)
-            )
-        except StorageCapacityError as error:
+            if state is None:
+                with self._transaction() as conn:
+                    state = self._live_state(conn)
+            directories = (self.path.parent, self.posts.path.parent, self.posts.reads.path.parent)
+            if state.operations is not None:
+                directories += LiveOperations(
+                    state.operations,
+                    self._operations_target(state, state.operations.sync_instance),
+                    clock=self.clock,
+                    monotonic=self.posts._mono,
+                ).storage_directories()
+            require_capacity(directories)
+        except (StorageCapacityError, LiveOperationsError) as error:
             raise LiveOrderError(str(error)) from None
 
     def _authorize(self, conn, now):
-        self.require_storage_capacity()
         state = self._live_state(conn)
+        self.require_storage_capacity(state=state)
         if (
             state.phase != "ENABLED"
             or state.implementation_sha256 != self._current_implementation()
@@ -2017,7 +2026,7 @@ class LiveOrderJournal(OrderJournal):
     def _authorize_cancel(self, conn, client_id, now, authorization_sha256, *, claimed=False):
         if authorization_sha256 is None:
             return self._authorize(conn, now)
-        self.require_storage_capacity()
+        self.require_storage_capacity(state=self._live_state(conn))
         saved = conn.execute(
             "SELECT id,payload_json FROM events WHERE client_id=? AND kind='CANCEL_AUTHORIZED' "
             "ORDER BY id DESC LIMIT 1",
