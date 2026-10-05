@@ -40,6 +40,8 @@ uv run python -m trading.live_doctor --directory runs/live-orders --read-control
 元の計画の指紋と保存先を確認し、容量検査で履歴を走査したり同期を開始したりしません。
 空き容量を予約する機能ではなく、検査後に
 容量が減る可能性は残るため、書込み失敗時の既存の停止・結果不明処理も維持します。
+claim取得後、HTTP直前の容量不足で未送信とした場合、`SUBMISSION_NOT_SENT`・`CANCEL_NOT_SENT`には
+固定の`disk_space_low`を保存します。空きMiBは診断表示だけに使い、容量が回復した後も原因を記録から確認できます。
 
 気配の鮮度・口座リスク（注文額・余力・損失上限など）は注文と気配ごとに決まるため、この診断では
 判定しません。[確認済み送信](order-runtime.md)の`context`で確認します。準備済みの注文は送信対象なので

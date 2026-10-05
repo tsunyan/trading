@@ -3,6 +3,7 @@
 import shutil
 
 MIN_FREE_BYTES = 2**30
+LOW_SPACE = "disk_space_low"
 
 
 class StorageCapacityError(ValueError):
@@ -16,4 +17,4 @@ def require_capacity(directories):
         except OSError:
             raise StorageCapacityError("disk_space_unavailable") from None
         if free < MIN_FREE_BYTES:
-            raise StorageCapacityError(f"disk_space_low:{free // 2**20}MiB")
+            raise StorageCapacityError(f"{LOW_SPACE}:{free // 2**20}MiB")

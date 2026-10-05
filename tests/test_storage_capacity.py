@@ -125,6 +125,10 @@ def test_low_capacity_never_sends_or_leaves_unknown_claims(
     expected = before["orders"][index]["state"]
     if stage == "before_http":
         expected = "ABANDONED" if operation in {"submit", "close"} else "PARTIAL"
+        kind = "SUBMISSION_NOT_SENT" if operation in {"submit", "close"} else "CANCEL_NOT_SENT"
+        refused = [e["payload"] for e in after["events"] if e["kind"] == kind]
+        # The durable record keeps the fixed cause after free space recovers.
+        assert [r["reason"] for r in refused] == ["disk_space_low"]
     assert after["orders"][index]["state"] == expected
     assert after["halted"] == before["halted"]
     assert after["live_control"] == before["live_control"]

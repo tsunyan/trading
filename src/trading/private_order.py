@@ -21,6 +21,7 @@ from trading.order_receipts import (
     parse_submission_receipt,
 )
 from trading.post_control import PostControlError
+from trading.storage_capacity import LOW_SPACE
 
 ENDPOINT = "https://forex-api.coin.z.com/private"
 
@@ -56,6 +57,9 @@ class NotSent(Exception):
 
 def _reason(error):
     text = str(error)
+    if text.startswith(LOW_SPACE + ":"):
+        # Durable records keep the fixed cause; the free MiB is a diagnostic only.
+        return LOW_SPACE
     if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", text):
         return text
     return "dispatch_refused"
