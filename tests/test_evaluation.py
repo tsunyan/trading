@@ -93,8 +93,8 @@ def test_gap_report_classifies_regular_fx_weekend_closure(cfg, bars):
 
 def test_gap_report_uses_provider_empty_dates_from_lineage(cfg, bars):
     frame = bars.iloc[:2].copy()
-    frame["timestamp"] = pd.to_datetime(["2025-12-24T20:00:00Z", "2025-12-25T21:00:00Z"], utc=True)
-    frame.attrs["lineage"] = {"collection": {"empty_trading_dates": ["2025-12-25"]}}
+    frame["timestamp"] = pd.to_datetime(["2025-11-11T20:00:00Z", "2025-11-12T21:00:00Z"], utc=True)
+    frame.attrs["lineage"] = {"collection": {"empty_trading_dates": ["2025-11-12"]}}
 
     report = interval_gap_report(frame, cfg)
 
@@ -103,6 +103,64 @@ def test_gap_report_uses_provider_empty_dates_from_lineage(cfg, bars):
     assert report["status"] == "needs_review"
     assert report["review_reasons"] == ["provider_empty_during_regular_hours"]
     assert report["gaps"][0]["classification"] == "provider_empty"
+
+
+def test_gap_report_classifies_official_special_closures_without_review(cfg, bars):
+    frame = bars.iloc[:2].copy()
+    # Christmas 2025: closed 06:00 JST Dec 25 until 07:00 JST Dec 26 (25 hourly bars).
+    frame["timestamp"] = pd.to_datetime(["2025-12-24T20:00:00Z", "2025-12-25T22:00:00Z"], utc=True)
+    frame.attrs["lineage"] = {"collection": {"empty_trading_dates": ["2025-12-25"]}}
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["special_closure_bar_intervals"] == 25
+    assert report["provider_empty_bar_intervals"] == 0
+    assert report["unexplained_bar_intervals"] == 0
+    assert report["status"] == "ok"
+    assert report["gaps"][0]["classification"] == "special_closure"
+    assert report["special_closure_sources"] == ["https://coin.z.com/jp/news/2025/12/15340/"]
+
+
+def test_gap_report_partial_special_closure_leaves_the_rest_unexplained(cfg, bars):
+    frame = bars.iloc[:2].copy()
+    # One bar past the announced reopening is still missing: not covered by the notice.
+    frame["timestamp"] = pd.to_datetime(["2025-12-24T20:00:00Z", "2025-12-25T23:00:00Z"], utc=True)
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["special_closure_bar_intervals"] == 25
+    assert report["unexplained_bar_intervals"] == 1
+    assert report["gaps"][0]["classification"] == "mixed"
+    assert report["review_reasons"] == ["unexplained_gaps"]
+
+
+def test_gap_report_flags_bars_inside_an_announced_closure(cfg, bars):
+    frame = bars.iloc[:2].copy()
+    frame["timestamp"] = pd.to_datetime(["2025-12-25T03:00:00Z", "2025-12-25T04:00:00Z"], utc=True)
+
+    report = interval_gap_report(frame, cfg)
+
+    assert report["status"] == "needs_review"
+    assert report["review_reasons"] == ["bars_during_official_special_closure"]
+    assert len(report["bars_during_special_closures"]) == 2
+
+
+def test_special_closure_calendar_is_well_formed_and_rejects_bad_windows():
+    from trading import market_calendar
+
+    assert len(market_calendar._windows(market_calendar.FX_SPECIAL_CLOSURES)) == 6
+    window = dict(market_calendar.FX_SPECIAL_CLOSURES[0])
+    for change in (
+        {"hours": 23},
+        {"first_missing_bar_jst": "2023-12-25T07:30:00+09:00"},
+        {"resume_jst": "2023-12-26T07:00:00+00:00"},
+        {"source": "https://example.com/notice"},
+        {"published": "2023-12-26"},
+    ):
+        with pytest.raises(ValueError, match="invalid_special_closure_window"):
+            market_calendar._windows([{**window, **change}])
+    with pytest.raises(ValueError, match="overlapping"):
+        market_calendar._windows([window, window])
 
 
 def test_gap_report_rejects_empty_date_lineage_that_conflicts_with_bars(cfg, bars):

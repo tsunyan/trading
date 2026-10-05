@@ -32,6 +32,8 @@ REASONS = {
     "worker_not_joined",
     "startup_failed",
 }
+# The watchdog holds the owner lock only briefly; operator commands wait this long.
+OPERATOR_OWNER_WAIT_SECONDS = 2.0
 SCHEMA = """
 CREATE TABLE control (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL, digest TEXT NOT NULL);
 CREATE TABLE transitions (
@@ -215,7 +217,9 @@ class StreamControl:
                 raise StreamControlError("stream_owner_file_changed")
 
     @contextmanager
-    def ownership(self):
+    def ownership(self, *, wait_seconds=0):
+        """Non-blocking by default. Operator commands may wait out a watchdog's brief probe;
+        a live owner still refuses once the bounded wait ends."""
         if self._owned:
             raise StreamControlError("stream_owner_busy")
         with self._transaction() as conn:
@@ -226,20 +230,25 @@ class StreamControl:
             raise StreamControlError("stream_owner_unavailable") from None
         with handle:
             self._verify_lock(state, handle, read_contents=False)
-            handle.seek(0)
-            try:
-                if os.name == "nt":
-                    import msvcrt
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                handle.seek(0)
+                try:
+                    if os.name == "nt":
+                        import msvcrt
 
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                elif os.name == "posix":
-                    import fcntl
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    elif os.name == "posix":
+                        import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                else:
-                    raise StreamControlError("stream_owner_platform_unsupported")
-            except OSError:
-                raise StreamControlError("stream_owner_busy") from None
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    else:
+                        raise StreamControlError("stream_owner_platform_unsupported")
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise StreamControlError("stream_owner_busy") from None
+                    time.sleep(0.05)
             self._owned, self._handle = True, handle
             try:
                 self._verify_lock(state, handle)
@@ -376,6 +385,44 @@ class StreamControl:
                 journal_head=view["head"],
             )
 
+    def review_delivery_uncertainty(
+        self,
+        journal,
+        cash_book,
+        *,
+        expected_revision,
+        expected_head,
+        expected_reason,
+        at=None,
+        monotonic_ns=0,
+    ):
+        """Record the operator's review of unknown delivery while no capture can run.
+
+        Recovery afterwards stays strict: every stored execution, including formerly
+        unknown ones, must be matched by GET and booked first (reconcile-stopped).
+        """
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise StreamControlError("invalid_stream_revision")
+        with self.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
+            self.check_binding(journal, cash_book)
+            with self._transaction() as conn:
+                state = self._state(conn)
+                if state.phase == "READY":
+                    raise StreamControlError("stream_recovery_not_required")
+                if state.revision != expected_revision or state.reason != expected_reason:
+                    raise StreamControlError("stream_control_state_changed")
+            head = journal.review_delivery_uncertainty(
+                expected_head=expected_head,
+                at=datetime.now(UTC) if at is None else at,
+                monotonic_ns=monotonic_ns,
+            )
+            with self._transaction() as conn:
+                current = self._state(conn)
+                if current.revision != state.revision:
+                    raise StreamControlError("stream_control_state_changed")
+                updated = self._write(conn, current, "REVIEW", journal_head=head)
+            return {**updated.model_dump(), "complete": False, "live_enabled": False}
+
     def recover(
         self,
         journal,
@@ -392,7 +439,7 @@ class StreamControl:
             raise StreamControlError("invalid_stream_revision")
         if type(acknowledge_token_uncertainty) is not bool:
             raise StreamControlError("invalid_recovery_acknowledgment")
-        with self.ownership():
+        with self.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             self.check_binding(journal, cash_book)
             with self._transaction() as conn:
                 state = self._state(conn)

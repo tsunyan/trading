@@ -12,6 +12,7 @@ from pathlib import Path
 from trading.account_guard import AccountPolicy, AccountSnapshot, fresh
 from trading.config import load_settings
 from trading.live_operations import LiveOperations
+from trading.order_receipts import BROKER_CODE_NOTES
 from trading.private_order_recovery import PrivateOrderRecovery
 from trading.promotion import require_live
 
@@ -48,10 +49,14 @@ def diagnose(journal, now, *, candidate=None, cycle=None):
         state = journal._live_state(conn)
         gate = journal._gate(conn)
         halted = bool(conn.execute("SELECT halted FROM metadata").fetchone()[0])
-        orders = [
-            {"client_id": row["client_id"], "state": row["state"]}
-            for row in conn.execute("SELECT client_id,state FROM orders ORDER BY client_id")
-        ]
+        orders = []
+        for row in conn.execute("SELECT client_id,state FROM orders ORDER BY client_id"):
+            item = {"client_id": row["client_id"], "state": row["state"]}
+            codes = journal._broker_codes(conn, row["client_id"])
+            if codes:
+                # For the operator's review only; the order stays awaiting reconciliation.
+                item["broker_error_codes"] = {c: BROKER_CODE_NOTES.get(c) for c in codes}
+            orders.append(item)
 
     def approval():
         if state.phase != "ENABLED":
@@ -95,6 +100,7 @@ def diagnose(journal, now, *, candidate=None, cycle=None):
         return None
 
     gates = {
+        "disk_space": _gate(journal.require_storage_capacity),
         "read_control": _gate(reads),
         "post_control": _gate(posts),
         "approval": _gate(approval),

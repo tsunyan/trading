@@ -7,9 +7,12 @@
 | コマンド | 用途 | 鍵 | 通信 | 台帳の変更 |
 | --- | --- | --- | --- | --- |
 | `trading.live_rules check` | 注文上限と業者の取引ルールの照合（[説明](live-rules.md)） | なし | 公開GET | なし |
+| `trading.read_owner_upgrade status/prepare/approve/complete` | 停止中で未完了のない旧GETの現形式への移行（[説明](read-owner-upgrade.md)） | なし | なし | GET制御のみ（停止維持） |
+| `trading.read_control_evidence` | 元GET制御の不変更採取（[説明](recovery-evidence-contract.md)） | なし | なし | 元保存物変更なし・指定先の証拠JSONのみ |
+| `trading.stream_control_evidence` | 元同期制御の不変更採取（[説明](recovery-evidence-contract.md#同期制御の証拠採取)） | なし | なし | 元保存物変更なし・指定先の証拠JSONのみ |
 | `trading.live_setup create/prepare/abandon/activation-context/activate/status/stop/backup` | 台帳の作成・注文の準備と破棄・有効化・状態・停止・監査用の複製（[説明](live-setup.md)） | なし | なし | あり |
 | `trading.private_order_operations context/bind` | 同期・監視の登録、停止中の台帳の移行（[説明](live-operations.md)） | なし | なし | あり |
-| `trading.private_sync run/continue/status` | 継続同期の実行と正常終了からの続行（[説明](private-sync.md)） | 読取専用 | GET・WebSocket・通知用トークンのPOST/PUT/DELETE | 同期側 |
+| `trading.private_sync run/continue/status/reconcile-stopped/review-delivery/recover` | 継続同期の実行と正常終了からの続行、停止中の照合・確認・復旧（[説明](private-sync.md)） | 読取専用 | GET・WebSocket・通知用トークンのPOST/PUT/DELETE | 同期側 |
 | `trading.private_operations watchdog` | 独立監視と台帳の停止・通知（[説明](private-operations.md)） | なし | なし | 停止のみ |
 | `trading.order_credentials binding/save` | 発注用キーの保存（[説明](order-runtime.md)） | 保存のみ | なし | なし |
 | `trading.live_quote` | 確認用気配の取得（[説明](live-quote.md)） | なし | 公開GET | なし |
@@ -18,7 +21,7 @@
 | `trading.live_cycle` | 照合・気配・口座証拠・提案・準備をまとめて実行（[説明](live-cycle.md)） | 読取専用 | GET・公開GET | あり（送信なし） |
 | `trading.order_runtime context/submit/cancel-context/cancel` | 実行内容の確認と送信（[説明](order-runtime.md)） | 発注用 | POST | あり |
 | `trading.live_order_sync` | 受付済み注文のGET照合（[説明](live-order-sync.md)） | 読取専用 | GET | 注文状態 |
-| `trading.private_order_recovery context/reconcile/resolution-context/resolve` | 結果不明の調査とclaim解消（[説明](order-recovery.md)、[解消](order-resolution.md)） | 読取専用 | GET | あり |
+| `trading.private_order_recovery context/reconcile/resolution-context/active-cancel-context/resolve/absence-context/resolve-absence` | 結果不明の調査とclaim解消（[説明](order-recovery.md)、[解消](order-resolution.md)、[不在](order-absence.md)） | 読取専用（reconcileのみ） | GET（reconcileのみ） | あり |
 | `trading.order_discovery` | 結果不明注文の業者ID発見（[説明](order-discovery.md)） | 読取専用 | GET | なし |
 | `trading.private_order_restart context/restart` | 停止後の明示再開（[説明](order-restart.md)） | なし | なし | あり |
 | `trading.live_acceptance read-evidence/file-evidence/approval/...` | 受入証拠と承認ファイルの作成（[説明](live-acceptance.md)） | 読取専用（read-evidenceのみ） | GET（read-evidenceのみ） | なし |

@@ -875,3 +875,33 @@ def test_cli_continue_runs_from_the_saved_ready_checkpoint_only(setup, monkeypat
         main([*base, "--read-only-confirmed"])
     assert "reason=continue_requires_ready" in capsys.readouterr().err
     assert len(calls) == 1
+
+
+def test_cli_review_delivery_requires_its_confirmation_and_an_uncertain_segment(setup, capsys):
+    _, _, _, backend, _, workspace = setup
+    with workspace.control.ownership():
+        workspace.control.begin(
+            workspace.journal, expected_revision=0, expected_head=workspace.journal.head()
+        )
+    state = workspace.control.snapshot()
+    args = [
+        "review-delivery",
+        "--directory",
+        str(workspace.directory),
+        "--expected-plan-sha256",
+        workspace.plan_sha256,
+        "--expected-revision",
+        str(state["revision"]),
+        "--expected-head",
+        workspace.journal.head(),
+        "--expected-reason",
+        state["reason"],
+    ]
+    with pytest.raises(SystemExit):
+        main(args)
+    assert "sync_delivery_review_confirmation_required" in capsys.readouterr().err
+    # Nothing was captured, so there is no uncertainty to review.
+    with pytest.raises(SystemExit):
+        main([*args, "--delivery-uncertainty-reviewed"])
+    assert "reason=journal_review_not_required" in capsys.readouterr().err
+    assert workspace.control.snapshot() == state and backend.reads == []

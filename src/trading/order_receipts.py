@@ -25,6 +25,36 @@ class ReceiptError(ValueError):
     """Fixed local reasons only; never expose raw broker messages."""
 
 
+BROKER_CODE = re.compile(r"ERR-\d{1,5}")
+# From GMO's published FX error table, for operator review. A code never resolves a claim:
+# the error body format is undocumented, so a non-zero status stays an unknown outcome.
+BROKER_CODE_NOTES = {
+    "ERR-143": "取引規制中",
+    "ERR-201": "取引余力不足",
+    "ERR-761": "注文レートが制限範囲外",
+    "ERR-5003": "API呼出上限",
+    "ERR-5008": "リクエスト時刻が遅い",
+    "ERR-5009": "リクエスト時刻が早い",
+}
+
+
+def broker_error_codes(payload: bytes) -> tuple[str, ...]:
+    """At most five fixed ERR codes from a non-zero status body; never its free text."""
+    try:
+        body = json.loads(payload)
+    except (ValueError, RecursionError):
+        return ()
+    if not isinstance(body, dict) or type(body.get("status")) is not int or not body["status"]:
+        return ()
+    messages = body.get("messages")
+    codes = []
+    for message in messages[:5] if isinstance(messages, list) else ():
+        code = message.get("message_code") if isinstance(message, dict) else None
+        if isinstance(code, str) and BROKER_CODE.fullmatch(code) and code not in codes:
+            codes.append(code)
+    return tuple(codes)
+
+
 class SubmissionReceipt(Contract):
     intent: OrderIntent
     root_order_id: int = Field(strict=True, gt=0, lt=2**63)

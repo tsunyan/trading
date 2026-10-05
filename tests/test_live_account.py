@@ -496,3 +496,181 @@ def test_revalue_invariants_over_random_positions_and_quotes():
         assert revalued.equity == local
         assert revalued.available_margin <= broker.available_margin
         assert revalued.available_margin <= max(local - margin, Decimal(0))
+
+
+def unknown_submission(setup):
+    _, live, _, order, _ = setup
+    clock = setup[0][0]
+    with __import__("test_private_order").client(live, lambda _: httpx.Response(500)) as sender:
+        with pytest.raises(ValueError):
+            sender.submit(order.client_id, quote=quote(clock.wall))
+    return order
+
+
+def absent(setup, order, **broker_options):
+    values = setup[0]
+    clock = values[0]
+    clock.advance(301)
+    return refresher(setup).refresh(
+        values[5].plan.credential_reference,
+        confirmations=ACCOUNT_CONFIRMATIONS,
+        quote=quote(clock.wall),
+        vault=values[4],
+        transport=broker(clock, [], **broker_options),
+        absent_order=order.client_id,
+    )
+
+
+def test_absent_order_observation_is_recorded_without_updating_the_gate(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    gate_before = live[3].snapshot()
+    result = absent(setup, order)
+    assert result["account_shows_no_effect"] and not result["absence_proven"]
+    assert live[3].order_absence_context(order.client_id)["absent_state"] == "UNKNOWN"
+    after = live[3].snapshot()
+    assert after["orders"] == gate_before["orders"] and after["halted"]
+
+
+def test_absent_order_found_active_is_refused_before_any_record(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    clock = setup[0][0]
+    wire = {
+        "rootOrderId": 101,
+        "orderId": 201,
+        "clientOrderId": order.client_id,
+        "symbol": "USD_JPY",
+        "side": order.side,
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": order.effect,
+        "size": str(order.units),
+        "price": str(order.price),
+        "status": "ORDERED",
+        "timestamp": clock.wall.isoformat(),
+    }
+    with pytest.raises(LiveAccountError, match="unknown_order_is_active"):
+        absent(setup, order, orders=[wire])
+    with pytest.raises(ValueError, match="absence_account_required"):
+        live[3].order_absence_context(order.client_id)
+
+
+def test_absent_order_with_a_position_is_refused(setup):
+    live = setup[1]
+    order = unknown_submission(setup)
+    clock = setup[0][0]
+    held = {
+        "positionId": 401,
+        "symbol": "USD_JPY",
+        "side": "BUY",
+        "size": "1000",
+        "orderedSize": "0",
+        "price": "150.01",
+        "lossGain": "0",
+        "totalSwap": "0",
+        "timestamp": clock.wall.isoformat(),
+    }
+    with pytest.raises(ValueError, match="complete_account_required"):
+        absent(
+            setup,
+            order,
+            positions=[held],
+            assets={"margin": "6000", "availableAmount": "994000"},
+        )
+    with pytest.raises(ValueError, match="absence_account_required"):
+        live[3].order_absence_context(order.client_id)
+
+
+@pytest.mark.parametrize("active_present", [False, True])
+def test_active_cancel_get_observation_preserves_pending_state_and_normal_gate(
+    setup, active_present
+):
+    from test_private_order import client
+
+    from trading.broker_contracts import cancel_request
+
+    values, live, _, order, _ = setup
+    clock, _, posts, journal = live
+    with client(live, lambda request: response(clock, request)) as sender:
+        sender.submit(order.client_id, quote=quote(clock.now))
+    journal.reconcile(fixture_evidence(order, 101, 201, "ORDERED", [], clock.now))
+    with pytest.raises(RuntimeError):
+        with posts.operation(
+            "cancel",
+            request_sha256=__import__("hashlib").sha256(cancel_request(101).body).hexdigest(),
+        ):
+            journal.begin_cancel(order.client_id)
+            raise RuntimeError("interrupted cancellation")
+    journal.halt()
+    clock.advance(1)
+    journal.reconcile(fixture_evidence(order, 101, 201, "ORDERED", [], clock.now))
+    before, post = journal.snapshot(), posts.snapshot()
+    wire = {
+        "rootOrderId": 101,
+        "orderId": 201,
+        "clientOrderId": order.client_id,
+        "symbol": "USD_JPY",
+        "side": order.side,
+        "orderType": "NORMAL",
+        "executionType": "LIMIT",
+        "settleType": order.effect,
+        "size": str(order.units),
+        "price": str(order.price),
+        "status": "ORDERED",
+        "timestamp": clock.now.isoformat(),
+    }
+    calls = []
+
+    def observe():
+        return refresher(setup).refresh(
+            values[5].plan.credential_reference,
+            confirmations=ACCOUNT_CONFIRMATIONS,
+            quote=quote(clock.now),
+            vault=values[4],
+            transport=broker(values[0], calls, orders=[wire] if active_present else []),
+            active_cancel=order.client_id,
+        )
+
+    if active_present:
+        result = observe()
+        assert result["cancel_outcome_unknown"] and not result["account_gate_updated"]
+        assert journal.active_cancel_context(order.client_id)["active_state"] == "WORKING"
+    else:
+        with pytest.raises(ValueError, match="complete_account_required"):
+            observe()
+        assert journal.snapshot() == before
+    after = journal.snapshot()
+    assert after["orders"][0]["state"] == "CANCEL_PENDING" and after["halted"]
+    assert after["account_guard"] == before["account_guard"] and posts.snapshot() == post
+    assert calls and {request.method for request in calls} == {"GET"}
+
+
+def test_account_review_targets_are_mutually_exclusive_before_get(setup):
+    values = setup[0]
+    with pytest.raises(LiveAccountError, match="one_account_review_target_required"):
+        refresher(setup).refresh(
+            values[5].plan.credential_reference,
+            confirmations=ACCOUNT_CONFIRMATIONS,
+            absent_order="Buy001",
+            active_cancel="Buy001",
+        )
+    assert values[3].reads == []
+
+
+def test_swap_diagnostic_is_reported_without_affecting_the_reconciliation(setup):
+    from test_swap_check import schedule
+
+    values = setup[0]
+    clock = values[0]
+    clock.advance(1)
+    result = refresher(setup).refresh(
+        values[5].plan.credential_reference,
+        confirmations=ACCOUNT_CONFIRMATIONS,
+        quote=quote(clock.wall),
+        vault=values[4],
+        transport=broker(clock, []),
+        swap_schedule=schedule(),
+    )
+    assert result["reconciled"]
+    assert result["swap_check"]["positions"] == 0 and result["swap_check"]["diagnostic_only"]

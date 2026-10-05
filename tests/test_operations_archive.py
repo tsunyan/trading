@@ -5,7 +5,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 from test_private_operations import no_credentials_or_network as no_credentials_or_network
@@ -138,6 +138,64 @@ def test_archive_or_delivery_corruption_fails_closed_without_touching_runtime(
     with pytest.raises(OperationsError):
         PrivateOperations(workspace.directory)
     assert monitor.path.read_bytes() == before and workspace.control.snapshot() == saved
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    [
+        "attempts=-1",
+        "attempts=1.5",
+        "attempts='invalid'",
+        "attempts=0",
+        "acknowledged_at='2026-01-01T00:00:00'",
+        "resolved_at='2000-01-01T00:00:00+00:00'",
+        "last_attempt_at='2000-01-01T00:00:00+00:00'",
+        "submitted_at='2000-01-01T00:00:00+00:00'",
+        "error='invalid'",
+        "attempts=0,last_attempt_at=NULL",
+        "acknowledged_at=NULL,resolved_at=NULL,submitted_at=NULL",
+    ],
+)
+def test_every_archived_delivery_field_is_rechecked_after_successful_scans(
+    setup, monkeypatch, assignments
+):
+    _, _, backend, workspace, _ = setup
+    monitor = compact_history(setup, monkeypatch)
+    saved = workspace.control.snapshot()
+    for _ in range(2):
+        assert monitor.status()["archived_alerts"] == 2
+        assert monitor.audit_history()["alerts"] == 4
+    with sqlite3.connect(monitor.path) as conn:
+        # Fixed test expressions, never operator input. Only delivery fields change.
+        conn.execute(f"UPDATE alerts SET {assignments} WHERE id=1")
+    before = monitor.path.read_bytes()
+    for action in (monitor.status, monitor.check, monitor.audit_history):
+        with pytest.raises(OperationsError, match="operations_integrity_failed"):
+            action()
+    assert monitor.path.read_bytes() == before
+    assert workspace.control.snapshot() == saved and backend.reads == []
+
+
+def test_archived_timestamps_keep_timezone_semantics_and_late_clock_gate(setup, monkeypatch):
+    clock, _, backend, workspace, _ = setup
+    monitor = compact_history(setup, monkeypatch)
+    saved = workspace.control.snapshot()
+    future = (clock.wall + timedelta(seconds=1)).astimezone(timezone(timedelta(hours=9)))
+    with sqlite3.connect(monitor.path) as conn:
+        conn.execute(
+            "UPDATE alerts SET acknowledged_at=?,resolved_at=?,last_attempt_at=?,submitted_at=? "
+            "WHERE id=1",
+            (future.isoformat(),) * 4,
+        )
+    before = monitor.path.read_bytes()
+    assert monitor.status()["archived_alerts"] == 2
+    assert monitor.audit_history()["alerts"] == 4
+    with pytest.raises(OperationsError, match="operations_clock_invalid"):
+        monitor.test_notification()
+    assert monitor.path.read_bytes() == before
+    assert workspace.control.snapshot() == saved and backend.reads == []
+    clock.advance(1)
+    assert monitor.test_notification()["alert_count"] == 5
 
 
 @pytest.mark.parametrize("legacy", [False, True])

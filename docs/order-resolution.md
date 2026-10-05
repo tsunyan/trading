@@ -1,4 +1,4 @@
-# 終端結果を確認した注文claimの解消
+# 証拠と承認による注文claimの解消
 
 2026-10-04。新規・建玉指定決済・取消の結果不明claimについて、保存済みの終端注文証拠と
 全口座照合、運用者の確認を条件に、ローカルのclaimを解消する手続きを追加しました。
@@ -36,9 +36,50 @@ contextは`terminal_state`の代わりに`active_state`を持ちます。確認�
 確認項目では終端注文を解消しません。解消後も注文は有効なまま台帳に残り、
 [明示再開](order-restart.md)の後に通常の取消や約定照合の対象になります。
 
-取消の結果不明claimは、注文が有効なまま残っていても解消できません。取消が業者に届いていないのか、
-処理待ちなのかを有効注文の証拠だけでは区別できないためです。終端の証拠を待ちます。
 明示停止・時計異常がある場合も、claimを解消してその停止理由を保持します。
+
+## 取消結果不明で注文が有効なまま残る場合
+
+2026-10-05追加。取消が届かなかったのか、処理待ちなのかは有効注文のGETだけでは区別できません。
+この手続きは取消の成否を確定せず、運用者の承認でローカルPOST claimだけを解消します。
+`cancel_outcome_unknown=true`を記録し、消費した取消claimを永久に保持して同じ取消の再送を拒否します。
+`CANCEL_NOT_SENT`は記録せず、旧取消許可も再利用できません。
+
+完全な注文履歴を別途確立して台帳へ照合し、対象が`WORKING`・`PARTIAL`・`CANCEL_PENDING`であることを
+確認します。台帳を明示停止してから実行します。口座証拠には対象の残数量を持つ有効注文と、部分約定による残高・建玉が必要です。
+[口座取得CLI](live-account.md)の`--active-cancel CLIENT_ID`で完全な口座・気配の観測を保存します。
+この観測は通常の口座ゲート、peak、リスク許可を更新しません。ライブラリでは
+`journal.record_active_cancel_account(client_id, snapshot, quote)`を使います。
+
+```powershell
+uv run python -m trading.private_order_recovery active-cancel-context --directory runs/account-live-orders --read-control-directory runs/account-read-control --scope operator-account --client-id Buy001
+uv run python -m trading.live_acceptance active-cancel-approval --directory runs/account-live-orders --read-control-directory runs/account-read-control --scope operator-account --client-id Buy001 --evidence identity=... --evidence rules=... --evidence read_acceptance=... --evidence account_baseline=... --evidence history=... --minutes 5 --output active-cancel-approval.json
+uv run python -m trading.private_order_recovery resolve --directory runs/account-live-orders --read-control-directory runs/account-read-control --scope operator-account --client-id Buy001 --approval active-cancel-approval.json --confirm active-order --confirm complete-history --confirm complete-account --confirm account-identity --confirm external-writers-paused --confirm old-clients-closed --confirm preserve-stops --confirm cancel-outcome-unknown --confirm no-repeat-cancel
+```
+
+contextは元の注文行・観測イベント・POST claim/世代と通常の口座ゲートを含み、変更後は承認を作り直します。
+解消後のローカル注文は`WORKING`または`PARTIAL`です。遅延取消・追加約定・全量約定は以後の通常照合で
+追跡します。POST停止と台帳停止を保持し、再開には解消後の新しい完全な口座観測と別の明示再開が必要です。
+
+POST commit後、台帳の完了commit前に終了した場合は`active_cancel_resolution_incomplete`で
+通常の変更・再開を拒否します。元の保存先を開き直し、同じ対象で`resolve`と上記の確認集合を再実行すると、
+POST側にcommit済みの判断を台帳へ完了記録します。保存済み判断の完了なので、元の承認・観測が失効しても
+完了できます。再送・再承認による別の取消ではありません。緊急停止は引き続き使えます。
+
+### 注文が有効なまま残り続ける場合
+
+この解消後、アプリは同じ注文の取消を二度と送りません。元の取消が業者に届いておらず、
+注文が有効なまま残り続ける場合は、アプリの外での運用者の操作になります。
+
+1. 取消できるのは口座の名義人である運用者だけです。業者の公式画面から、対象の注文番号を確認して取消します。
+   自動処理や別のツールからの取消・発注はしません。
+2. 操作の日時・注文番号・理由を運用記録に残し、業者の注文履歴の画面か取引報告書を保存します。
+   アプリには外部での操作を記録する機能がないため、この保存資料が根拠になります。
+3. 業者の注文履歴で取消済み（または約定済み）を確認した後、完全な注文証拠を`journal.reconcile`で照合します。
+   台帳は業者の注文証拠だけを照合するため、外部での取消も取消済みの注文として計上されます。
+   どの取消が効いたかは台帳からは区別できないので、2の保存資料と合わせて確認します。
+4. 再開は、新しい完全な口座観測と[明示再開](order-restart.md)によります。元の取消の
+   `cancel_outcome_unknown=true`は書き換えず、外部の取消を元の取消の成功として扱いません。
 
 ## 確認と実行
 
@@ -100,7 +141,7 @@ DB・履歴・所有権ファイルの置換やバックアップ巻戻しは復
 claim解消後の再開は、別の[明示再開手続き](order-restart.md)で完全な注文・口座照合と
 停止原因の確認、新しい発注許可を要求します。claimなしの後片付け失敗も、終端または完全に
 照合した残注文があれば対象にできます。
-取消の非終端・ID不明・未受付の確定は残工程です。
+ID不明で業者に痕跡のない新規・決済注文は[不在の解消](order-absence.md)で扱います。
 
 ## 検証
 
@@ -116,3 +157,8 @@ Ruffの検査・整形確認も合格しました。実口座への通信、資�
 有効注文の解消は`tests/test_order_resolution_active.py`で、未約定・一部約定の解消、確認項目の取り違え、
 不完全な履歴・古い口座・状態と証拠の不一致、取消claimの拒否を検証します。
 追加7試験を含む全2313テストが469.89秒で合格しました。Ruffの検査・整形確認、差分チェックも合格しました。
+
+有効取消の専用試験は`tests/test_active_cancel_resolution.py`で、未約定・部分約定、停止・通常ゲートの保持、
+再送拒否、遅延取消と追加/全量約定、承認・checkpoint・GET停止、保存参照の改変を検証します。
+二つのDBのcommit境界で実プロセスを終了させ、元claimの保持か保存済み判断の完了を確認します。
+`tests/test_live_account.py`では模擬GETによる専用観測と対象注文欠落の拒否も検証します。

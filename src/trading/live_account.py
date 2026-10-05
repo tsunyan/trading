@@ -17,6 +17,7 @@ from trading.broker_contracts import OrderEvidence, OrderIntent
 from trading.credential_store import CredentialParser, CredentialVault
 from trading.live_quote import fetch_quote
 from trading.order_runtime import OrderRuntime, _quote
+from trading.swap_check import read_schedule, swap_check
 
 ACCOUNT_CONFIRMATIONS = frozenset(
     {"complete-account", "account-identity", "external-writers-paused"}
@@ -150,7 +151,13 @@ class LiveAccountRefresh:
         transport=None,
         quote_transport=None,
         valuation_tolerance=None,
+        absent_order=None,
+        active_cancel=None,
+        swap_schedule=None,
+        swap_tolerance="1",
     ):
+        if absent_order is not None and active_cancel is not None:
+            raise LiveAccountError("one_account_review_target_required")
         if not isinstance(confirmations, (set, frozenset, tuple, list)) or set(
             confirmations
         ) != set(ACCOUNT_CONFIRMATIONS):
@@ -169,8 +176,18 @@ class LiveAccountRefresh:
             raise LiveAccountError("account_collection_failed") from None
         if self.journal.credential_binding() != binding:
             raise LiveAccountError("live_binding_changed")
+        if absent_order is not None and any(
+            o.client_id == absent_order for o in report.active_orders
+        ):
+            # Found, not absent: reconcile it by its broker ID instead (order_discovery).
+            raise LiveAccountError("unknown_order_is_active")
         try:
             policy, rows = self._local()
+            if absent_order is not None:
+                rows = [
+                    {**r, "state": "ABANDONED"} if r["client_id"] == absent_order else r
+                    for r in rows
+                ]
             snapshot = snapshot_from_report(report, account_id=policy.account_id, rows=rows)
         except AccountDiscrepancy:
             self.journal.halt()
@@ -194,9 +211,23 @@ class LiveAccountRefresh:
             # Ledger contents agree; only the broker's valuation instant differs from the
             # ticker. Do not halt for that, and do not substitute a locally marked equity.
             raise LiveAccountError("valuation_time_mismatch")
+        if absent_order is not None:
+            # The account must reconcile as if the unknown order never existed.
+            return self.journal.record_absence_account(absent_order, snapshot, quote, now=now)
+        if active_cancel is not None:
+            return self.journal.record_active_cancel_account(
+                active_cancel, snapshot, quote, now=now
+            )
+        # A diagnostic computed before the journal decides; it never halts or refuses.
+        swaps = (
+            swap_check(report, swap_schedule, tolerance_jpy=swap_tolerance)
+            if swap_schedule is not None
+            else None
+        )
         result = self.journal.update_account(snapshot, quote, now=now)
         return {
             **result,
+            "swap_check": swaps,
             "observed_at": snapshot.model_dump(mode="json")["observed_at"],
             "positions": len(snapshot.positions),
             "working_orders": len(snapshot.working_orders),
@@ -215,6 +246,11 @@ def main(argv=None):
     parser.add_argument("--quote", type=Path)
     parser.add_argument("--confirm", action="append", default=[])
     parser.add_argument("--valuation-tolerance")
+    review = parser.add_mutually_exclusive_group()
+    review.add_argument("--absent-order", metavar="CLIENT_ID")
+    review.add_argument("--active-cancel", metavar="CLIENT_ID")
+    parser.add_argument("--swap-schedule", type=Path)
+    parser.add_argument("--swap-tolerance", default="1")
     args = parser.parse_args(argv)
     try:
         refresh = LiveAccountRefresh(args.directory, args.read_control_directory, args.scope)
@@ -223,6 +259,12 @@ def main(argv=None):
             confirmations=args.confirm,
             quote=_quote(args.quote) if args.quote is not None else None,
             valuation_tolerance=args.valuation_tolerance,
+            absent_order=args.absent_order,
+            active_cancel=args.active_cancel,
+            swap_schedule=(
+                read_schedule(args.swap_schedule) if args.swap_schedule is not None else None
+            ),
+            swap_tolerance=args.swap_tolerance,
         )
         print(json.dumps({**result, "network_used": True, "orders_sent": False}))
     except Exception as error:

@@ -9,6 +9,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
@@ -25,9 +26,14 @@ from trading.segmented_journal import (
 NOW = datetime(2026, 10, 4, tzinfo=UTC)
 
 
-def build(directory, segments, records):
-    journal = SegmentedEventJournal.create(directory, "synthetic", max_records=records)
-    with sqlite3.connect(journal.path) as conn:
+def build(directory, segments, records, *, existing=None):
+    journal = existing or SegmentedEventJournal.create(directory, "synthetic", max_records=records)
+    if journal.path.parent != Path(directory).resolve() or journal.scope != "synthetic":
+        raise ValueError("synthetic_archive_directory_required")
+    view = journal.inspect()
+    if view["records"] or journal.archive_identity()["archived_segments"]:
+        raise ValueError("synthetic_archive_must_be_empty")
+    with closing(sqlite3.connect(journal.path)) as conn, conn:
         series, instance = conn.execute("SELECT instance,origin FROM series").fetchone()
         previous = ZERO
         for index in range(1, segments + 1):

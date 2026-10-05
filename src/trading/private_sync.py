@@ -19,6 +19,7 @@ from trading.account_reader import AccountReader
 from trading.broker_contracts import Contract
 from trading.credential_store import CredentialVault
 from trading.event_capture import JournaledEventCapture
+from trading.event_journal import JournalError
 from trading.execution_cash_book import ExecutionCashBatch, ExecutionCashBook
 from trading.execution_reconciliation import reconcile_executions
 from trading.known_orders import KnownOrder, KnownOrderCatalog
@@ -32,7 +33,7 @@ from trading.private_stream_token import PrivateStreamLimiter, PrivateTokenClien
 from trading.private_supervisor import PrivateStreamSupervisor, SupervisorError, SupervisorPolicy
 from trading.read_control import PersistentReadLimiter
 from trading.segmented_journal import SegmentedEventJournal
-from trading.stream_control import StreamControl, StreamControlError
+from trading.stream_control import OPERATOR_OWNER_WAIT_SECONDS, StreamControl, StreamControlError
 from trading.wire_validation import unique_object
 
 MAX_PLAN_BYTES = 262_144
@@ -329,7 +330,7 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("sync_legacy_binding_confirmation_required")
         if type(expected_revision) is not int or expected_revision < 0:
             raise PrivateSyncError("invalid_sync_revision")
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             self._check_plan(expected_plan_sha256)
             state = self.control.snapshot()
             if state["revision"] != expected_revision or self.journal.head() != expected_head:
@@ -347,7 +348,7 @@ class PrivateSyncWorkspace:
         if type(expected_revision) is not int or expected_revision < 0:
             raise PrivateSyncError("invalid_sync_revision")
         self._reads()
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             state = self.control.snapshot()
             if state["revision"] != expected_revision or self.journal.head() != expected_head:
                 raise PrivateSyncError("sync_checkpoint_changed")
@@ -507,6 +508,14 @@ class PrivateSyncWorkspace:
         self.journal = self.control.recover(self.journal, self.book, **checks)
         return self.status()
 
+    def review_delivery(self, *, expected_plan_sha256, delivery_uncertainty_reviewed, **checks):
+        """Explicitly close unknown delivery; booking and recovery still come after."""
+        self._check_plan(expected_plan_sha256)
+        if delivery_uncertainty_reviewed is not True:
+            raise PrivateSyncError("sync_delivery_review_confirmation_required")
+        self.control.review_delivery_uncertainty(self.journal, self.book, **checks)
+        return self.status()
+
     def reconcile_stopped(
         self,
         *,
@@ -527,7 +536,7 @@ class PrivateSyncWorkspace:
             raise PrivateSyncError("invalid_sync_revision")
         if self.catalog is not None and not self._catalog_bound:
             raise PrivateSyncError("sync_catalog_initialization_required")
-        with self.control.ownership():
+        with self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS):
             self._check_plan(expected_plan_sha256)
             self.control.check_binding(self.journal, self.book)
             before = self.control.snapshot()
@@ -762,6 +771,7 @@ def main(argv=None):
             "register-order",
             "register-live-orders",
             "reconcile-stopped",
+            "review-delivery",
             "confirm-read-binding",
         ),
     )
@@ -774,6 +784,7 @@ def main(argv=None):
     parser.add_argument("--duration-seconds", type=int)
     parser.add_argument("--read-only-confirmed", action="store_true")
     parser.add_argument("--acknowledge-token-uncertainty", action="store_true")
+    parser.add_argument("--delivery-uncertainty-reviewed", action="store_true")
     parser.add_argument("--order-file", type=Path)
     parser.add_argument("--source-ref")
     parser.add_argument("--intent-confirmed", action="store_true")
@@ -860,6 +871,14 @@ def main(argv=None):
                     expected_head=args.expected_head,
                     read_only_confirmed=args.read_only_confirmed,
                 )
+            elif args.command == "review-delivery":
+                result = workspace.review_delivery(
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    expected_revision=args.expected_revision,
+                    expected_head=args.expected_head,
+                    expected_reason=args.expected_reason,
+                    delivery_uncertainty_reviewed=args.delivery_uncertainty_reviewed,
+                )
             elif args.command == "recover":
                 result = workspace.recover(
                     expected_plan_sha256=args.expected_plan_sha256,
@@ -874,7 +893,9 @@ def main(argv=None):
     except Exception as error:
         # These types carry fixed local codes only; anything else stays generic.
         reason = str(error)
-        known = isinstance(error, (PrivateSyncError, StreamControlError, SupervisorError))
+        known = isinstance(
+            error, (PrivateSyncError, StreamControlError, SupervisorError, JournalError)
+        )
         suffix = f" reason={reason}" if known and re.fullmatch(r"[a-z0-9_]{1,64}", reason) else ""
         parser.exit(2, f"Private sync failed; inspect local control state.{suffix}\n")
     finally:

@@ -62,7 +62,8 @@ Python APIは `prepare_orphan_resolution()` と
 - ロックファイルのdevice/inodeをDBに保存し、パスと開いたファイルの同一性、サイズ、
   DB識別子を検査します。欠損・差替えを検出したら拒否し、自動再作成しません。
 - 新規DBはversion 3です。旧コードはこの版を拒否します。復旧してもversion 3を維持します。
-- version 1/2は従来のGETと、未完了claimのない停止からの復旧に限って対応します。
+- version 1/2は従来のGETと、未完了claimのない停止からの復旧に対応します。
+  停止済みで未完了のない制御は[現形式への明示移行](read-owner-upgrade.md)もできます。
   **旧版claimはOSロックを保持していた証拠がないため解消不可**。自動移行もありません。
 - `status` の `orphan_resolution_supported` は形式への対応を示すだけで、今の状態で
   解消できるという意味ではありません。`in_flight` も所有者の生死を示しません。
@@ -73,7 +74,8 @@ Python APIは `prepare_orphan_resolution()` と
 ネットワーク共有、別PC、別DB、他アプリ、プロセスfork後のクライアント再利用は対象外です。
 DBやロックファイルをコピー・削除・差し戻し・手編集して回避しないでください。
 両方を編集できる利用者による改ざんや古いバックアップへの差し戻しは防げません。
-ロックファイルを失ったDBの復旧・旧版からの移行は別途手順が必要で、今回は提供しません。
+ロックファイルを失ったDBと旧版の未完了claimは別途手順が必要です。
+未完了のない旧版の移行は上記の明示手続きで扱います。
 
 検証: `uv run pytest tests/test_read_orphan.py tests/test_read_control.py tests/test_read_recovery.py -q`
 

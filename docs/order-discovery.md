@@ -30,7 +30,7 @@ uv run python -m trading.order_discovery --directory runs/live-orders --read-con
 
 `found=false`は不在の証明ではありません。出力の`absence_proven`は常に`false`です。
 全量約定・失効・拒否・未到達のどれかを、有効注文一覧だけでは区別できません。
-業者画面や約定履歴で注文IDを確認するまで、claimは解消できません。
+業者画面や約定履歴で注文IDを確認するか、口座に影響がないことを[不在の解消](order-absence.md)で確かめるまで、claimは解消できません。
 
 ## 検証
 

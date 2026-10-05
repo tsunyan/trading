@@ -1,0 +1,558 @@
+{
+  "measured_at": "2026-10-05T00:41:06.009069+00:00",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "records_per_segment": 1024,
+  "samples_per_size": 3,
+  "fixture": "Existing validated BEGIN/HEARTBEAT/ACK/END archive and submitted-alert builders; independent temporary stores for each sample; fixed 2026-10-04 data",
+  "limitations": "Warm local I/O; no OS cache eviction or real broker traffic. Samples include full retained-byte checks, reopen and concurrent writes, but not the complete live dispatch or watchdog path. No production latency guarantee; summary timings describe successful samples only; errors retained.",
+  "journal": [
+    {
+      "size": 500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "full_audit_seconds": {
+          "min": 5.245851100014988,
+          "median": 5.246588099980727,
+          "max": 5.759518900013063
+        },
+        "byte_check_seconds": {
+          "min": 0.09839399997144938,
+          "median": 0.10241769999265671,
+          "max": 0.1045404999749735
+        },
+        "open_seconds": {
+          "min": 0.09868060000007972,
+          "median": 0.10095170000568032,
+          "max": 0.10543659998802468
+        },
+        "concurrent_scan_seconds": {
+          "min": 0.10001519997604191,
+          "median": 0.10068620002130046,
+          "max": 0.10119780001696199
+        },
+        "concurrent_writer_seconds": {
+          "min": 0.1091580000356771,
+          "median": 0.11659410002175719,
+          "max": 0.1267570999916643
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:41:06.031936+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "records": 512000,
+            "body_bytes": 102592500,
+            "sqlite_bytes": 123600896,
+            "full_audit_seconds": 5.246588099980727,
+            "byte_check_seconds": 0.10241769999265671,
+            "open_seconds": 0.10543659998802468,
+            "concurrent_scan_seconds": 0.10001519997604191,
+            "concurrent_writer_seconds": 0.1267570999916643,
+            "writer_committed": true
+          },
+          "total_seconds": 15.533913100021891
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:41:21.565885+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "records": 512000,
+            "body_bytes": 102592500,
+            "sqlite_bytes": 123600896,
+            "full_audit_seconds": 5.759518900013063,
+            "byte_check_seconds": 0.1045404999749735,
+            "open_seconds": 0.10095170000568032,
+            "concurrent_scan_seconds": 0.10068620002130046,
+            "concurrent_writer_seconds": 0.1091580000356771,
+            "writer_committed": true
+          },
+          "total_seconds": 16.130110300029628
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:41:37.696402+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "records": 512000,
+            "body_bytes": 102592500,
+            "sqlite_bytes": 123600896,
+            "full_audit_seconds": 5.245851100014988,
+            "byte_check_seconds": 0.09839399997144938,
+            "open_seconds": 0.09868060000007972,
+            "concurrent_scan_seconds": 0.10119780001696199,
+            "concurrent_writer_seconds": 0.11659410002175719,
+            "writer_committed": true
+          },
+          "total_seconds": 15.653147800010629
+        }
+      ]
+    },
+    {
+      "size": 2500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "full_audit_seconds": {
+          "min": 26.304457599995658,
+          "median": 26.448227800021414,
+          "max": 27.06305679999059
+        },
+        "byte_check_seconds": {
+          "min": 0.4875033000134863,
+          "median": 0.4890637000207789,
+          "max": 0.49262120004277676
+        },
+        "open_seconds": {
+          "min": 0.4885515000205487,
+          "median": 0.4989005000097677,
+          "max": 0.49961960001382977
+        },
+        "concurrent_scan_seconds": {
+          "min": 0.491382300038822,
+          "median": 0.5002395000192337,
+          "max": 0.5390297999838367
+        },
+        "concurrent_writer_seconds": {
+          "min": 0.5523335000034422,
+          "median": 0.5556550000328571,
+          "max": 0.558906999998726
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:41:53.349493+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "records": 2560000,
+            "body_bytes": 512962500,
+            "sqlite_bytes": 617848832,
+            "full_audit_seconds": 26.304457599995658,
+            "byte_check_seconds": 0.49262120004277676,
+            "open_seconds": 0.4989005000097677,
+            "concurrent_scan_seconds": 0.5390297999838367,
+            "concurrent_writer_seconds": 0.558906999998726,
+            "writer_committed": true
+          },
+          "total_seconds": 76.89482159999898
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:43:10.243966+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "records": 2560000,
+            "body_bytes": 512962500,
+            "sqlite_bytes": 617848832,
+            "full_audit_seconds": 26.448227800021414,
+            "byte_check_seconds": 0.4875033000134863,
+            "open_seconds": 0.49961960001382977,
+            "concurrent_scan_seconds": 0.5002395000192337,
+            "concurrent_writer_seconds": 0.5523335000034422,
+            "writer_committed": true
+          },
+          "total_seconds": 77.30383200000506
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:44:27.548014+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "records": 2560000,
+            "body_bytes": 512962500,
+            "sqlite_bytes": 617848832,
+            "full_audit_seconds": 27.06305679999059,
+            "byte_check_seconds": 0.4890637000207789,
+            "open_seconds": 0.4885515000205487,
+            "concurrent_scan_seconds": 0.491382300038822,
+            "concurrent_writer_seconds": 0.5556550000328571,
+            "writer_committed": true
+          },
+          "total_seconds": 77.47955709998496
+        }
+      ]
+    },
+    {
+      "size": 5000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "full_audit_seconds": {
+          "min": 53.191210599965416,
+          "median": 53.536620799975935,
+          "max": 54.088261900004
+        },
+        "byte_check_seconds": {
+          "min": 0.9793600999983028,
+          "median": 0.9857618999667466,
+          "max": 1.0071583000244573
+        },
+        "open_seconds": {
+          "min": 0.9723050000029616,
+          "median": 1.000637699966319,
+          "max": 1.0074550000135787
+        },
+        "concurrent_scan_seconds": {
+          "min": 1.008826500037685,
+          "median": 1.0093749999650754,
+          "max": 1.0143240000470541
+        },
+        "concurrent_writer_seconds": {
+          "min": 1.100715600012336,
+          "median": 1.1022175999823958,
+          "max": 1.1025810999562964
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:45:45.027452+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "records": 5120000,
+            "body_bytes": 1025925000,
+            "sqlite_bytes": 1235685376,
+            "full_audit_seconds": 53.191210599965416,
+            "byte_check_seconds": 1.0071583000244573,
+            "open_seconds": 1.0074550000135787,
+            "concurrent_scan_seconds": 1.0143240000470541,
+            "concurrent_writer_seconds": 1.1022175999823958,
+            "writer_committed": true
+          },
+          "total_seconds": 153.71485220000613
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:48:18.742305+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "records": 5120000,
+            "body_bytes": 1025925000,
+            "sqlite_bytes": 1235685376,
+            "full_audit_seconds": 54.088261900004,
+            "byte_check_seconds": 0.9857618999667466,
+            "open_seconds": 0.9723050000029616,
+            "concurrent_scan_seconds": 1.008826500037685,
+            "concurrent_writer_seconds": 1.1025810999562964,
+            "writer_committed": true
+          },
+          "total_seconds": 156.00544709997484
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:50:54.747697+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "records": 5120000,
+            "body_bytes": 1025925000,
+            "sqlite_bytes": 1235685376,
+            "full_audit_seconds": 53.536620799975935,
+            "byte_check_seconds": 0.9793600999983028,
+            "open_seconds": 1.000637699966319,
+            "concurrent_scan_seconds": 1.0093749999650754,
+            "concurrent_writer_seconds": 1.100715600012336,
+            "writer_committed": true
+          },
+          "total_seconds": 154.73955100000603
+        }
+      ]
+    }
+  ],
+  "monitor": [
+    {
+      "size": 10000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "status_seconds": {
+          "min": 0.05700329999672249,
+          "median": 0.057303200010210276,
+          "max": 0.05832190002547577
+        },
+        "open_seconds": {
+          "min": 0.05436060001375154,
+          "median": 0.05525340000167489,
+          "max": 0.055479499977082014
+        },
+        "full_audit_seconds": {
+          "min": 0.15561380004510283,
+          "median": 0.16980790003435686,
+          "max": 0.17702120001195
+        },
+        "check_seconds": {
+          "min": 0.17664469999726862,
+          "median": 0.18683400005102158,
+          "max": 0.20045340002980083
+        },
+        "append_seconds": {
+          "min": 0.17400599998654798,
+          "median": 0.17472040001302958,
+          "max": 0.6267456000205129
+        },
+        "notify_seconds": {
+          "min": 0.12393599998904392,
+          "median": 0.13396309997187927,
+          "max": 1.0017570000491105
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:53:29.487852+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 10000,
+            "active_alerts": 1000,
+            "archive_count": 9,
+            "sqlite_bytes": 5644288,
+            "status_seconds": 0.05832190002547577,
+            "open_seconds": 0.05525340000167489,
+            "full_audit_seconds": 0.17702120001195,
+            "check_seconds": 0.17664469999726862,
+            "append_seconds": 0.6267456000205129,
+            "notify_seconds": 1.0017570000491105
+          },
+          "total_seconds": 2.567728800000623
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:53:32.055731+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 10000,
+            "active_alerts": 1000,
+            "archive_count": 9,
+            "sqlite_bytes": 5644288,
+            "status_seconds": 0.05700329999672249,
+            "open_seconds": 0.05436060001375154,
+            "full_audit_seconds": 0.16980790003435686,
+            "check_seconds": 0.18683400005102158,
+            "append_seconds": 0.17472040001302958,
+            "notify_seconds": 0.13396309997187927
+          },
+          "total_seconds": 5.919590700010303
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:53:37.974904+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 10000,
+            "active_alerts": 1000,
+            "archive_count": 9,
+            "sqlite_bytes": 5644288,
+            "status_seconds": 0.057303200010210276,
+            "open_seconds": 0.055479499977082014,
+            "full_audit_seconds": 0.15561380004510283,
+            "check_seconds": 0.20045340002980083,
+            "append_seconds": 0.17400599998654798,
+            "notify_seconds": 0.12393599998904392
+          },
+          "total_seconds": 1.2287482999963686
+        }
+      ]
+    },
+    {
+      "size": 50000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "status_seconds": {
+          "min": 0.26360800000838935,
+          "median": 0.2820643000304699,
+          "max": 0.2823666000040248
+        },
+        "open_seconds": {
+          "min": 0.2557933999923989,
+          "median": 0.2687178999767639,
+          "max": 0.27342529996531084
+        },
+        "full_audit_seconds": {
+          "min": 0.8357845999998972,
+          "median": 0.8370559000177309,
+          "max": 0.8415673000272363
+        },
+        "check_seconds": {
+          "min": 0.8166781999752857,
+          "median": 0.8176227000076324,
+          "max": 0.8280036000069231
+        },
+        "append_seconds": {
+          "min": 0.8578916999977082,
+          "median": 0.9367163000279106,
+          "max": 0.9552278000046499
+        },
+        "notify_seconds": {
+          "min": 0.5419967000489123,
+          "median": 0.5517886999878101,
+          "max": 0.6547754000057466
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:53:39.204239+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 50000,
+            "active_alerts": 1000,
+            "archive_count": 49,
+            "sqlite_bytes": 29519872,
+            "status_seconds": 0.2823666000040248,
+            "open_seconds": 0.27342529996531084,
+            "full_audit_seconds": 0.8370559000177309,
+            "check_seconds": 0.8166781999752857,
+            "append_seconds": 0.9552278000046499,
+            "notify_seconds": 0.6547754000057466
+          },
+          "total_seconds": 11.175203000020701
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:53:50.378772+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 50000,
+            "active_alerts": 1000,
+            "archive_count": 49,
+            "sqlite_bytes": 29519872,
+            "status_seconds": 0.26360800000838935,
+            "open_seconds": 0.2687178999767639,
+            "full_audit_seconds": 0.8415673000272363,
+            "check_seconds": 0.8280036000069231,
+            "append_seconds": 0.8578916999977082,
+            "notify_seconds": 0.5517886999878101
+          },
+          "total_seconds": 10.957643100002315
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:54:01.336459+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 50000,
+            "active_alerts": 1000,
+            "archive_count": 49,
+            "sqlite_bytes": 29519872,
+            "status_seconds": 0.2820643000304699,
+            "open_seconds": 0.2557933999923989,
+            "full_audit_seconds": 0.8357845999998972,
+            "check_seconds": 0.8176227000076324,
+            "append_seconds": 0.9367163000279106,
+            "notify_seconds": 0.5419967000489123
+          },
+          "total_seconds": 10.961947800009511
+        }
+      ]
+    },
+    {
+      "size": 100000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "status_seconds": {
+          "min": 0.5422407999867573,
+          "median": 0.5455508999875747,
+          "max": 0.554791699978523
+        },
+        "open_seconds": {
+          "min": 0.5193714000051841,
+          "median": 0.5314362000208348,
+          "max": 0.5454065999947488
+        },
+        "full_audit_seconds": {
+          "min": 1.6790701000136323,
+          "median": 1.7017311999807134,
+          "max": 1.704586300009396
+        },
+        "check_seconds": {
+          "min": 1.62659200001508,
+          "median": 1.6672819000086747,
+          "max": 1.6685160999768414
+        },
+        "append_seconds": {
+          "min": 1.6102702000061981,
+          "median": 1.6258964000153355,
+          "max": 1.6415717000490986
+        },
+        "notify_seconds": {
+          "min": 1.0952304000384174,
+          "median": 1.1161982999765314,
+          "max": 1.1402287000091746
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T00:54:12.299180+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 100000,
+            "active_alerts": 1000,
+            "archive_count": 99,
+            "sqlite_bytes": 59551744,
+            "status_seconds": 0.5455508999875747,
+            "open_seconds": 0.5454065999947488,
+            "full_audit_seconds": 1.7017311999807134,
+            "check_seconds": 1.6672819000086747,
+            "append_seconds": 1.6258964000153355,
+            "notify_seconds": 1.1161982999765314
+          },
+          "total_seconds": 35.26509030000307
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T00:54:47.564212+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 100000,
+            "active_alerts": 1000,
+            "archive_count": 99,
+            "sqlite_bytes": 59551744,
+            "status_seconds": 0.554791699978523,
+            "open_seconds": 0.5193714000051841,
+            "full_audit_seconds": 1.6790701000136323,
+            "check_seconds": 1.6685160999768414,
+            "append_seconds": 1.6102702000061981,
+            "notify_seconds": 1.1402287000091746
+          },
+          "total_seconds": 35.10673699999461
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T00:55:22.670724+00:00",
+          "ok": true,
+          "measurement": {
+            "alerts": 100000,
+            "active_alerts": 1000,
+            "archive_count": 99,
+            "sqlite_bytes": 59551744,
+            "status_seconds": 0.5422407999867573,
+            "open_seconds": 0.5314362000208348,
+            "full_audit_seconds": 1.704586300009396,
+            "check_seconds": 1.62659200001508,
+            "append_seconds": 1.6415717000490986,
+            "notify_seconds": 1.0952304000384174
+          },
+          "total_seconds": 34.93691529997159
+        }
+      ]
+    }
+  ],
+  "finished_at": "2026-10-05T00:55:57.607808+00:00"
+}

@@ -57,29 +57,13 @@ if ($PlanOnly) {
 }
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
     -LogonType Interactive -RunLevel Limited
+. (Join-Path $PSScriptRoot 'task-owner.ps1')
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 # Only this journal's own task can be updated. Never overwrite an unrelated task.
 foreach ($spec in $plan.tasks) {
     $existing = Get-ScheduledTask -TaskPath '\' -TaskName $spec.name -ErrorAction SilentlyContinue
-    $existingSid = $null
-    if ($existing) {
-        try {
-            if ($existing.Principal.UserId -match '^S-\d(-\d+)+$') {
-                $existingSid = ([Security.Principal.SecurityIdentifier]::new($existing.Principal.UserId)).Value
-            } else {
-                $account = [Security.Principal.NTAccount]::new($existing.Principal.UserId)
-                $existingSid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
-            }
-        } catch {
-            throw "Cannot verify the scheduled task owner for $($spec.name)."
-        }
-    }
-    if ($existing -and (
-        $existing.Description -ne $spec.description -or
-        $existingSid -ne $currentSid
-    )) {
-        throw "An unrelated scheduled task already uses the name $($spec.name)."
-    }
+    Assert-OwnScheduledTask -Existing $existing -Name $spec.name -Description $spec.description `
+        -CurrentSid $currentSid
 }
 $now = Get-Date
 $start = $now.Date.AddHours($now.Hour + 1).AddMinutes($plan.start_minute)

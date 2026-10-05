@@ -34,6 +34,7 @@ CREATE TABLE owner_file (
 REASONS = {"client_stop", "operator_stop", "clock_invalid", "interrupted", "claim_mismatch"}
 RECOVERY_CHECKS = frozenset({"cause", "permissions", "wait", "clock", "workers-paused"})
 RECOVERY_TTL_NS = 300_000_000_000
+OWNER_UPGRADE_MAX_BYTES = 64_000
 ORPHAN_CHECKS = frozenset({"cause", "clock", "workers-paused", "get-only"})
 
 
@@ -57,6 +58,7 @@ class PersistentReadLimiter(AccountReadLimiter):
         wall_ns=time.time_ns,
         monotonic_ns=time.monotonic_ns,
         sleep=time.sleep,
+        maintain_schema=True,
     ):
         if not isinstance(scope, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", scope):
             raise PrivateReadError("invalid_control_scope")
@@ -72,8 +74,11 @@ class PersistentReadLimiter(AccountReadLimiter):
         with self._transaction() as conn:
             row = self._state(conn)
             self._instance = row["instance_id"]
-            # Additive index also accelerates databases created by older versions.
-            conn.execute("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind,id)")
+            # Additive index also accelerates databases created by older versions. The
+            # legacy upgrade inspects a store without it, so its bytes stay unchanged
+            # until the operator approves the migration.
+            if maintain_schema:
+                conn.execute("CREATE INDEX IF NOT EXISTS events_kind_id ON events(kind,id)")
             self._generation = self._current_generation(conn)
 
     @classmethod
@@ -364,6 +369,7 @@ class PersistentReadLimiter(AccountReadLimiter):
             row = self._state(conn)
             count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             generation = self._current_generation(conn)
+            upgrade_pending = self._owner_upgrade_pending(conn)
         reopen_required = generation != self._generation
         return {
             "scope": self.scope,
@@ -371,11 +377,14 @@ class PersistentReadLimiter(AccountReadLimiter):
             "stopped": bool(row["stopped"]),
             "reason": row["reason"],
             "in_flight": row["in_flight"] is not None,
-            "blocked": bool(row["stopped"] or row["in_flight"] or reopen_required),
+            "blocked": bool(
+                row["stopped"] or row["in_flight"] or reopen_required or upgrade_pending
+            ),
             "reopen_required": reopen_required,
             "generation": generation,
             "version": row["version"],
             "orphan_resolution_supported": row["version"] == 3,
+            "owner_upgrade_incomplete": upgrade_pending,
             "events": count,
             "live_orders_enabled": False,
         }
@@ -453,6 +462,8 @@ class PersistentReadLimiter(AccountReadLimiter):
             row = self._state(conn)
             if self._current_generation(conn) != self._generation:
                 error = "read_control_reopen_required"
+            elif self._owner_upgrade_pending(conn):
+                error = "read_owner_upgrade_incomplete"
             elif row["stopped"]:
                 error = "account_reads_stopped"
             elif row["in_flight"]:
@@ -471,13 +482,68 @@ class PersistentReadLimiter(AccountReadLimiter):
     @staticmethod
     def _current_generation(conn):
         return conn.execute(
-            "SELECT COALESCE(MAX(id),0) FROM events WHERE kind='RECOVERY_APPROVED'"
+            "SELECT COALESCE(MAX(id),0) FROM events WHERE kind IN "
+            "('RECOVERY_APPROVED','OWNER_UPGRADE_STARTED','OWNER_UPGRADED')"
         ).fetchone()[0]
+
+    def _owner_upgrade_pending(self, conn):
+        """A committed upgrade intent fences reads until its filesystem/DB commit finishes."""
+        receipts = conn.execute(
+            "SELECT kind,token FROM events WHERE kind IN "
+            "('OWNER_UPGRADE_STARTED','OWNER_UPGRADED') ORDER BY id LIMIT 3"
+        ).fetchall()
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='read_owner_upgrade'"
+        ).fetchone()
+        if table is None and not receipts:
+            return False
+        try:
+            if table is None:
+                raise ValueError
+            rows = conn.execute(
+                "SELECT id,typeof(body) AS body_type,length(CAST(body AS BLOB)) AS body_bytes,"
+                "typeof(digest) AS digest_type,length(CAST(digest AS BLOB)) AS digest_bytes "
+                "FROM read_owner_upgrade LIMIT 2"
+            ).fetchall()
+            if (
+                len(rows) != 1
+                or rows[0]["id"] != 1
+                or rows[0]["body_type"] != "text"
+                or not 1 <= rows[0]["body_bytes"] <= OWNER_UPGRADE_MAX_BYTES
+                or rows[0]["digest_type"] != "text"
+                or rows[0]["digest_bytes"] != 64
+            ):
+                raise ValueError
+            body, digest = conn.execute(
+                "SELECT body,digest FROM read_owner_upgrade WHERE id=1"
+            ).fetchone()
+            plan = json.loads(body)
+            source = plan["source"]["control"]
+            state = self._state(conn)
+            if (
+                hashlib.sha256(body.encode()).hexdigest() != digest
+                or plan["source"]["directory"] != str(self.path.parent)
+                or source["version"] not in {1, 2}
+                or source["instance_id"] != state["instance_id"]
+                or source["scope"] != state["scope"]
+                or [(r["kind"], r["token"]) for r in receipts]
+                not in (
+                    [("OWNER_UPGRADE_STARTED", digest)],
+                    [("OWNER_UPGRADE_STARTED", digest), ("OWNER_UPGRADED", digest)],
+                )
+                or state["version"] != (3 if len(receipts) == 2 else source["version"])
+            ):
+                raise ValueError
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise PrivateReadError("read_owner_upgrade_integrity_failed") from None
+        return len(receipts) == 1
 
     def _recovery_state(self, conn):
         row = self._state(conn)
         if self._current_generation(conn) != self._generation:
             raise PrivateReadError("read_control_reopen_required")
+        if self._owner_upgrade_pending(conn):
+            raise PrivateReadError("read_owner_upgrade_incomplete")
         if not row["stopped"] or row["in_flight"] or row["reason"] == "claim_mismatch":
             raise PrivateReadError("control_not_recoverable")
         return row

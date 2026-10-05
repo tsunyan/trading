@@ -60,6 +60,9 @@ uv run python -m trading.live_acceptance cancel-approval --directory runs/live-o
 - `restart-approval`: [明示再開](order-restart.md)のcontextのSHA-256、現在のコードでの新しい`LiveApproval`、
   停止原因を確認した資料の指紋をまとめます。出力の`confirmations`が再開に必要な確認項目です。
 - `resolution-approval`: [claim解消](order-resolution.md)のcontextのSHA-256と5種類の証拠をまとめます。
+- `active-cancel-approval`: [有効取消の結果不明解消](order-resolution.md)の専用contextと5種類の証拠を
+  まとめます。`--client-id`、`--minutes`、`--output`と証拠の指定は`resolution-approval`と同じです。
+  取消の成否を確定せず、再送禁止・停止維持を前提にローカルclaimだけを解消する承認です。
 - `cancel-approval`: [対象限定の取消](live-cancel.md)のcontextのSHA-256と3種類（本人性・業者ルール・
   読取受入）の証拠をまとめます。
 

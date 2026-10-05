@@ -72,6 +72,31 @@ uv run python -m trading.live_account --directory runs/live-orders --read-contro
 照合に成功すると、台帳の口座証拠・peak・損失による新規停止が更新され、
 [確認済み送信](order-runtime.md)の`context`で新しい口座証拠を使えます。
 
+## 有効取消の結果不明レビュー
+
+取消結果不明で有効なまま残る注文のレビューには`--active-cancel CLIENT_ID`を指定します。
+通常と同じ口座確認項目・読取専用キー・GET制御を使い、完全な注文履歴と対象を含む口座照合が必要です。
+結果は`cancel_outcome_unknown=true`、`cancel_retry_allowed=false`、`account_gate_updated=false`です。
+通常の口座ゲートを更新せず、取消の専用観測だけを保存します。`--absent-order`とは同時に指定できません。
+claim解消とその後の新しい口座観測・再開は[取消の結果不明解消](order-resolution.md)を参照してください。
+
+## スワップの独立再計算（診断）
+
+2026-10-05追加。`--swap-schedule`に`fetch-swap`で取得した公式スワップ履歴を指定すると、
+読み取った建玉ごとに、建玉時刻より後で観測時刻までのロールオーバー（06:00 JST）の付与額を合計し、
+業者が返す建玉ごとの累計スワップと比べます。結果は出力の`swap_check`に出ます。
+観測時刻は、採用した2回目の取得で建玉を読んだ時刻です。取得の開始がロールオーバー前でも、
+建玉を読んだ時点で付与済みなら期待値に含めます。
+
+```powershell
+uv run python -m trading.live_account --directory runs/live-orders --read-control-directory runs/account-read-control --scope <scope> --credential-reference <read_only_reference> --swap-schedule data/usdjpy_swap.csv --swap-tolerance 1 --confirm ...
+```
+
+- `outside_tolerance`: 差が許容幅（円、既定1円）を超えた建玉ID。
+- `schedule_not_covering`: 履歴にロールオーバーの行が欠けている建玉ID。欠けた日を0円と扱いません。
+- **停止や口座証拠の拒否には使いません。** 業者の丸めと付与の境界時刻を実口座で確かめるまでは診断です。
+  差があれば業者の取引報告書と照合してください。
+
 ## 前提と制約
 
 - 同期・監視を登録した台帳と、その台帳に紐付くGET制御・読取専用キーを使います。

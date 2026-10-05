@@ -13,7 +13,7 @@ from trading.execution_cash_book import ExecutionCashBook
 from trading.private_stream import PrivateStreamReceiver
 from trading.private_stream_token import PrivateStreamLimiter
 from trading.segmented_journal import SegmentedEventJournal
-from trading.stream_control import StreamControl
+from trading.stream_control import OPERATOR_OWNER_WAIT_SECONDS, StreamControl
 
 RETRYABLE = frozenset({"stream_changed_during_collection", "capture_changed_during_collection"})
 TRANSIENT_MISMATCHES = frozenset(
@@ -161,7 +161,7 @@ class PrivateStreamSupervisor:
                 raise SupervisorError("new_supervisor_required")
             # Refusals before claiming ownership do not poison a READY control.
             self.control.check_binding(self.journal, self.cash_book)
-            lease = self.control.ownership()
+            lease = self.control.ownership(wait_seconds=OPERATOR_OWNER_WAIT_SECONDS)
             lease.__enter__()
             self._lease = lease
             try:

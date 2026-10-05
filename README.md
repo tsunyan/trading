@@ -6,6 +6,7 @@ FXと日本株向けの検証基盤。Python 3.12 / uv / Backtrader / SQLiteを�
 採用方針と根拠は [docs/architecture.md](docs/architecture.md)、現在の不足機能と実装順は
 [docs/roadmap.md](docs/roadmap.md) を参照してください。
 USD/JPYの実用化に向けた進行中の作業は [docs/fx-practical-plan.md](docs/fx-practical-plan.md)、
+最新の完了項目と残件は [docs/remaining-work.md](docs/remaining-work.md)、
 定期観測・watchdog・Windows通知の使い方は [docs/paper-operations.md](docs/paper-operations.md) を参照してください。
 
 ## 実装済みの範囲
@@ -296,9 +297,13 @@ FXスワップは履歴を`--swap-data`で指定した場合だけ反映しま�
 例えば平均建玉が買い持ちの30%で買い持ちが+8%なら、+2.4%を超える必要があります。
 `data_quality`はFXの空白を、[GMO公式の通常取引時間](https://coin.z.com/jp/corp/product/info/fx/)
 （月曜7:00〜土曜5:59 JST）外の`scheduled_closure`、APIが正常応答して空だった取引日の
-`provider_empty`、どちらでもない`unexplained`に分けます。クリスマス・年末年始などの特別時間は
-通常予定と仮定しません。`provider_empty`もAPI障害との区別がつかないため、`unexplained`と同様に
-`needs_review`にします。足が存在する取引日は空日記録から除外し、古い空日記録との矛盾も監査列に残します。
+`provider_empty`、どちらでもない`unexplained`に分けます。クリスマス・年末年始などの特別休場は、
+GMO公式の案内を確認して`trading.market_calendar`に登録した区間だけを`special_closure`とし、
+要確認にしません（出典URLは`special_closure_sources`に出ます）。登録区間内に足があれば
+`bars_during_official_special_closure`で要確認にします。未登録の平日の空白は特別休場と仮定しません。
+`provider_empty`もAPI障害との区別がつかないため、`unexplained`と同様に`needs_review`にします。
+新しい特別休場は、公式案内の掲載後に区間・時間数・出典・掲載日を追記します（休場に完全に含まれる
+1時間足の開始時刻を、JSTの半開区間で書きます）。足が存在する取引日は空日記録から除外し、古い空日記録との矛盾も監査列に残します。
 日本株は取引カレンダー未実装のため、空白を`unclassified_for_jp_equity`として要確認にします。
 
 スワップ履歴は以下の列を持つCSVまたはParquetです。金額は付与イベントごとの

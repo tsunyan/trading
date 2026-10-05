@@ -41,6 +41,10 @@ CREATE TABLE archived_records (
 """
 
 
+# A segment ends cleanly, or after an operator recorded its delivery uncertainty.
+CLEAN_ENDS = frozenset({"END", "REVIEWED"})
+
+
 class Segment(Contract):
     series: str = Field(pattern=r"^[a-f0-9]{32}$")
     index: int = Field(strict=True, gt=0, le=MAX_SEGMENTS)
@@ -300,7 +304,7 @@ class SegmentedEventJournal(EventJournal):
                         or len(records) != segment.records
                         or state["active"]
                         or state["unacknowledged"]
-                        or entries[-1].kind != "END"
+                        or entries[-1].kind not in CLEAN_ENDS
                         or entries[0].at != segment.started_at
                         or entries[-1].at != segment.ended_at
                     ):
@@ -413,7 +417,7 @@ class SegmentedEventJournal(EventJournal):
                     raise JournalError("journal_head_changed")
                 if state["unacknowledged"]:
                     raise JournalError("capture_delivery_unresolved")
-                if state["active"] or not entries or entries[-1].kind != "END":
+                if state["active"] or not entries or entries[-1].kind not in CLEAN_ENDS:
                     raise JournalError("journal_clean_end_required")
                 self._audit(conn, meta, full=False)
                 index = meta["_archived_segments"] + 1
@@ -505,7 +509,7 @@ class SegmentedEventJournal(EventJournal):
         self._audit(conn, meta)
         if state["unacknowledged"]:
             raise JournalError("capture_delivery_unresolved")
-        if entries and not state["active"] and entries[-1].kind != "END":
+        if entries and not state["active"] and entries[-1].kind not in CLEAN_ENDS:
             raise JournalError("recovery_fault_requires_review")
         events, skew = [], 0
         for entry in entries:
@@ -541,6 +545,44 @@ class SegmentedEventJournal(EventJournal):
         """
         with self._transaction(write=True) as conn:
             yield self._recovery_events(conn, expected_head)
+
+    def review_delivery_uncertainty(self, *, expected_head, at, monotonic_ns):
+        """Record an operator's review of unknown delivery or a FAULT/REJECTED end.
+
+        StreamControl OS ownership and its stopped state are required by the caller.
+        Unknown records stay unknown in replay; nothing is acknowledged or booked here.
+        Every stored execution must still be matched by GET and booked before recovery.
+        """
+        at, mono = self._stamp(at, monotonic_ns)
+
+        def attempt():
+            with self._transaction(write=True) as conn:
+                meta, entries, state = self._verify(conn)
+                if expected_head != meta["head"]:
+                    raise JournalError("journal_head_changed")
+                self._audit(conn, meta)
+                faulted = (
+                    entries and not state["active"] and entries[-1].kind in {"FAULT", "REJECTED"}
+                )
+                own = any(i > state["begin_index"] for i in state["unacknowledged"])
+                if not (state["active"] and own) and not faulted:
+                    raise JournalError("journal_review_not_required")
+                if at < state["at"]:
+                    raise JournalError("invalid_capture_clock")
+                self._append(
+                    conn,
+                    meta,
+                    Entry(
+                        kind="REVIEWED",
+                        epoch=state["epoch"],
+                        session=state["session"],
+                        at=at,
+                        monotonic_ns=max(mono, state["mono"]),
+                    ),
+                )
+                return conn.execute("SELECT head FROM journal").fetchone()[0]
+
+        return self._retry_busy(attempt)
 
     def retire_for_recovery(self, *, expected_head, cash_book, at, monotonic_ns):
         """Explicit orphan retirement ONLY under the supervisor's checked OS ownership.
@@ -585,7 +627,7 @@ class SegmentedEventJournal(EventJournal):
                 if not entries:
                     return meta["head"]
                 if not state["active"]:
-                    if entries[-1].kind != "END":
+                    if entries[-1].kind not in CLEAN_ENDS:
                         raise JournalError("recovery_fault_requires_review")
                     return meta["head"]
                 if at < state["at"]:

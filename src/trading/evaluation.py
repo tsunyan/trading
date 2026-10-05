@@ -14,6 +14,7 @@ from trading.config import Settings
 from trading.data import validate_bars
 from trading.execution import ExecutionModel, execution_prices
 from trading.gmo import JST, trading_date
+from trading.market_calendar import special_fx_closure
 from trading.provenance import git_state, reproducibility_fields
 from trading.strategy import entry_units, maintenance_margin_halt
 from trading.swap import (
@@ -49,7 +50,8 @@ def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
     lineage_conflicts = sorted(reported_empty_dates & present_dates)
     empty_dates = reported_empty_dates - present_dates
     bar = pd.Timedelta(seconds=cfg.bar_seconds)
-    totals = {"scheduled_closure": 0, "provider_empty": 0, "unexplained": 0}
+    totals = {"scheduled_closure": 0, "special_closure": 0, "provider_empty": 0, "unexplained": 0}
+    special_sources = set()
     category_gaps = {name: 0 for name in totals}
     details = []
     intervals = times.diff().dt.total_seconds() / cfg.bar_seconds
@@ -60,8 +62,13 @@ def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
         counts = {name: 0 for name in totals}
         for step in range(1, missing_count + 1):
             timestamp = previous + step * bar
+            special = special_fx_closure(timestamp) if cfg.market == "fx" else None
             if cfg.market == "fx" and _regular_fx_closure(timestamp):
                 category = "scheduled_closure"
+            elif special is not None:
+                # An official notice, not an inference from the missing bar itself.
+                category = "special_closure"
+                special_sources.add(special["source"])
             elif (
                 cfg.market == "fx"
                 and trading_date(timestamp.to_pydatetime()).isoformat() in empty_dates
@@ -90,7 +97,15 @@ def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
                 **{f"{name}_bar_intervals": count for name, count in counts.items()},
             }
         )
+    # A bar inside an announced closure means the calendar or the data is wrong.
+    bars_in_special = (
+        sorted(t.isoformat() for t in times if special_fx_closure(t) is not None)
+        if cfg.market == "fx"
+        else []
+    )
     review_reasons = []
+    if bars_in_special:
+        review_reasons.append("bars_during_official_special_closure")
     if category_gaps["provider_empty"]:
         review_reasons.append("provider_empty_during_regular_hours")
     if category_gaps["unexplained"]:
@@ -106,6 +121,8 @@ def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
         "status": "needs_review" if review_reasons else "ok",
         "review_reasons": review_reasons,
         "lineage_empty_date_conflicts": lineage_conflicts,
+        "bars_during_special_closures": bars_in_special,
+        "special_closure_sources": sorted(special_sources),
         "classification": (
             "gmo_fx_regular_hours_and_collection_lineage"
             if cfg.market == "fx"
@@ -115,7 +132,8 @@ def interval_gap_report(frame: pd.DataFrame, cfg: Settings) -> dict:
             "timezone": "Asia/Tokyo",
             "regular_hours": "Monday 07:00 through Saturday 05:59",
             "source": FX_TRADING_HOURS_URL,
-            "special_holidays": "not assumed; provider-empty lineage or review required",
+            "special_holidays": "official notices in trading.market_calendar; "
+            "otherwise provider-empty lineage or review required",
         }
         if cfg.market == "fx"
         else None,

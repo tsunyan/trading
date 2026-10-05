@@ -53,8 +53,17 @@ class PrivateOrderRecovery:
     def resolution_context(self, client_id):
         return self.journal.order_resolution_context(client_id)
 
+    def active_cancel_context(self, client_id):
+        return self.journal.active_cancel_context(client_id)
+
     def resolve(self, client_id, approval, *, confirmations):
         return self.journal.resolve_order_claim(client_id, approval, confirmations=confirmations)
+
+    def absence_context(self, client_id):
+        return self.journal.order_absence_context(client_id)
+
+    def resolve_absence(self, client_id, approval, *, confirmations):
+        return self.journal.resolve_absent_order(client_id, approval, confirmations=confirmations)
 
     def reconcile(
         self,
@@ -132,7 +141,16 @@ class PrivateOrderRecovery:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("context", "reconcile", "resolution-context", "resolve")
+        "command",
+        choices=(
+            "context",
+            "reconcile",
+            "resolution-context",
+            "active-cancel-context",
+            "resolve",
+            "absence-context",
+            "resolve-absence",
+        ),
     )
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--read-control-directory", type=Path, required=True)
@@ -151,7 +169,11 @@ def main(argv=None):
             result = recovery.context(args.client_id)
         elif args.command == "resolution-context":
             result = recovery.resolution_context(args.client_id)
-        elif args.command == "resolve":
+        elif args.command == "active-cancel-context":
+            result = recovery.active_cancel_context(args.client_id)
+        elif args.command == "absence-context":
+            result = recovery.absence_context(args.client_id)
+        elif args.command in {"resolve", "resolve-absence"}:
             if args.approval is None:
                 raise OrderRecoveryError("order_resolution_approval_required")
             with args.approval.open("rb") as handle:
@@ -159,7 +181,8 @@ def main(argv=None):
             if len(payload) > 64_000:
                 raise OrderRecoveryError("order_resolution_approval_too_large")
             approval = OrderResolutionApproval.model_validate_json(payload)
-            result = recovery.resolve(args.client_id, approval, confirmations=args.confirm)
+            resolve = recovery.resolve if args.command == "resolve" else recovery.resolve_absence
+            result = resolve(args.client_id, approval, confirmations=args.confirm)
         else:
             result = recovery.reconcile(
                 args.client_id,
