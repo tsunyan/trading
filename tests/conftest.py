@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from functools import cache
 
@@ -31,6 +32,18 @@ class _UnsyncedConnection(sqlite3.Connection):
 
 def _unsynced_connect(*args, factory=_UnsyncedConnection, **kwargs):
     return _sqlite_connect(*args, factory=factory, **kwargs)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config):
+    # Each worker imports and collects the suite before running anything, so a run of
+    # named files or tests stays in this process. Directory runs use up to eight
+    # workers, which leaves most of a large machine free.
+    if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS"):
+        return None
+    if config.args and all(arg.split("::")[0].endswith(".py") for arg in config.args):
+        return 0
+    return min(8, os.cpu_count() or 1)
 
 
 @pytest.fixture(autouse=True)
