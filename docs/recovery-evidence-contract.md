@@ -55,7 +55,7 @@ OS所有権プロトコルの保証範囲外です。業者側の処理終了は
 欠損・差替えで状態CLI自体が拒否した場合は、その固定理由と元の保存物を保全します。状態を表示するために
 ロックを作り直したり、DBを編集・差し戻したり、別の制御へ登録したりしません。
 DBとロックのコピーは調査用の保存物であり、元の排他領域を復元した証明にはなりません。
-GET制御には、欠損時にも使える以下の読取専用の証拠採取を追加しました。同期制御・タスク・起動元の
+GET・同期制御には、欠損時にも使える以下の読取専用の証拠採取を追加しました。タスク・起動元の
 証拠を一括採取する機能と、欠損した所有物を修復する機能は未実装です。
 
 ## GET制御の証拠採取
@@ -89,6 +89,38 @@ OS所有権を取得せず、起動元・実行中処理・SID・業者側の処
 検証は元DB不変更、SQLite接続がコピーのみであること、旧未完了claim・欠損した所有物の保持、
 任意payloadの非表示、WAL/sidecar・採取中の更新・過大入力・別scope・不正schemaの拒否、
 既存出力と元の保存先の保護を、一時保存物で行います。実口座・実資格情報・実タスクには使用していません。
+
+## 同期制御の証拠採取
+
+```powershell
+uv run python -m trading.stream_control_evidence --directory runs/account-sync/control --scope operator-account --output research/stream-control-evidence.json
+```
+
+GETと同じコピー方式・容量上限・sidecar拒否・全バイトの前後照合を使い、元の`stream-control.sqlite`を
+SQLiteで開きません。OS所有権を取得せず、journal・cash・catalog・監視ストアも開きません。
+DBに保存されたjournal/cashのパスと識別子は、紐付けの調査用に表示するだけです。
+それらの保存先が欠損していても作り直さず、実在・健全性・会計との一致を保証しません。
+
+出力は`control_unverified.state_unverified`に保存状態、`audit_tail_unverified`に直近20件の遷移を記録します。
+状態は既存の`ControlState`形式とscopeを検査し、不正なJSON・未知フィールド・不整合なphaseなどを拒否します。
+元のbodyは表示せずSHA-256を保存し、`digest_matches_body`と`body_matches_canonical_state`で
+DB内のdigestとの一致と標準形式への一致を個別に示します。digestが欠損・不正なら一致はfalseです。
+形式検査や一致がtrueでも、全遷移・関連ストア・過去への巻戻しを検証した意味にはなりません。
+
+所有権ファイルの`identity_matches_control`は現在のdevice/inodeと保存値の比較、
+`contents_match_instance`は32バイトの現物と同期instanceの比較だけです。欠損・不正サイズなら
+前者はfalseです。内容が一致する差替えファイルも、元の所有権の代替として採用しません。
+`owner_absence_established=false`、`recovery_authorized=false`、`history_complete=false`、
+`cross_store_atomic_snapshot=false`を常に記録します。RUNNING・cleanup_unknown・停止理由を保持します。
+
+Windowsでは既存所有者が保持するロックのバイト読取り自体が拒否される場合があります。その場合も
+所有権を取得・解除せず、固定理由で採取を拒否します。関連処理を終了して静止した保存物を採取する工程です。
+GETと同様、出力は元の制御ディレクトリ外に限り、既存ファイルを上書きしません。
+JSON全体の指紋の計算方法と採取結果の限界もGETと同じです。
+
+検証は欠損・差替え・不正内容の所有物、残るRUNNING状態、関連ストア欠損、採取中の更新、
+WAL/sidecar、過大入力、不正body/digest/schema/遷移、末尾20件の上限、出力先保護を一時保存物で行います。
+実口座・実資格情報・実タスクの資料採取ではありません。
 
 ## 将来の復旧実装に課す条件
 
