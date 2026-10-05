@@ -1,0 +1,37 @@
+{
+  "measurement": {
+    "segments": 2500,
+    "journal_records": 2560000,
+    "journal_body_bytes": 512962500,
+    "alerts": 50000,
+    "clock_mode": "elapsed",
+    "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+    "watchdog_seconds": 1.9540603999630548,
+    "watchdog_error_type": null,
+    "watchdog_conditions": [],
+    "watchdog_scan_counts": {
+      "journal_checks": 1,
+      "monitor_archive_checks": 5
+    },
+    "dispatch_seconds": 12.15716689999681,
+    "dispatch_error_type": "OrderRuntimeError",
+    "dispatch_last_stage": "dispatch",
+    "dispatch_scan_counts": {
+      "journal_checks": 10,
+      "monitor_archive_checks": 20
+    },
+    "mock_http_requests": 0,
+    "mock_order_accepted": false,
+    "memory_order_credential_reads": 1,
+    "real_network_or_native_credentials": false,
+    "freshness_limits": {
+      "sync_seconds": 30,
+      "watchdog_seconds": 40,
+      "account_quote_seconds": 60
+    }
+  },
+  "captured_not_sent_codes": [
+    "order_dispatch_deadline_exceeded"
+  ],
+  "method": "One additional temporary synthetic elapsed trial; wrap private_order._reason without changing its return value; no live code modified"
+}

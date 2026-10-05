@@ -1,0 +1,803 @@
+{
+  "started_at": "2026-10-05T01:26:05.827974+00:00",
+  "python": "3.12.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sqlite": "3.53.1",
+  "fixture": "Test composition fixtures; retained BEGIN/HEARTBEAT/ACK/END and sent test alerts; real local stores, bindings and checks; memory credentials and MockTransport",
+  "limitations": "Warm local synthetic paths. Frozen mode excludes elapsed time from freshness checks; elapsed mode includes it but no concurrent sync refresh. Real broker, Windows vault, cash/fill history and OS scheduling are not measured. No production deadline guarantee.",
+  "measurements": [
+    {
+      "clock_mode": "frozen",
+      "alerts": 10000,
+      "size": 500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 0.4105549000087194,
+          "median": 0.4234675000188872,
+          "max": 0.4488619999610819
+        },
+        "dispatch_seconds": {
+          "min": 2.5596697999862954,
+          "median": 2.69708830001764,
+          "max": 2.7040323999826796
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:26:05.852398+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.4488619999610819,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 2.7040323999826796,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 14.852289400005247
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:26:20.704469+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.4234675000188872,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 2.69708830001764,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 15.81723799998872
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:26:36.522125+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.4105549000087194,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 2.5596697999862954,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 14.557868200005032
+        }
+      ]
+    },
+    {
+      "clock_mode": "elapsed",
+      "alerts": 10000,
+      "size": 500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 0.4330997000215575,
+          "median": 0.4404484999831766,
+          "max": 0.5410669000120834
+        },
+        "dispatch_seconds": {
+          "min": 3.659150799969211,
+          "median": 3.778613200003747,
+          "max": 3.8324765999568626
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:26:51.080119+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.5410669000120834,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 3.778613200003747,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 16.834483799990267
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:27:07.914598+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.4330997000215575,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 3.8324765999568626,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 15.569529399974272
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:27:23.484469+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 500,
+            "journal_records": 512000,
+            "journal_body_bytes": 102592500,
+            "alerts": 10000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 0.4404484999831766,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 3.659150799969211,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 16.184454699978232
+        }
+      ]
+    },
+    {
+      "clock_mode": "frozen",
+      "alerts": 50000,
+      "size": 2500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 1.8911484999698587,
+          "median": 1.8935725000337698,
+          "max": 1.8953883000067435
+        },
+        "dispatch_seconds": {
+          "min": 10.914710999990348,
+          "median": 11.221345300029498,
+          "max": 11.225644599995576
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:27:39.669114+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 1.8911484999698587,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 10.914710999990348,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 72.59901300002821
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:28:52.266815+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 1.8935725000337698,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 11.221345300029498,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 72.36811010004021
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:30:04.635464+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 1.8953883000067435,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 11.225644599995576,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 73.28476800001226
+        }
+      ]
+    },
+    {
+      "clock_mode": "elapsed",
+      "alerts": 50000,
+      "size": 2500,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 1.926161499985028,
+          "median": 1.9441170999780297,
+          "max": 2.1716642000246793
+        },
+        "dispatch_seconds": {
+          "min": 12.056923000025563,
+          "median": 12.11401509999996,
+          "max": 12.246072000009008
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:31:17.920633+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 1.9441170999780297,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 12.056923000025563,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 72.91667360003339
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:32:30.837213+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 2.1716642000246793,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 12.246072000009008,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 74.58774119999725
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:33:45.425529+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 2500,
+            "journal_records": 2560000,
+            "journal_body_bytes": 512962500,
+            "alerts": 50000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 1.926161499985028,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 12.11401509999996,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 76.05861390003702
+        }
+      ]
+    },
+    {
+      "clock_mode": "frozen",
+      "alerts": 100000,
+      "size": 5000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 3.7050951999844983,
+          "median": 3.7223271999973804,
+          "max": 3.7229580000275746
+        },
+        "dispatch_seconds": {
+          "min": 21.282236300001387,
+          "median": 21.617418100009672,
+          "max": 21.785530900000595
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:35:01.484399+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.7050951999844983,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 21.617418100009672,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 155.39347660000203
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:37:36.877740+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.7229580000275746,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 21.282236300001387,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 155.9921800000011
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:40:12.869779+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "frozen",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.7223271999973804,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 21.785530900000595,
+            "dispatch_error_type": null,
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 1,
+            "mock_order_accepted": true,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 158.0138922999613
+        }
+      ]
+    },
+    {
+      "clock_mode": "elapsed",
+      "alerts": 100000,
+      "size": 5000,
+      "successful_samples": 3,
+      "failed_samples": 0,
+      "timings_seconds": {
+        "watchdog_seconds": {
+          "min": 3.718843500013463,
+          "median": 3.802140799991321,
+          "max": 3.880005399987567
+        },
+        "dispatch_seconds": {
+          "min": 22.848589700006414,
+          "median": 22.94257200002903,
+          "max": 23.0494056000025
+        }
+      },
+      "samples": [
+        {
+          "sample": 1,
+          "started_at": "2026-10-05T01:42:50.884161+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.718843500013463,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 22.848589700006414,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 157.99368340004003
+        },
+        {
+          "sample": 2,
+          "started_at": "2026-10-05T01:45:28.877783+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.880005399987567,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 22.94257200002903,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 160.0425905000302
+        },
+        {
+          "sample": 3,
+          "started_at": "2026-10-05T01:48:08.920375+00:00",
+          "ok": true,
+          "measurement": {
+            "segments": 5000,
+            "journal_records": 5120000,
+            "journal_body_bytes": 1025925000,
+            "alerts": 100000,
+            "clock_mode": "elapsed",
+            "implementation_sha256": "d0c8079cb31dc561faa09d860896282aaebc6738ec6d84ac018b70bc5b402af3",
+            "watchdog_seconds": 3.802140799991321,
+            "watchdog_error_type": null,
+            "watchdog_conditions": [],
+            "watchdog_scan_counts": {
+              "journal_checks": 1,
+              "monitor_archive_checks": 5
+            },
+            "dispatch_seconds": 23.0494056000025,
+            "dispatch_error_type": "OrderRuntimeError",
+            "dispatch_last_stage": "dispatch",
+            "dispatch_scan_counts": {
+              "journal_checks": 10,
+              "monitor_archive_checks": 20
+            },
+            "mock_http_requests": 0,
+            "mock_order_accepted": false,
+            "memory_order_credential_reads": 1,
+            "real_network_or_native_credentials": false,
+            "freshness_limits": {
+              "sync_seconds": 30,
+              "watchdog_seconds": 40,
+              "account_quote_seconds": 60
+            }
+          },
+          "total_seconds": 163.59415559994522
+        }
+      ]
+    }
+  ],
+  "finished_at": "2026-10-05T01:50:52.514116+00:00"
+}
