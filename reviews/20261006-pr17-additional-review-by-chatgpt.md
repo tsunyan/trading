@@ -230,3 +230,51 @@ A2 and A3 are lower-priority hardening/operability fixes but are worth addressin
 ---
 
 *Additional-commit review by ChatGPT (GPT-5.6 Sol)*
+
+
+### A4. MEDIUM — Swap diagnostic can false-positive when the account collection straddles the 06:00 rollover
+
+**File:** `src/trading/swap_check.py:30`
+
+The diagnostic uses the earliest response in the whole account collection:
+
+```python
+observed = pd.Timestamp(min(o.response_at for o in report.observations))
+```
+
+But the returned positions are taken from the second account sweep, while `observations` starts
+with the first sweep's assets request.
+
+A valid collection can therefore cross the rollover boundary like this:
+
+1. first assets response at 05:59:59
+2. positions request after 06:00, with the new swap already included in `totalSwap`
+3. second sweep also after 06:00, returning the same position state
+4. the two-sweep equality check succeeds
+5. `swap_check()` nevertheless evaluates expected carry only through 05:59:59
+
+The broker value includes the 06:00 credit while the local expected value excludes it, creating a
+false diagnostic mismatch exactly at the boundary being investigated.
+
+**Recommended fix**
+
+Use an observation timestamp tied to the accepted positions snapshot, preferably the second
+sweep's positions completion time. If the current flat observation list cannot reliably express
+that relationship, expose an explicit `positions_observed_at` or sweep metadata from
+`AccountReader`.
+
+---
+
+## Review synchronization note
+
+The PR now contains ChatGPT review comments for A1-A4. Existing CodeRabbit findings listed above
+were intentionally not duplicated as inline ChatGPT comments.
+
+GitHub review IDs created during this pass:
+
+- `5417387891` — evidence durability + swap rollover findings
+- `5417409204` — legacy DB mutation + durable low-disk reason findings
+
+The current merge recommendation remains unchanged: do not merge while the existing
+`read_owner_upgrade` STOP-event Major is unresolved; A1 should also be addressed before using the
+migration against genuine historical version 1/2 stores.
