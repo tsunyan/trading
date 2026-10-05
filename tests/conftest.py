@@ -18,6 +18,14 @@ def cached_implementation_sha256(monkeypatch):
 
 
 @pytest.fixture
+def short_owner_wait(monkeypatch):
+    """Shorten the operator wait for tests that hold the owner and expect a refusal."""
+    for module in ("stream_control", "private_sync", "private_supervisor"):
+        monkeypatch.setattr(f"trading.{module}.OPERATOR_OWNER_WAIT_SECONDS", 0.2)
+    return 0.2
+
+
+@pytest.fixture
 def cfg():
     return Settings(
         market="fx",

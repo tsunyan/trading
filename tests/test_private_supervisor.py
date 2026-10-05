@@ -386,9 +386,9 @@ def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elap
         return original(timeout=timeout)
 
     monkeypatch.setattr(runner._worker, "join", join)
-    # The initial case reproduces a legitimate three-second REST collection,
-    # longer than the old two-second normal-shutdown budget.
-    timer = threading.Timer(3 if not elapsed else 0.05, release.set)
+    # The join budget is asserted below (35s, not the old two-second budget), so the
+    # collection only needs to still be running when close() starts waiting.
+    timer = threading.Timer(0.05, release.set)
     timer.start()
     try:
         runner.close()
@@ -402,7 +402,7 @@ def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elap
     assert sockets[0].closed and not runner.status()["owner_retained"]
 
 
-def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path):
+def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path, short_owner_wait):
     entered, release = threading.Event(), threading.Event()
     state = {}
 
@@ -525,7 +525,7 @@ def test_notification_during_cash_resync_invalidates_attempt_but_keeps_transport
     runner.close()
 
 
-def test_hung_rest_keeps_os_owner_until_worker_exit_and_persists_stop(tmp_path):
+def test_hung_rest_keeps_os_owner_until_worker_exit_and_persists_stop(tmp_path, short_owner_wait):
     entered, release = threading.Event(), threading.Event()
     state = {}
 

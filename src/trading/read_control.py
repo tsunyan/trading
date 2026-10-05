@@ -36,6 +36,7 @@ RECOVERY_CHECKS = frozenset({"cause", "permissions", "wait", "clock", "workers-p
 RECOVERY_TTL_NS = 300_000_000_000
 OWNER_UPGRADE_MAX_BYTES = 64_000
 ORPHAN_CHECKS = frozenset({"cause", "clock", "workers-paused", "get-only"})
+BUSY_TIMEOUT_SECONDS = 1
 
 
 class _ControlBusy(PrivateReadError):
@@ -123,7 +124,9 @@ class PersistentReadLimiter(AccountReadLimiter):
         try:
             # mode=rw is essential: missing DB must never become a fresh account.
             with closing(
-                sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=1)
+                sqlite3.connect(
+                    self.path.as_uri() + "?mode=rw", uri=True, timeout=BUSY_TIMEOUT_SECONDS
+                )
             ) as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA synchronous=FULL")

@@ -204,7 +204,7 @@ def test_changed_checkpoint_or_permission_refuses_before_credentials(tmp_path, f
     assert workspace.book.snapshot()["executions"] == 0
 
 
-def test_ready_and_live_owner_refuse_before_credentials(tmp_path):
+def test_ready_and_live_owner_refuse_before_credentials(tmp_path, short_owner_wait):
     _, _, _, backend, vault, workspace = make_setup(tmp_path)
     with pytest.raises(PrivateSyncError, match="stop_required"):
         workspace.reconcile_stopped(**checks(workspace), vault=vault)

@@ -7,7 +7,7 @@ import pytest
 from test_stream_control import begin, recovery
 from test_stream_control import setup as control_setup
 
-from trading.stream_control import OPERATOR_OWNER_WAIT_SECONDS, StreamControl, StreamControlError
+from trading.stream_control import StreamControl, StreamControlError
 
 
 @pytest.fixture
@@ -37,20 +37,20 @@ def test_recovery_waits_out_a_brief_probe_by_another_handle(setup):
     assert control.snapshot()["phase"] == "READY"
 
 
-def test_a_probe_that_never_releases_still_refuses_after_the_wait(setup):
+def test_a_probe_that_never_releases_still_refuses_after_the_wait(setup, short_owner_wait):
     _, journal, book, control = setup
     with control.ownership():
         begin(control, journal)
     probe = StreamControl(control.path.parent)
     entered = threading.Event()
-    worker = threading.Thread(target=hold, args=(probe, OPERATOR_OWNER_WAIT_SECONDS + 1.0, entered))
+    worker = threading.Thread(target=hold, args=(probe, short_owner_wait + 0.3, entered))
     worker.start()
     try:
         assert entered.wait(5)
         started = time.monotonic()
         with pytest.raises(StreamControlError, match="owner_busy"):
             recovery(control, journal, book, acknowledge_token_uncertainty=True)
-        assert time.monotonic() - started >= OPERATOR_OWNER_WAIT_SECONDS - 0.2
+        assert time.monotonic() - started >= short_owner_wait - 0.05
     finally:
         worker.join()
 
