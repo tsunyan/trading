@@ -137,10 +137,9 @@ def test_local_context_never_reads_credentials_or_changes_stores(setup):
     assert vault.calls == [] and [p.read_bytes() for p in paths] == before
 
 
-@pytest.mark.parametrize(
-    "status,units",
-    [("ORDERED", 0), ("ORDERED", 400), ("EXECUTED", 1000), ("CANCELED", 400), ("EXPIRED", 0)],
-)
+# Working orders take the same path as these terminal ones; EXPIRED-0 stays because an
+# unfilled terminal order is the observation most easily mistaken for absence.
+@pytest.mark.parametrize("status,units", [("EXECUTED", 1000), ("CANCELED", 400), ("EXPIRED", 0)])
 def test_positive_order_observation_preserves_claim_stop_and_incompleteness(setup, status, units):
     recovery, order, vault = unknown(setup)
     clock, _, posts, journal = setup

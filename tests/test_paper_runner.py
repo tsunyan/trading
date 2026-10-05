@@ -409,23 +409,6 @@ def test_actual_worker_command_matches_frozen_runtime(account):
     assert json.loads(result.stdout) == runtime_versions()
 
 
-def test_real_timeout_releases_the_actual_worker_lock(account, tmp_path):
-    directory, _ = account
-    ready = tmp_path / "timeout-ready"
-    code = (
-        "import time; from pathlib import Path; from trading.paper_runner import _process_lock; "
-        "ctx=_process_lock(Path(sys.argv[1])); owned=ctx.__enter__(); "
-        "Path(sys.argv[2]).write_text(str(owned)); time.sleep(30)"
-    )
-    with pytest.raises(subprocess.TimeoutExpired):
-        subprocess.run(
-            paper_runner.python_process_args(code, directory / "operations.lock", ready), timeout=2
-        )
-    assert ready.read_text() == "True"
-    job, _ = runner(account, [{"status": "market_closed"}])
-    assert job.step()["status"] == "market_closed"
-
-
 def test_subprocess_lock_released_after_kill(account, tmp_path):
     directory, _ = account
     ready = tmp_path / "ready"

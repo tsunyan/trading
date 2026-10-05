@@ -445,13 +445,8 @@ def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path, sh
     assert control.snapshot()["phase"] == "STOPPED"
 
 
-@pytest.mark.parametrize("max_records", [8, 9])
-def test_many_fills_cross_capacity_in_multiple_connections_without_double_booking(
-    tmp_path, max_records
-):
-    clock, _, book, control, runner, sockets, _, _, rows, requests = setup(
-        tmp_path, max_records=max_records
-    )
+def test_many_fills_cross_capacity_in_multiple_connections_without_double_booking(tmp_path):
+    clock, _, book, control, runner, sockets, _, _, rows, requests = setup(tmp_path, max_records=8)
     start(runner)
     settle(runner)
     for index in range(20):

@@ -141,7 +141,8 @@ def test_cycle_proposes_then_prepares_and_the_printed_checkpoint_sends_once(runn
     assert len(posts) == 1 and journal.snapshot()["orders"][0]["state"] == "RECONCILING"
 
 
-@pytest.mark.parametrize("mode", ["hold", "flatten", "valuation_drift"])
+# The drift case reconciles in its refused refresh and then holds, so a plain hold adds no path.
+@pytest.mark.parametrize("mode", ["flatten", "valuation_drift"])
 def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(running, tmp_path, mode):
     flatten = mode == "flatten"
     values, live, _ = running

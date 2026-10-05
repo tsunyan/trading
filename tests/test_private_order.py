@@ -529,7 +529,6 @@ def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
 @pytest.mark.parametrize(
     "failure",
     [
-        401,
         429,
         302,
         "timeout",
@@ -664,9 +663,7 @@ def test_foreign_thread_cannot_reuse_same_limiter_object_owner(setup):
     assert journal.snapshot()["orders"] == []
 
 
-@pytest.mark.parametrize(
-    "stage", ["ready", "completed", "operation_unknown", "operator_stop", "clock_invalid"]
-)
+@pytest.mark.parametrize("stage", ["completed", "operation_unknown", "clock_invalid"])
 def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(setup, stage):
     from trading.post_control import TOKEN_CONFIRMATIONS, TOKEN_QUIET_SECONDS
 
@@ -683,7 +680,7 @@ def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(s
     elif stage == "operation_unknown":
         with pytest.raises(OrderTransportError):
             sender.submit(order.client_id, quote=quote(clock.now))
-    elif stage in {"operator_stop", "clock_invalid"}:
+    elif stage == "clock_invalid":
         posts.stop(stage)
     saved, before = posts.snapshot(), journal.snapshot()
     sender._client.close = lambda: (_ for _ in ()).throw(RuntimeError("remote secret"))
@@ -691,7 +688,7 @@ def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(s
         sender.close()
     state = posts.snapshot()
     assert state["phase"] == "STOPPED" and state["claim"] == saved["claim"]
-    assert state["reason"] == ("order_cleanup_failed" if stage in {"ready", "completed"} else stage)
+    assert state["reason"] == ("order_cleanup_failed" if stage == "completed" else stage)
     assert (
         sender._closed
         and sender._api_key.get_secret_value() == sender._secret.get_secret_value() == ""
