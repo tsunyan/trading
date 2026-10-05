@@ -338,3 +338,43 @@ def test_upgrade_row_id_cannot_expose_arbitrary_text(tmp_path):
     with pytest.raises(evidence.EvidenceError, match="^read_evidence_upgrade_shape_invalid$"):
         evidence.capture(reads.path.parent, "synthetic")
     assert reads.path.read_bytes() == before
+
+
+def test_non_text_audit_tokens_are_not_reported_as_null(tmp_path):
+    reads = PersistentReadLimiter.create(tmp_path / "reads", "synthetic")
+    with closing(sqlite3.connect(reads.path)) as conn, conn:
+        # The TEXT column converts numbers, so rebuild it without a declared type.
+        conn.execute("CREATE TABLE malformed(id INTEGER PRIMARY KEY,wall_ns INTEGER,kind,token)")
+        conn.execute("INSERT INTO malformed SELECT id,wall_ns,kind,token FROM events")
+        conn.execute("DROP TABLE events")
+        conn.execute("ALTER TABLE malformed RENAME TO events")
+        conn.execute("INSERT INTO events(wall_ns,kind,token) VALUES(1,'CLAIMED',12345)")
+    before = reads.path.read_bytes()
+    with pytest.raises(evidence.EvidenceError, match="^read_evidence_audit_shape_invalid$"):
+        evidence.capture(reads.path.parent, "synthetic")
+    assert reads.path.read_bytes() == before
+
+
+def test_interrupted_artifact_write_leaves_no_final_file_and_allows_a_retry(
+    tmp_path, monkeypatch, capsys
+):
+    _, upgrade = legacy(tmp_path)
+    args = ["--directory", str(upgrade.reads.path.parent), "--scope", "synthetic"]
+    output = tmp_path / "evidence" / "get.json"
+    output.parent.mkdir()
+    original = evidence.os.fsync
+
+    def failed(descriptor):
+        raise OSError("synthetic storage failure")
+
+    monkeypatch.setattr(evidence.os, "fsync", failed)
+    with pytest.raises(SystemExit) as refused:
+        evidence.main([*args, "--output", str(output)])
+    assert refused.value.code == 2
+    assert "read_evidence_output_failed" in capsys.readouterr().err
+    assert list(output.parent.iterdir()) == []
+    monkeypatch.setattr(evidence.os, "fsync", original)
+    evidence.main([*args, "--output", str(output)])
+    reported = json.loads(capsys.readouterr().out)
+    assert json.loads(output.read_text(encoding="utf-8"))["sha256"] == reported["sha256"]
+    assert list(output.parent.iterdir()) == [output]

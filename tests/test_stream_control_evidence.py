@@ -303,3 +303,22 @@ def test_cli_protects_source_and_existing_output_and_uses_fixed_error_codes(
     evidence.main(args)
     payload = json.loads(capsys.readouterr().out)["payload"]
     assert payload["format"] == "stream-control-evidence-v1"
+
+
+def test_stream_artifacts_use_the_shared_complete_file_publication(
+    setup, tmp_path, monkeypatch, capsys
+):
+    *_, control = setup
+    args = ["--directory", str(control.path.parent), "--scope", "synthetic"]
+    output = tmp_path / "evidence" / "stream.json"
+    output.parent.mkdir()
+
+    def failed(source, target):
+        raise OSError("synthetic link failure")
+
+    monkeypatch.setattr(shared.os, "link", failed)
+    with pytest.raises(SystemExit) as refused:
+        evidence.main([*args, "--output", str(output)])
+    assert refused.value.code == 2
+    assert "stream_evidence_output_failed" in capsys.readouterr().err
+    assert list(output.parent.iterdir()) == []

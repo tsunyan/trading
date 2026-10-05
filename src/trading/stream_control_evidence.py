@@ -9,7 +9,14 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from trading.read_control_evidence import EvidenceError, _owner, _rows, _snapshot, canonical
+from trading.read_control_evidence import (
+    EvidenceError,
+    _owner,
+    _rows,
+    _snapshot,
+    canonical,
+    publish,
+)
 from trading.stream_control import ControlState, _body
 
 
@@ -117,8 +124,7 @@ def main(argv=None):
         if args.output is None:
             print(body, end="")
         else:
-            with args.output.open("x", encoding="utf-8", newline="\n") as output:
-                output.write(body)
+            publish(args.output, body)
             print(json.dumps({"artifact": str(args.output), "sha256": evidence["sha256"]}))
     except (EvidenceError, OSError) as error:
         reason = str(error) if isinstance(error, EvidenceError) else "stream_evidence_output_failed"

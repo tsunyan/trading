@@ -223,6 +223,9 @@ def capture(directory, scope):
                     if any(type(event[key]) is not int for key in ("id", "wall_ns")):
                         raise EvidenceError("read_evidence_audit_shape_invalid")
                     token = event.pop("token")
+                    if token is not None and not isinstance(token, str):
+                        # An integer token would otherwise look the same as NULL.
+                        raise EvidenceError("read_evidence_audit_shape_invalid")
                     event["token_sha256"] = (
                         hashlib.sha256(token.encode()).hexdigest()
                         if isinstance(token, str)
@@ -285,6 +288,20 @@ def capture(directory, scope):
         raise EvidenceError("read_evidence_capture_failed") from None
 
 
+def publish(path, body):
+    """Install a fully written artifact; a visible final path is never a partial file."""
+    path = Path(path)
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".evidence-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as output:
+            output.write(body.encode("utf-8"))
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path)  # Fails instead of replacing an existing artifact.
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
@@ -301,8 +318,7 @@ def main(argv=None):
         if args.output is None:
             print(body, end="")
         else:
-            with args.output.open("x", encoding="utf-8", newline="\n") as output:
-                output.write(body)
+            publish(args.output, body)
             print(json.dumps({"artifact": str(args.output), "sha256": evidence["sha256"]}))
     except (EvidenceError, OSError) as error:
         reason = str(error) if isinstance(error, EvidenceError) else "read_evidence_output_failed"
