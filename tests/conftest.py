@@ -1,3 +1,4 @@
+import sqlite3
 from functools import cache
 
 import pandas as pd
@@ -7,6 +8,29 @@ from trading import live_journal
 from trading.config import Settings
 
 _implementation_sha256 = cache(live_journal.implementation_sha256)
+_sqlite_connect = sqlite3.connect
+
+
+class _UnsyncedConnection(sqlite3.Connection):
+    # synchronous=FULL protects committed rows from power loss; the tests only simulate
+    # process exits, which keep OS-buffered writes, so skipping the flushes is safe here.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        super().execute("PRAGMA synchronous=OFF")
+
+    def execute(self, sql, *args):
+        if sql == "PRAGMA synchronous=FULL":
+            sql = "PRAGMA synchronous=OFF"
+        return super().execute(sql, *args)
+
+
+def _unsynced_connect(*args, factory=_UnsyncedConnection, **kwargs):
+    return _sqlite_connect(*args, factory=factory, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def unsynced_sqlite(monkeypatch):
+    monkeypatch.setattr(sqlite3, "connect", _unsynced_connect)
 
 
 @pytest.fixture(autouse=True)
