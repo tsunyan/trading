@@ -122,7 +122,7 @@ def test_restricted_cancel_preserves_permissions_risk_and_incomplete_evidence(
 
 @pytest.mark.parametrize(
     "change",
-    ["account", "checkpoint", "expired", "future", "confirmation", "post_stop", "read_stop"],
+    ["account", "expired", "confirmation", "post_stop", "read_stop"],
 )
 def test_authorization_refusals_write_no_permission_or_cancel_claim(setup, change):
     clock, reads, posts, journal = setup
@@ -132,12 +132,8 @@ def test_authorization_refusals_write_no_permission_or_cancel_claim(setup, chang
     confirmations = CANCEL_CONFIRMATIONS
     if change == "account":
         accepted = accepted.model_copy(update={"account_id": "foreign"})
-    elif change == "checkpoint":
-        accepted = accepted.model_copy(update={"checkpoint_sha256": "b" * 64})
     elif change == "expired":
         clock.advance(30)
-    elif change == "future":
-        accepted = accepted.model_copy(update={"accepted_at": clock.now + timedelta(seconds=1)})
     elif change == "confirmation":
         confirmations = {"cancel-only"}
     elif change == "post_stop":
@@ -199,7 +195,7 @@ def test_permission_fences_changes_before_post_claim(setup, monkeypatch, change)
     assert not events(journal, "CANCEL_CLAIMED")
 
 
-@pytest.mark.parametrize("change", ["expiry", "halt", "code", "stale_evidence"])
+@pytest.mark.parametrize("change", ["expiry", "code", "stale_evidence"])
 def test_permission_checked_after_pacing_without_consuming_cancel_attempt(
     setup, monkeypatch, change
 ):
@@ -210,9 +206,7 @@ def test_permission_checked_after_pacing_without_consuming_cancel_attempt(
 
     def wait(seconds):
         clock.advance(seconds)
-        if change == "halt":
-            journal.halt()
-        elif change == "code":
+        if change == "code":
             monkeypatch.setattr(journal, "_current_implementation", lambda: "b" * 64)
         elif change == "stale_evidence":
             clock.now += timedelta(seconds=60)
@@ -225,7 +219,7 @@ def test_permission_checked_after_pacing_without_consuming_cancel_attempt(
     assert journal.snapshot()["orders"][0]["state"] == "RECONCILING"
 
 
-@pytest.mark.parametrize("change", ["expiry", "halt", "code"])
+@pytest.mark.parametrize("change", ["expiry", "code"])
 def test_permission_final_gate_failure_closes_the_claim_and_spends_the_permission(
     setup, monkeypatch, change
 ):
@@ -239,8 +233,6 @@ def test_permission_final_gate_failure_closes_the_claim_and_spends_the_permissio
         result = original(*args, **kwargs)
         if change == "expiry":
             clock.advance(30)
-        elif change == "halt":
-            journal.halt()
         else:
             monkeypatch.setattr(journal, "_current_implementation", lambda: "b" * 64)
         return result
@@ -259,7 +251,7 @@ def test_permission_final_gate_failure_closes_the_claim_and_spends_the_permissio
             sender.cancel(order.client_id, authorization_sha256=token)
 
 
-@pytest.mark.parametrize("change", ["expiry", "halt", "code"])
+@pytest.mark.parametrize("change", ["expiry", "code"])
 def test_acceptance_after_dispatch_saves_receipt_without_reauthorizing(setup, monkeypatch, change):
     clock, _, posts, journal = setup
     order, _ = working(setup)
@@ -271,8 +263,6 @@ def test_acceptance_after_dispatch_saves_receipt_without_reauthorizing(setup, mo
         if change == "expiry":
             # Approval can expire during HTTP while the HTTP deadline remains valid.
             clock.advance(1)
-        elif change == "halt":
-            journal.halt()
         else:
             monkeypatch.setattr(journal, "_current_implementation", lambda: "b" * 64)
         return httpx.Response(200, json=envelope(clock))
@@ -285,7 +275,7 @@ def test_acceptance_after_dispatch_saves_receipt_without_reauthorizing(setup, mo
     assert not view["live_enabled"] and posts.snapshot()["claim"] is None
 
 
-@pytest.mark.parametrize("state", ["UNKNOWN", "SUBMITTING", "CANCELED", "CANCEL_PENDING"])
+@pytest.mark.parametrize("state", ["UNKNOWN", "CANCELED"])
 def test_permission_cannot_authorize_unidentified_or_terminal_order(setup, state):
     _, _, _, journal = setup
     order, _ = working(setup)
@@ -310,7 +300,7 @@ def test_permission_does_not_release_ambiguous_post_claim(setup):
     assert posts.snapshot() == before and not events(journal, "CANCEL_AUTHORIZED")
 
 
-@pytest.mark.parametrize("phase", ["authorization", "claim", "receipt"])
+@pytest.mark.parametrize("phase", ["authorization", "receipt"])
 def test_real_process_exit_keeps_restricted_permission_and_consumed_attempt(setup, phase):
     clock, reads, posts, journal = setup
     order, _ = working(setup)

@@ -266,15 +266,17 @@ def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(running
     assert result["risk"]["allowed"]
 
 
-@pytest.mark.parametrize(
-    "confirmations",
-    [set(), CYCLE_CONFIRMATIONS - {"complete-history"}, {*CYCLE_CONFIRMATIONS, "x"}],
-)
-def test_cycle_confirmations_are_required_before_any_read(running, tmp_path, confirmations):
+def test_cycle_confirmations_are_required_before_any_read(running, tmp_path, subtests):
     values = running[0]
-    with pytest.raises(LiveCycleError, match="cycle_confirmations_required"):
-        cycle(running, tmp_path, prepare=False, confirmations=confirmations)
-    assert values[3].reads == []
+    for confirmations in [
+        set(),
+        CYCLE_CONFIRMATIONS - {"complete-history"},
+        {*CYCLE_CONFIRMATIONS, "x"},
+    ]:
+        with subtests.test(confirmations=confirmations):
+            with pytest.raises(LiveCycleError, match="cycle_confirmations_required"):
+                cycle(running, tmp_path, prepare=False, confirmations=confirmations)
+            assert values[3].reads == []
 
 
 def test_cli_failure_reports_only_a_fixed_reason(running, tmp_path, capsys):

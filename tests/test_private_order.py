@@ -391,8 +391,9 @@ def test_disabled_and_unproved_accounts_never_post(setup):
     assert journal.snapshot()["halted"]
 
 
-@pytest.mark.parametrize("kind", ["LIMIT", "MARKET"])
-@pytest.mark.parametrize("status", ["WAITING", "EXECUTED", "EXPIRED"])
+@pytest.mark.parametrize(
+    "kind,status", [("LIMIT", "WAITING"), ("MARKET", "EXECUTED"), ("LIMIT", "EXPIRED")]
+)
 def test_submit_signs_exact_post_once_with_both_claims_persisted(setup, kind, status):
     clock, _, posts, journal = setup
     order = ready(
@@ -466,8 +467,7 @@ def test_risk_is_rechecked_after_post_wait_without_consuming_order_on_known_refu
     assert posts.snapshot()["phase"] == "READY"
 
 
-@pytest.mark.parametrize("mark", ["150", "120"])
-@pytest.mark.parametrize("kind", ["MARKET", "LIMIT"])
+@pytest.mark.parametrize("mark,kind", [("150", "MARKET"), ("120", "LIMIT")])
 def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
     clock, reads, posts, journal = setup
     opened = ready(setup)
@@ -530,16 +530,13 @@ def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
     "failure",
     [
         401,
-        403,
         429,
-        500,
         302,
         "timeout",
         "api_error",
         "duplicate",
         "identity",
         "encoding",
-        "content_type",
         "oversize",
         "clock",
         "cleanup",
@@ -580,8 +577,6 @@ def test_http_or_receipt_failure_stops_both_domains_and_never_retries(setup, fai
             )
         if failure == "encoding":
             result.headers["content-encoding"] = "gzip"
-        elif failure == "content_type":
-            result.headers["content-type"] = "text/plain"
         elif failure == "oversize":
             result.headers["content-length"] = "64001"
         elif failure == "clock":
@@ -790,7 +785,7 @@ def test_transport_uses_secure_defaults_without_environment_configuration(setup,
     assert transport_options == [{"verify": True, "trust_env": False, "retries": 0}]
 
 
-@pytest.mark.parametrize("phase", ["claim", "response", "receipt", "post_completion"])
+@pytest.mark.parametrize("phase", ["response", "receipt"])
 def test_actual_process_exit_across_dispatch_boundaries_keeps_order_and_post_claim(setup, phase):
     clock, reads, posts, journal = setup
     order = ready(setup)

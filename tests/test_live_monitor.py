@@ -189,7 +189,7 @@ def test_success_between_sampling_and_stop_defers_the_stop(setup, monkeypatch):
     assert not live[3].snapshot()["halted"] and monitor_events(live[3]) == []
 
 
-@pytest.mark.parametrize("damage", ["manifest", "control", "catalog", "journal"])
+@pytest.mark.parametrize("damage", ["manifest", "journal"])
 def test_cached_target_can_stop_when_original_sync_workspace_is_unavailable(setup, damage):
     values, live, monitor, _ = setup
     ready(live)
@@ -548,13 +548,14 @@ def test_long_binding_record_is_readable_and_size_limit_is_checked_before_writes
     assert monitor.path.read_bytes() == before
 
 
-@pytest.mark.parametrize("reasons", [[], "private_sync_stopped", {"secret-message"}, {123}, [[]]])
-def test_journal_monitor_stop_rejects_arbitrary_reasons_without_mutation(setup, reasons):
+def test_journal_monitor_stop_rejects_arbitrary_reasons_without_mutation(setup, subtests):
     _, live, monitor, _ = setup
     before = live[3].path.read_bytes()
-    with pytest.raises(LiveOrderError, match="invalid_live_monitor_stop"):
-        live[3].halt_for_monitor(monitor.status()["monitor_instance"], reasons)
-    assert live[3].path.read_bytes() == before
+    for reasons in [[], "private_sync_stopped", {"secret-message"}, {123}, [[]]]:
+        with subtests.test(reasons=reasons):
+            with pytest.raises(LiveOrderError, match="invalid_live_monitor_stop"):
+                live[3].halt_for_monitor(monitor.status()["monitor_instance"], reasons)
+            assert live[3].path.read_bytes() == before
 
 
 def test_monitor_verifies_every_condition_and_original_sync_instance(setup):

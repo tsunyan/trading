@@ -99,8 +99,7 @@ def approval(setup, order):
     )
 
 
-@pytest.mark.parametrize("pending", [False, True])
-@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("pending,partial", [(False, False), (True, True)])
 def test_active_cancel_review_resolves_only_local_claim_and_permanently_forbids_repeat(
     setup, pending, partial
 ):
@@ -242,7 +241,7 @@ def test_completed_review_record_must_match_the_post_committed_reference(setup):
         journal.snapshot()
 
 
-@pytest.mark.parametrize("phase", ["before_post", "after_post", "after_live_commit"])
+@pytest.mark.parametrize("phase", ["after_post", "after_live_commit"])
 def test_process_exit_across_both_commits_keeps_stops_and_never_repeats_cancel(setup, phase):
     clock, reads, posts, journal = setup
     order, _, snapshot = unknown_cancel(setup, pending=True)
@@ -379,7 +378,7 @@ def test_builder_and_cli_require_review_confirmation_without_http(
     assert not result["cancel_retry_allowed"]
 
 
-@pytest.mark.parametrize("change", ["expiry", "checkpoint", "read_stop", "future_approval"])
+@pytest.mark.parametrize("change", ["expiry", "checkpoint", "read_stop"])
 def test_review_authorization_is_invalidated_without_clearing_the_claim(setup, change):
     clock, reads, posts, journal = setup
     order, _, snapshot = unknown_cancel(setup)

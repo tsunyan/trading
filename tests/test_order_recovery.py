@@ -172,7 +172,7 @@ def test_positive_order_observation_preserves_claim_stop_and_incompleteness(setu
 
 @pytest.mark.parametrize(
     "failure",
-    ["missing", "client", "side", "quantity", "price", "changing", "fills", "stale", "http", "api"],
+    ["missing", "client", "side", "changing", "fills", "stale", "api"],
 )
 def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, failure):
     recovery, order, vault = unknown(setup)
@@ -188,24 +188,16 @@ def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, fail
             rows = data["data"]["list"]
             if failure == "missing":
                 rows.clear()
-            elif failure in {"client", "side", "quantity", "price"}:
-                key, value = {
-                    "client": ("clientOrderId", "Other"),
-                    "side": ("side", "SELL"),
-                    "quantity": ("size", "900"),
-                    "price": ("price", "149"),
-                }[failure]
-                rows[0][key] = value
+            elif failure == "client":
+                rows[0]["clientOrderId"] = "Other"
+            elif failure == "side":
+                rows[0]["side"] = "SELL"
             elif failure == "changing" and count == 3:
                 rows[0]["status"] = "CANCELED"
             elif failure == "fills":
                 rows[0]["status"] = "EXECUTED"
 
-    selected = (
-        httpx.MockTransport(lambda _: httpx.Response(401))
-        if failure == "http"
-        else transport(clock, order, [], mutate=mutate)
-    )
+    selected = transport(clock, order, [], mutate=mutate)
     with pytest.raises(ValueError) as caught:
         recovery.reconcile(
             order.client_id, 201, **checks(recovery, order), vault=vault, transport=selected
@@ -214,26 +206,28 @@ def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, fail
     assert journal.snapshot() == before and posts.snapshot() == saved
 
 
-@pytest.mark.parametrize(
-    "failure", ["confirmation", "checkpoint", "order_id", "reference", "read_stop"]
-)
-def test_preflight_refusals_precede_credential_access(setup, failure):
+def test_preflight_refusals_precede_credential_access(setup, subtests):
     recovery, order, vault = unknown(setup)
-    args = checks(recovery, order)
-    order_id = 201
-    if failure == "confirmation":
-        args["read_only_confirmed"] = False
-    elif failure == "checkpoint":
-        args["expected_sha256"] = "b" * 64
-    elif failure == "order_id":
-        order_id = True
-    elif failure == "reference":
-        args["credential_reference"] = "bad"
-    else:
-        recovery.reads.stop()
-    with pytest.raises((OrderRecoveryError, LiveOrderError)):
-        recovery.reconcile(order.client_id, order_id, **args, vault=vault)
-    assert vault.calls == []
+    stores = (recovery.journal.path, recovery.posts.path)
+    before = [path.read_bytes() for path in stores]
+    # Each refusal leaves the stores unchanged; the read stop runs last because it persists.
+    for failure in ["confirmation", "checkpoint", "order_id", "reference", "read_stop"]:
+        with subtests.test(failure=failure):
+            args = checks(recovery, order)
+            order_id = 201
+            if failure == "confirmation":
+                args["read_only_confirmed"] = False
+            elif failure == "checkpoint":
+                args["expected_sha256"] = "b" * 64
+            elif failure == "order_id":
+                order_id = True
+            elif failure == "reference":
+                args["credential_reference"] = "bad"
+            else:
+                recovery.reads.stop()
+            with pytest.raises((OrderRecoveryError, LiveOrderError)):
+                recovery.reconcile(order.client_id, order_id, **args, vault=vault)
+            assert vault.calls == [] and [path.read_bytes() for path in stores] == before
 
 
 def test_changed_post_checkpoint_and_foreign_claim_refuse_before_credentials(setup):

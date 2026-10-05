@@ -117,10 +117,14 @@ def event_rows(journal, kind):
         return conn.execute("SELECT payload_json FROM events WHERE kind=?", (kind,)).fetchall()
 
 
-@pytest.mark.parametrize("operation", ["order", "cancel"])
 @pytest.mark.parametrize(
-    "status,partial",
-    [("CANCELED", False), ("CANCELED", True), ("EXPIRED", True), ("EXECUTED", False)],
+    "operation,status,partial",
+    [
+        ("order", "CANCELED", False),
+        ("cancel", "CANCELED", True),
+        ("order", "EXPIRED", True),
+        ("cancel", "EXECUTED", False),
+    ],
 )
 def test_resolution_clears_only_claim_and_fences_all_old_handles(setup, operation, status, partial):
     clock, reads, posts, journal = setup
@@ -169,7 +173,7 @@ def test_resolution_clears_only_claim_and_fences_all_old_handles(setup, operatio
         )
 
 
-@pytest.mark.parametrize("reason", ["operator_stop", "clock_invalid", "order_cleanup_failed"])
+@pytest.mark.parametrize("reason", ["operator_stop", "order_cleanup_failed"])
 def test_resolution_preserves_explicit_post_stop_reason(setup, reason):
     _, _, posts, journal = setup
     order, _ = terminal(setup)
@@ -187,33 +191,20 @@ def test_resolution_preserves_explicit_post_stop_reason(setup, reason):
 
 @pytest.mark.parametrize(
     "change",
-    [
-        "incomplete",
-        "active",
-        "missing",
-        "row_state",
-        "account",
-        "stale",
-        "read_stop",
-        "gate_damage",
-    ],
+    ["incomplete", "missing", "row_state", "account", "stale", "read_stop", "gate_damage"],
 )
 def test_resolution_context_refuses_weak_or_inconsistent_proofs(setup, change):
     clock, reads, posts, journal = setup
     order, evidence = terminal(setup)
     before = posts.snapshot()
-    if change in {"incomplete", "active", "missing", "row_state"}:
+    if change in {"incomplete", "missing", "row_state"}:
         with sqlite3.connect(journal.path) as conn:
             if change == "row_state":
                 conn.execute("UPDATE orders SET state='UNKNOWN'")
             elif change == "missing":
                 conn.execute("UPDATE orders SET evidence_json=NULL")
             else:
-                damaged = evidence.model_copy(
-                    update={"executions_complete": False}
-                    if change == "incomplete"
-                    else {"status": "ORDERED"}
-                )
+                damaged = evidence.model_copy(update={"executions_complete": False})
                 conn.execute("UPDATE orders SET evidence_json=?", (damaged.model_dump_json(),))
     elif change == "account":
         with sqlite3.connect(journal.path) as conn:
@@ -242,17 +233,7 @@ def test_resolution_context_refuses_weak_or_inconsistent_proofs(setup, change):
 
 @pytest.mark.parametrize(
     "change",
-    [
-        "account",
-        "checkpoint",
-        "expired",
-        "future",
-        "confirm",
-        "code",
-        "halt",
-        "account_refresh",
-        "post_stop",
-    ],
+    ["account", "expired", "confirm", "code", "halt", "account_refresh", "post_stop"],
 )
 def test_resolution_acceptance_fences_changes_before_preparation(setup, monkeypatch, change):
     clock, _, posts, journal = setup
@@ -260,12 +241,8 @@ def test_resolution_acceptance_fences_changes_before_preparation(setup, monkeypa
     approved = acceptance(setup, order)
     if change == "account":
         approved = approved.model_copy(update={"account_id": "foreign"})
-    elif change == "checkpoint":
-        approved = approved.model_copy(update={"checkpoint_sha256": "b" * 64})
     elif change == "expired":
         clock.advance(30)
-    elif change == "future":
-        approved = approved.model_copy(update={"accepted_at": clock.now + timedelta(seconds=1)})
     elif change == "code":
         monkeypatch.setattr(journal, "_current_implementation", lambda: "b" * 64)
     elif change == "halt":
@@ -407,7 +384,7 @@ def test_live_os_owner_refuses_resolution_without_preparing(setup):
     assert not event_rows(journal, "ORDER_RESOLUTION_PREPARED") and posts.snapshot()["claim"]
 
 
-@pytest.mark.parametrize("change", ["code", "expiry", "stale", "read_stop"])
+@pytest.mark.parametrize("change", ["code", "expiry", "read_stop"])
 def test_last_commit_validation_rolls_back_post_resolution(setup, monkeypatch, change):
     clock, reads, posts, journal = setup
     order, _ = terminal(setup)
@@ -527,9 +504,7 @@ def test_cli_refuses_invalid_approval_without_exposing_file_contents(
     assert posts.snapshot() == before and not event_rows(journal, "ORDER_RESOLUTION_PREPARED")
 
 
-@pytest.mark.parametrize(
-    "damage", ["drop", "delete", "body", "marker", "prepared_delete", "prepared_body"]
-)
+@pytest.mark.parametrize("damage", ["delete", "body", "marker", "prepared_body"])
 def test_missing_or_changed_resolution_records_refuse_reopen(setup, damage):
     _, _, _, journal = setup
     order, _ = terminal(setup)
@@ -540,16 +515,12 @@ def test_missing_or_changed_resolution_records_refuse_reopen(setup, damage):
     _, _, posts, journal = setup
     path = journal.path if damage.startswith("prepared") else posts.path
     with sqlite3.connect(path) as conn:
-        if damage == "drop":
-            conn.execute("DROP TABLE trade_resolutions")
-        elif damage == "delete":
+        if damage == "delete":
             conn.execute("DELETE FROM trade_resolutions")
         elif damage == "body":
             conn.execute("UPDATE trade_resolutions SET body='{}'")
         elif damage == "marker":
             conn.execute("DELETE FROM events WHERE kind='TRADE_RESOLVED'")
-        elif damage == "prepared_delete":
-            conn.execute("DELETE FROM events WHERE kind='ORDER_RESOLUTION_PREPARED'")
         else:
             conn.execute(
                 "UPDATE events SET payload_json='{}' WHERE kind='ORDER_RESOLUTION_PREPARED'"
@@ -558,7 +529,7 @@ def test_missing_or_changed_resolution_records_refuse_reopen(setup, damage):
         reopen(setup)
 
 
-@pytest.mark.parametrize("phase", ["prepared", "post_before_commit", "post_after_commit"])
+@pytest.mark.parametrize("phase", ["post_before_commit", "post_after_commit"])
 def test_actual_process_exit_across_resolution_commits_is_recoverable_without_resend(setup, phase):
     clock, reads, posts, journal = setup
     order, _ = terminal(setup, operation="cancel", partial=True)

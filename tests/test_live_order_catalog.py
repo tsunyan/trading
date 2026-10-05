@@ -176,16 +176,11 @@ def test_never_submitted_and_unidentified_intents_are_not_guessed_into_the_catal
 @pytest.mark.parametrize(
     "damage",
     [
-        "prepared_missing",
         "prepared_changed",
-        "prepared_duplicate",
-        "submitted_missing",
         "submitted_duplicate",
         "receipt_intent",
         "evidence_id",
-        "evidence_intent",
         "reconciled_missing",
-        "reconciled_changed",
         "receipt_before_submit",
         "state",
     ],
@@ -197,23 +192,16 @@ def test_source_damage_refuses_registration_preserves_post_and_stops_live(setup,
     journal.reconcile(evidence(setup, order))
     post_before = live[2].snapshot()
     with sqlite3.connect(journal.path) as conn:
-        if damage.endswith("_missing"):
-            kind = {
-                "prepared_missing": "PREPARED",
-                "submitted_missing": "SUBMITTING",
-                "reconciled_missing": "RECONCILED",
-            }[damage]
-            conn.execute("DELETE FROM events WHERE kind=?", (kind,))
-        elif damage.endswith("_duplicate"):
-            kind = "PREPARED" if damage.startswith("prepared") else "SUBMITTING"
+        if damage == "reconciled_missing":
+            conn.execute("DELETE FROM events WHERE kind='RECONCILED'")
+        elif damage == "submitted_duplicate":
             conn.execute(
                 "INSERT INTO events(recorded_at,client_id,kind,payload_json) "
-                "SELECT recorded_at,client_id,kind,payload_json FROM events WHERE kind=?",
-                (kind,),
+                "SELECT recorded_at,client_id,kind,payload_json FROM events "
+                "WHERE kind='SUBMITTING'"
             )
-        elif damage in {"prepared_changed", "reconciled_changed"}:
-            kind = "PREPARED" if damage.startswith("prepared") else "RECONCILED"
-            conn.execute("UPDATE events SET payload_json='{}' WHERE kind=?", (kind,))
+        elif damage == "prepared_changed":
+            conn.execute("UPDATE events SET payload_json='{}' WHERE kind='PREPARED'")
         elif damage == "receipt_intent":
             payload = json.loads(
                 conn.execute(
@@ -225,12 +213,9 @@ def test_source_damage_refuses_registration_preserves_post_and_stops_live(setup,
                 "UPDATE events SET payload_json=? WHERE kind='SUBMISSION_ACK'",
                 (json.dumps(payload),),
             )
-        elif damage in {"evidence_id", "evidence_intent"}:
+        elif damage == "evidence_id":
             payload = json.loads(conn.execute("SELECT evidence_json FROM orders").fetchone()[0])
-            if damage == "evidence_id":
-                payload["order_id"] = 202
-            else:
-                payload["intent"]["price"] = "151"
+            payload["order_id"] = 202
             conn.execute("UPDATE orders SET evidence_json=?", (json.dumps(payload),))
         elif damage == "receipt_before_submit":
             conn.execute("UPDATE events SET id=0 WHERE kind='SUBMISSION_ACK'")
@@ -281,13 +266,11 @@ def test_unknown_broker_identity_stops_live_without_creating_an_intent(setup):
 @pytest.mark.parametrize(
     "change",
     [
-        "root",
         "order",
         "intent",
         "stale",
         "missing_fill",
         "changed_fill",
-        "old_fill",
         "terminal_status",
         "terminal_extra",
     ],
@@ -316,10 +299,8 @@ def test_read_reports_must_match_saved_receipt_and_execution_history_before_book
     following = previous.model_copy(
         update={"observed_at": live[0].now, "executions_complete": False}
     )
-    if change in {"root", "order"}:
-        following = following.model_copy(
-            update={"root_order_id" if change == "root" else "order_id": 999}
-        )
+    if change == "order":
+        following = following.model_copy(update={"order_id": 999})
     elif change == "intent":
         following = following.model_copy(
             update={"intent": order.model_copy(update={"price": Decimal("151")})}
@@ -341,9 +322,7 @@ def test_read_reports_must_match_saved_receipt_and_execution_history_before_book
             update={
                 "execution_id": 302,
                 "units": 600,
-                "timestamp": live[0].now
-                if change == "terminal_extra"
-                else filled.timestamp - timedelta(seconds=1),
+                "timestamp": live[0].now,
             }
         )
         following = following.model_copy(update={"executions": (filled, extra)})

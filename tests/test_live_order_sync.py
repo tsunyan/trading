@@ -149,16 +149,14 @@ def test_full_execution_is_filled(setup):
     assert not live[3].snapshot()["halted"]
 
 
-@pytest.mark.parametrize(
-    "confirmations",
-    [set(), {"complete-history"}, {*HISTORY_CONFIRMATIONS, "x"}, None],
-)
-def test_confirmations_are_required_before_any_read(setup, confirmations):
+def test_confirmations_are_required_before_any_read(setup, subtests):
     values = setup[0]
     accept(setup)
-    with pytest.raises(LiveOrderSyncError, match="history_confirmations_required"):
-        sync(setup, [], confirmations=confirmations)
-    assert values[3].reads == []
+    for confirmations in [set(), {"complete-history"}, {*HISTORY_CONFIRMATIONS, "x"}, None]:
+        with subtests.test(confirmations=confirmations):
+            with pytest.raises(LiveOrderSyncError, match="history_confirmations_required"):
+                sync(setup, [], confirmations=confirmations)
+            assert values[3].reads == []
 
 
 def test_unsent_or_unknown_orders_use_other_paths(setup):

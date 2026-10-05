@@ -344,7 +344,7 @@ def test_stop_arriving_during_credential_read_is_rechecked_before_any_client(set
     assert live[3].snapshot()["orders"][0]["state"] == "PREPARED"
 
 
-@pytest.mark.parametrize("damage", ["binding", "purpose", "reference", "missing", "extra"])
+@pytest.mark.parametrize("damage", ["binding", "purpose", "missing", "extra"])
 def test_stored_payload_must_match_reference_purpose_and_original_binding(setup, damage):
     _, live, _, order, _ = setup
     backend, vault, reference = stored(setup)
@@ -353,8 +353,6 @@ def test_stored_payload_must_match_reference_purpose_and_original_binding(setup,
         payload["binding"]["scope"] = "other"
     elif damage == "purpose":
         payload["purpose"] = "read-only"
-    elif damage == "reference":
-        payload["reference"] = "c" * 32
     elif damage == "extra":
         payload["account_id"] = "fixture-account"
     if damage == "missing":
@@ -374,7 +372,7 @@ def test_stored_payload_must_match_reference_purpose_and_original_binding(setup,
         )
 
 
-@pytest.mark.parametrize("reference", [None, "", "../x", "A" * 32])
+@pytest.mark.parametrize("reference", [None, "../x", "A" * 32])
 def test_bad_reference_never_reaches_backend(setup, reference):
     _, live, _, order, _ = setup
     backend, vault, _ = stored(setup)

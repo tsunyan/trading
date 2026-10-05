@@ -253,16 +253,19 @@ def test_refresh_reconciles_flat_account_with_get_only_and_no_post(setup):
     assert context["risk"]["allowed"]
 
 
-@pytest.mark.parametrize(
-    "confirmations",
-    [set(), ACCOUNT_CONFIRMATIONS - {"complete-account"}, {*ACCOUNT_CONFIRMATIONS, "x"}, None],
-)
-def test_confirmations_are_required_before_any_credential_or_get(setup, confirmations):
+def test_confirmations_are_required_before_any_credential_or_get(setup, subtests):
     values = setup[0]
     calls = []
-    with pytest.raises(LiveAccountError, match="account_confirmations_required"):
-        run(setup, calls, confirmations=confirmations)
-    assert calls == [] and values[3].reads == []
+    for confirmations in [
+        set(),
+        ACCOUNT_CONFIRMATIONS - {"complete-account"},
+        {*ACCOUNT_CONFIRMATIONS, "x"},
+        None,
+    ]:
+        with subtests.test(confirmations=confirmations):
+            with pytest.raises(LiveAccountError, match="account_confirmations_required"):
+                run(setup, calls, confirmations=confirmations)
+            assert calls == [] and values[3].reads == []
 
 
 def test_stopped_reads_refuse_before_loading_the_read_key(setup):

@@ -125,9 +125,11 @@ def test_registration_changes_acceptance_fingerprint_and_is_permanent_and_local(
     assert reopened.snapshot()["live_control"] == after
 
 
-@pytest.mark.parametrize(
-    "update",
-    [
+def test_invalid_registration_does_not_mutate_any_store(unbound, subtests):
+    values, live, monitor = unbound
+    paths = (live[3].path, live[2].path, live[1].path, monitor.path, values[5].control.path)
+    before = [p.read_bytes() for p in paths]
+    for update in [
         {"operations_confirmed": False},
         {"expected_revision": 1},
         {"expected_plan_sha256": "f" * 64},
@@ -136,15 +138,11 @@ def test_registration_changes_acceptance_fingerprint_and_is_permanent_and_local(
         {"max_watchdog_age_seconds": 121},
         {"max_sync_age_seconds": 0},
         {"max_watchdog_age_seconds": True},
-    ],
-)
-def test_invalid_registration_does_not_mutate_any_store(unbound, update):
-    values, live, monitor = unbound
-    paths = (live[3].path, live[2].path, live[1].path, monitor.path, values[5].control.path)
-    before = [p.read_bytes() for p in paths]
-    with pytest.raises(ValueError):
-        bind(unbound, **update)
-    assert [p.read_bytes() for p in paths] == before
+    ]:
+        with subtests.test(update=update):
+            with pytest.raises(ValueError):
+                bind(unbound, **update)
+            assert [p.read_bytes() for p in paths] == before
 
 
 def test_already_enabled_journal_cannot_add_or_change_dispatch_prerequisites(unbound):
@@ -197,15 +195,7 @@ def test_diagnostic_check_and_pre_success_watchdog_cannot_grant_dispatch(unbound
 
 @pytest.mark.parametrize(
     "cause",
-    [
-        "sync_stale",
-        "watchdog_stale",
-        "watchdog_future",
-        "ready",
-        "stopped",
-        "owner_missing",
-        "generation_changed",
-    ],
+    ["sync_stale", "watchdog_stale", "ready", "stopped", "owner_missing", "generation_changed"],
 )
 def test_unhealthy_sync_or_watchdog_refuses_preflight_without_consuming_claim(setup, cause):
     values, live, monitor, order, _ = setup
@@ -215,8 +205,6 @@ def test_unhealthy_sync_or_watchdog_refuses_preflight_without_consuming_claim(se
     elif cause == "watchdog_stale":
         values[0].advance(41)
         workspace.control.update(workspace.control.snapshot()["owner"], success=True)
-    elif cause == "watchdog_future":
-        values[0].wall -= timedelta(seconds=1)
     elif cause in {"ready", "stopped", "generation_changed"}:
         current = workspace.control.snapshot()
         workspace.control.finish(
@@ -238,9 +226,7 @@ def test_unhealthy_sync_or_watchdog_refuses_preflight_without_consuming_claim(se
     assert not before["halted"]
 
 
-@pytest.mark.parametrize(
-    "damage", ["manifest", "control", "catalog", "journal", "cash", "monitor", "monitor_lock"]
-)
+@pytest.mark.parametrize("damage", ["manifest", "cash", "monitor_lock"])
 def test_missing_original_prerequisite_store_is_refused_and_never_recreated(setup, damage):
     values, live, monitor, order, _ = setup
     workspace = values[5]

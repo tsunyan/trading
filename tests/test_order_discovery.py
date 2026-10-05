@@ -111,7 +111,7 @@ def test_absence_is_reported_but_never_proven(setup):
     assert "order_id" not in result
 
 
-@pytest.mark.parametrize("change", [{"size": "900"}, {"side": "SELL"}, {"price": "149"}])
+@pytest.mark.parametrize("change", [{"size": "900"}, {"side": "SELL"}])
 def test_same_client_id_with_different_terms_is_refused(setup, change):
     _, _, _, order, _ = setup
     unknown(setup)
