@@ -14,7 +14,7 @@ dependencies = [
   "pandas>=2.2,<4",
   "pyarrow>=19,<26",
   "pydantic>=2.10,<3",
-  "websockets>=15,<16",
+  "websockets>=15,<18",
 ]
 
 [project.scripts]
