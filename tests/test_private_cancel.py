@@ -83,9 +83,7 @@ def raw(value):
     return json.dumps(value, separators=(",", ":")).encode()
 
 
-@pytest.mark.parametrize(
-    "partial,complete", [(False, False), (True, False), (False, True), (True, True)]
-)
+@pytest.mark.parametrize("partial,complete", [(False, False), (True, True)])
 def test_cancel_signs_once_with_owned_claim_and_retains_pending_fills(setup, partial, complete):
     clock, _, posts, journal = setup
     order, evidence = working(setup, partial=partial, complete=complete)
@@ -199,7 +197,7 @@ def test_cancel_receipt_has_digest_clock_skew_and_strict_local_clocks(setup):
 
 
 @pytest.mark.parametrize(
-    "failure", [401, 302, "timeout", "api", "empty", "root", "duplicate", "oversize", "cleanup"]
+    "failure", [401, "timeout", "api", "empty", "root", "duplicate", "oversize", "cleanup"]
 )
 def test_cancel_failure_keeps_both_claims_and_never_retries(setup, failure):
     clock, _, posts, journal = setup

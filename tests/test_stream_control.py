@@ -99,7 +99,7 @@ def test_running_record_never_expires_and_requires_token_uncertainty_ack(setup):
     assert journal.inspect()["records"] == 0
 
 
-def test_live_owner_blocks_recovery_even_in_the_same_process(setup):
+def test_live_owner_blocks_recovery_even_in_the_same_process(setup, short_owner_wait):
     _, journal, book, control = setup
     with control.ownership():
         begin(control, journal)

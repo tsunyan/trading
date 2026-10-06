@@ -125,9 +125,11 @@ def test_registration_changes_acceptance_fingerprint_and_is_permanent_and_local(
     assert reopened.snapshot()["live_control"] == after
 
 
-@pytest.mark.parametrize(
-    "update",
-    [
+def test_invalid_registration_does_not_mutate_any_store(unbound, subtests):
+    values, live, monitor = unbound
+    paths = (live[3].path, live[2].path, live[1].path, monitor.path, values[5].control.path)
+    before = [p.read_bytes() for p in paths]
+    for update in [
         {"operations_confirmed": False},
         {"expected_revision": 1},
         {"expected_plan_sha256": "f" * 64},
@@ -136,15 +138,11 @@ def test_registration_changes_acceptance_fingerprint_and_is_permanent_and_local(
         {"max_watchdog_age_seconds": 121},
         {"max_sync_age_seconds": 0},
         {"max_watchdog_age_seconds": True},
-    ],
-)
-def test_invalid_registration_does_not_mutate_any_store(unbound, update):
-    values, live, monitor = unbound
-    paths = (live[3].path, live[2].path, live[1].path, monitor.path, values[5].control.path)
-    before = [p.read_bytes() for p in paths]
-    with pytest.raises(ValueError):
-        bind(unbound, **update)
-    assert [p.read_bytes() for p in paths] == before
+    ]:
+        with subtests.test(update=update):
+            with pytest.raises(ValueError):
+                bind(unbound, **update)
+            assert [p.read_bytes() for p in paths] == before
 
 
 def test_already_enabled_journal_cannot_add_or_change_dispatch_prerequisites(unbound):

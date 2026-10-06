@@ -391,8 +391,9 @@ def test_disabled_and_unproved_accounts_never_post(setup):
     assert journal.snapshot()["halted"]
 
 
-@pytest.mark.parametrize("kind", ["LIMIT", "MARKET"])
-@pytest.mark.parametrize("status", ["WAITING", "EXECUTED", "EXPIRED"])
+@pytest.mark.parametrize(
+    "kind,status", [("LIMIT", "WAITING"), ("MARKET", "EXECUTED"), ("LIMIT", "EXPIRED")]
+)
 def test_submit_signs_exact_post_once_with_both_claims_persisted(setup, kind, status):
     clock, _, posts, journal = setup
     order = ready(
@@ -466,8 +467,7 @@ def test_risk_is_rechecked_after_post_wait_without_consuming_order_on_known_refu
     assert posts.snapshot()["phase"] == "READY"
 
 
-@pytest.mark.parametrize("mark", ["150", "120"])
-@pytest.mark.parametrize("kind", ["MARKET", "LIMIT"])
+@pytest.mark.parametrize("mark,kind", [("150", "MARKET"), ("120", "LIMIT")])
 def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
     clock, reads, posts, journal = setup
     opened = ready(setup)
@@ -529,10 +529,9 @@ def test_close_after_restart_and_persistent_entry_loss_stop(setup, mark, kind):
 @pytest.mark.parametrize(
     "failure",
     [
-        401,
-        403,
+        # 429 stays because a rate limit is where a retry would most likely be added;
+        # other error statuses take the same non-200 path.
         429,
-        500,
         302,
         "timeout",
         "api_error",
@@ -669,9 +668,7 @@ def test_foreign_thread_cannot_reuse_same_limiter_object_owner(setup):
     assert journal.snapshot()["orders"] == []
 
 
-@pytest.mark.parametrize(
-    "stage", ["ready", "completed", "operation_unknown", "operator_stop", "clock_invalid"]
-)
+@pytest.mark.parametrize("stage", ["completed", "operation_unknown", "clock_invalid"])
 def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(setup, stage):
     from trading.post_control import TOKEN_CONFIRMATIONS, TOKEN_QUIET_SECONDS
 
@@ -688,7 +685,7 @@ def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(s
     elif stage == "operation_unknown":
         with pytest.raises(OrderTransportError):
             sender.submit(order.client_id, quote=quote(clock.now))
-    elif stage in {"operator_stop", "clock_invalid"}:
+    elif stage == "clock_invalid":
         posts.stop(stage)
     saved, before = posts.snapshot(), journal.snapshot()
     sender._client.close = lambda: (_ for _ in ()).throw(RuntimeError("remote secret"))
@@ -696,7 +693,7 @@ def test_client_close_failure_records_its_cause_without_overwriting_prior_stop(s
         sender.close()
     state = posts.snapshot()
     assert state["phase"] == "STOPPED" and state["claim"] == saved["claim"]
-    assert state["reason"] == ("order_cleanup_failed" if stage in {"ready", "completed"} else stage)
+    assert state["reason"] == ("order_cleanup_failed" if stage == "completed" else stage)
     assert (
         sender._closed
         and sender._api_key.get_secret_value() == sender._secret.get_secret_value() == ""

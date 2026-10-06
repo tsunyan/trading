@@ -133,12 +133,15 @@ def test_built_approval_activates_the_registered_journal(running, tmp_path):
     assert enabled["live_enabled"]
 
 
-@pytest.mark.parametrize("hours", [0, 169, True])
-def test_approval_lifetime_is_bounded(running, tmp_path, hours):
+def test_approval_lifetime_is_bounded(running, tmp_path, subtests):
     items = [fingerprint(k, p) for k, p in documents(tmp_path).items()]
     items += synthetic_reads(running[1][3], tmp_path, running[0][0].wall)
-    with pytest.raises(LiveAcceptanceError, match="approval_hours_out_of_range"):
-        approval(running[1][3], items, hours=hours, now=running[0][0].wall)
+    for hours in (0, 169, True):
+        with (
+            subtests.test(hours=hours),
+            pytest.raises(LiveAcceptanceError, match="approval_hours_out_of_range"),
+        ):
+            approval(running[1][3], items, hours=hours, now=running[0][0].wall)
 
 
 def test_each_evidence_kind_is_required_exactly_once(running, tmp_path):

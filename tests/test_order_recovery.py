@@ -137,10 +137,9 @@ def test_local_context_never_reads_credentials_or_changes_stores(setup):
     assert vault.calls == [] and [p.read_bytes() for p in paths] == before
 
 
-@pytest.mark.parametrize(
-    "status,units",
-    [("ORDERED", 0), ("ORDERED", 400), ("EXECUTED", 1000), ("CANCELED", 400), ("EXPIRED", 0)],
-)
+# Working orders take the same path as these terminal ones; EXPIRED-0 stays because an
+# unfilled terminal order is the observation most easily mistaken for absence.
+@pytest.mark.parametrize("status,units", [("EXECUTED", 1000), ("CANCELED", 400), ("EXPIRED", 0)])
 def test_positive_order_observation_preserves_claim_stop_and_incompleteness(setup, status, units):
     recovery, order, vault = unknown(setup)
     clock, _, posts, journal = setup
@@ -214,26 +213,28 @@ def test_absence_and_bad_gets_never_prove_rejection_or_release_claim(setup, fail
     assert journal.snapshot() == before and posts.snapshot() == saved
 
 
-@pytest.mark.parametrize(
-    "failure", ["confirmation", "checkpoint", "order_id", "reference", "read_stop"]
-)
-def test_preflight_refusals_precede_credential_access(setup, failure):
+def test_preflight_refusals_precede_credential_access(setup, subtests):
     recovery, order, vault = unknown(setup)
-    args = checks(recovery, order)
-    order_id = 201
-    if failure == "confirmation":
-        args["read_only_confirmed"] = False
-    elif failure == "checkpoint":
-        args["expected_sha256"] = "b" * 64
-    elif failure == "order_id":
-        order_id = True
-    elif failure == "reference":
-        args["credential_reference"] = "bad"
-    else:
-        recovery.reads.stop()
-    with pytest.raises((OrderRecoveryError, LiveOrderError)):
-        recovery.reconcile(order.client_id, order_id, **args, vault=vault)
-    assert vault.calls == []
+    stores = (recovery.journal.path, recovery.posts.path)
+    before = [path.read_bytes() for path in stores]
+    # Each refusal leaves the stores unchanged; the read stop runs last because it persists.
+    for failure in ["confirmation", "checkpoint", "order_id", "reference", "read_stop"]:
+        with subtests.test(failure=failure):
+            args = checks(recovery, order)
+            order_id = 201
+            if failure == "confirmation":
+                args["read_only_confirmed"] = False
+            elif failure == "checkpoint":
+                args["expected_sha256"] = "b" * 64
+            elif failure == "order_id":
+                order_id = True
+            elif failure == "reference":
+                args["credential_reference"] = "bad"
+            else:
+                recovery.reads.stop()
+            with pytest.raises((OrderRecoveryError, LiveOrderError)):
+                recovery.reconcile(order.client_id, order_id, **args, vault=vault)
+            assert vault.calls == [] and [path.read_bytes() for path in stores] == before
 
 
 def test_changed_post_checkpoint_and_foreign_claim_refuse_before_credentials(setup):

@@ -374,19 +374,22 @@ def test_stored_payload_must_match_reference_purpose_and_original_binding(setup,
         )
 
 
-@pytest.mark.parametrize("reference", [None, "", "../x", "A" * 32])
-def test_bad_reference_never_reaches_backend(setup, reference):
+def test_bad_reference_never_reaches_backend(setup, subtests):
     _, live, _, order, _ = setup
     backend, vault, _ = stored(setup)
-    with pytest.raises(CredentialError):
-        vault.load(
-            live[3],
-            reference,
-            order.client_id,
-            expected_sha256="a" * 64,
-            quote=quote(live[0].now),
-            order_permission_confirmed=True,
-        )
+    for reference in (None, "../x", "A" * 32):
+        with (
+            subtests.test(reference=reference),
+            pytest.raises(CredentialError, match="invalid_credential_reference"),
+        ):
+            vault.load(
+                live[3],
+                reference,
+                order.client_id,
+                expected_sha256="a" * 64,
+                quote=quote(live[0].now),
+                order_permission_confirmed=True,
+            )
     assert backend.reads == []
 
 

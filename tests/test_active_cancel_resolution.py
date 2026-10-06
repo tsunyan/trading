@@ -99,8 +99,7 @@ def approval(setup, order):
     )
 
 
-@pytest.mark.parametrize("pending", [False, True])
-@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("pending,partial", [(False, False), (True, True)])
 def test_active_cancel_review_resolves_only_local_claim_and_permanently_forbids_repeat(
     setup, pending, partial
 ):

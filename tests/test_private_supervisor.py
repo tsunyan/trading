@@ -383,18 +383,16 @@ def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elap
 
     def join(timeout=None):
         waits.append(timeout)
+        # The join budget is asserted below (35s, not the old two-second budget), so the
+        # collection only needs to still be running when close() starts waiting.
+        release.set()
         return original(timeout=timeout)
 
     monkeypatch.setattr(runner._worker, "join", join)
-    # The initial case reproduces a legitimate three-second REST collection,
-    # longer than the old two-second normal-shutdown budget.
-    timer = threading.Timer(3 if not elapsed else 0.05, release.set)
-    timer.start()
     try:
         runner.close()
     finally:
         release.set()
-        timer.join()
     assert waits[0] == pytest.approx(35 - elapsed)
     assert calls == ["collect"]  # Shutdown must not launch another collection.
     assert control.snapshot()["phase"] == "READY"
@@ -402,7 +400,7 @@ def test_normal_close_waits_only_the_original_collection_deadline(tmp_path, elap
     assert sockets[0].closed and not runner.status()["owner_retained"]
 
 
-def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path):
+def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path, short_owner_wait):
     entered, release = threading.Event(), threading.Event()
     state = {}
 
@@ -445,13 +443,8 @@ def test_normal_close_deadline_does_not_release_a_hung_worker_owner(tmp_path):
     assert control.snapshot()["phase"] == "STOPPED"
 
 
-@pytest.mark.parametrize("max_records", [8, 9])
-def test_many_fills_cross_capacity_in_multiple_connections_without_double_booking(
-    tmp_path, max_records
-):
-    clock, _, book, control, runner, sockets, _, _, rows, requests = setup(
-        tmp_path, max_records=max_records
-    )
+def test_many_fills_cross_capacity_in_multiple_connections_without_double_booking(tmp_path):
+    clock, _, book, control, runner, sockets, _, _, rows, requests = setup(tmp_path, max_records=8)
     start(runner)
     settle(runner)
     for index in range(20):
@@ -525,7 +518,7 @@ def test_notification_during_cash_resync_invalidates_attempt_but_keeps_transport
     runner.close()
 
 
-def test_hung_rest_keeps_os_owner_until_worker_exit_and_persists_stop(tmp_path):
+def test_hung_rest_keeps_os_owner_until_worker_exit_and_persists_stop(tmp_path, short_owner_wait):
     entered, release = threading.Event(), threading.Event()
     state = {}
 

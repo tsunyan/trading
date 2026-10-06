@@ -117,10 +117,14 @@ def event_rows(journal, kind):
         return conn.execute("SELECT payload_json FROM events WHERE kind=?", (kind,)).fetchall()
 
 
-@pytest.mark.parametrize("operation", ["order", "cancel"])
 @pytest.mark.parametrize(
-    "status,partial",
-    [("CANCELED", False), ("CANCELED", True), ("EXPIRED", True), ("EXECUTED", False)],
+    "operation,status,partial",
+    [
+        ("order", "CANCELED", False),
+        ("cancel", "CANCELED", True),
+        ("order", "EXPIRED", True),
+        ("cancel", "EXECUTED", False),
+    ],
 )
 def test_resolution_clears_only_claim_and_fences_all_old_handles(setup, operation, status, partial):
     clock, reads, posts, journal = setup

@@ -224,20 +224,23 @@ def test_policy_revalidation_is_sanitized_and_read_only(tmp_path, change):
     assert book.snapshot() == before
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
+def test_quote_revalidation_and_freshness(tmp_path, subtests):
+    book = create(tmp_path)
+    before = book.snapshot()
+    for change in [
         {"bid": Decimal("151")},
         {"ask": Decimal("Infinity")},
         {"bid": Decimal("0")},
         {"ask": Decimal("1e19")},
         {"observed_at": NOW + timedelta(microseconds=1)},
         {"observed_at": NOW - timedelta(seconds=61)},
-    ],
-)
-def test_quote_revalidation_and_freshness(tmp_path, change):
-    with pytest.raises(CashBookError, match="^cash_book_valuation_input_invalid$"):
-        compare(create(tmp_path), price=quote(**change))
+    ]:
+        with (
+            subtests.test(change=change),
+            pytest.raises(CashBookError, match="^cash_book_valuation_input_invalid$"),
+        ):
+            compare(book, price=quote(**change))
+    assert book.snapshot() == before
 
 
 @pytest.mark.parametrize(

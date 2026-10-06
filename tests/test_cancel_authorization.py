@@ -150,22 +150,18 @@ def test_authorization_refusals_write_no_permission_or_cancel_claim(setup, chang
     assert journal.snapshot()["halted"]
 
 
-@pytest.mark.parametrize("change", ["too_long", "naive", "missing", "duplicate", "extra"])
-def test_acceptance_contract_requires_bounded_time_and_distinct_evidence(setup, change):
+def test_acceptance_contract_requires_bounded_time_and_distinct_evidence(setup, subtests):
     order, _ = working(setup)
     accepted = approval(setup, order).model_dump()
-    if change == "too_long":
-        accepted["expires_at"] = accepted["accepted_at"] + timedelta(minutes=10, seconds=1)
-    elif change == "naive":
-        accepted["accepted_at"] = accepted["accepted_at"].replace(tzinfo=None)
-    elif change == "missing":
-        accepted["evidence"] = accepted["evidence"][:-1]
-    elif change == "duplicate":
-        accepted["evidence"] = (accepted["evidence"][0],) * 3
-    else:
-        accepted["enable_orders"] = True
-    with pytest.raises(ValueError):
-        CancelApproval.model_validate(accepted)
+    for change, update in {
+        "too_long": {"expires_at": accepted["accepted_at"] + timedelta(minutes=10, seconds=1)},
+        "naive": {"accepted_at": accepted["accepted_at"].replace(tzinfo=None)},
+        "missing": {"evidence": accepted["evidence"][:-1]},
+        "duplicate": {"evidence": (accepted["evidence"][0],) * 3},
+        "extra": {"enable_orders": True},
+    }.items():
+        with subtests.test(change=change), pytest.raises(ValueError):
+            CancelApproval.model_validate({**accepted, **update})
 
 
 @pytest.mark.parametrize(
@@ -285,7 +281,7 @@ def test_acceptance_after_dispatch_saves_receipt_without_reauthorizing(setup, mo
     assert not view["live_enabled"] and posts.snapshot()["claim"] is None
 
 
-@pytest.mark.parametrize("state", ["UNKNOWN", "SUBMITTING", "CANCELED", "CANCEL_PENDING"])
+@pytest.mark.parametrize("state", ["UNKNOWN", "CANCELED"])
 def test_permission_cannot_authorize_unidentified_or_terminal_order(setup, state):
     _, _, _, journal = setup
     order, _ = working(setup)

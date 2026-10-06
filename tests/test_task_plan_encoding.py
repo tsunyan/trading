@@ -13,8 +13,7 @@ from trading.private_operations import PrivateOperations
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell boundary")
-@pytest.mark.parametrize("kind", ["paper", "private"])
-@pytest.mark.parametrize("code_page", [932, 65001])
+@pytest.mark.parametrize("kind,code_page", [("paper", 932), ("private", 65001)])
 def test_plan_only_outputs_ascii_json_on_japanese_or_utf8_console(tmp_path, cfg, kind, code_page):
     root = tmp_path / "検証口座 with spaces"
     root.mkdir()

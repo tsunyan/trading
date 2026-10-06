@@ -337,6 +337,9 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+`uv run pytest -q` はテスト全体を最大8プロセスに分けて実行します。ファイルやテストを
+指定したときは1プロセスで動きます。全体を1プロセスで流すときは `-n0` を付けます。
+
 依存関係は `uv.lock` で固定。Backtraderは約定エンジンとして利用し、戦略判定と数量決定は
 模擬売買と共通の `src/trading/strategy.py` に置いています。
 データ・模擬口座・実行結果・秘密情報はGitの対象外です。

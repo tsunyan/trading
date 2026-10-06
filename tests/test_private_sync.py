@@ -705,7 +705,9 @@ def test_cli_register_order_is_local_preserves_plan_and_stop_and_reopens(setup, 
     assert (workspace.directory / "sync-plan.json").read_bytes() == plan_bytes
 
 
-def test_legacy_catalog_requires_explicit_idle_initialization_and_expected_checkpoint(tmp_path):
+def test_legacy_catalog_requires_explicit_idle_initialization_and_expected_checkpoint(
+    tmp_path, short_owner_wait
+):
     _, _, _, backend, _, workspace = make_setup(tmp_path, legacy_catalog=True)
     legacy = PrivateSyncWorkspace(workspace.directory)
     assert legacy.status()["catalog"] is None

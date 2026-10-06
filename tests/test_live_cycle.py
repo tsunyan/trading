@@ -141,7 +141,8 @@ def test_cycle_proposes_then_prepares_and_the_printed_checkpoint_sends_once(runn
     assert len(posts) == 1 and journal.snapshot()["orders"][0]["state"] == "RECONCILING"
 
 
-@pytest.mark.parametrize("mode", ["hold", "flatten", "valuation_drift"])
+# The drift case reconciles in its refused refresh and then holds, so a plain hold adds no path.
+@pytest.mark.parametrize("mode", ["flatten", "valuation_drift"])
 def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(running, tmp_path, mode):
     flatten = mode == "flatten"
     values, live, _ = running
@@ -266,15 +267,17 @@ def test_next_cycle_reconciles_the_accepted_order_then_holds_or_flattens(running
     assert result["risk"]["allowed"]
 
 
-@pytest.mark.parametrize(
-    "confirmations",
-    [set(), CYCLE_CONFIRMATIONS - {"complete-history"}, {*CYCLE_CONFIRMATIONS, "x"}],
-)
-def test_cycle_confirmations_are_required_before_any_read(running, tmp_path, confirmations):
+def test_cycle_confirmations_are_required_before_any_read(running, tmp_path, subtests):
     values = running[0]
-    with pytest.raises(LiveCycleError, match="cycle_confirmations_required"):
-        cycle(running, tmp_path, prepare=False, confirmations=confirmations)
-    assert values[3].reads == []
+    for confirmations in [
+        set(),
+        CYCLE_CONFIRMATIONS - {"complete-history"},
+        {*CYCLE_CONFIRMATIONS, "x"},
+    ]:
+        with subtests.test(confirmations=confirmations):
+            with pytest.raises(LiveCycleError, match="cycle_confirmations_required"):
+                cycle(running, tmp_path, prepare=False, confirmations=confirmations)
+            assert values[3].reads == []
 
 
 def test_cli_failure_reports_only_a_fixed_reason(running, tmp_path, capsys):

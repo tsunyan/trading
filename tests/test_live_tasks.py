@@ -94,25 +94,29 @@ def test_plan_runs_the_cycle_hourly_without_prepare_and_changes_nothing(running,
     assert live[3].snapshot() == before and running[0][3].reads == []
 
 
-@pytest.mark.parametrize(
-    ("change", "reason"),
-    [
-        ({"attestation": "missing-attestation.json"}, "attestation_unavailable"),
-        ({"credential_reference": "../x"}, "invalid_credential_reference"),
-        ({"units": 0}, "invalid_units"),
-        ({"max_slippage": "inf"}, "invalid_decimal_option"),
-        ({"max_slippage": "0"}, "invalid_max_slippage"),
-        ({"max_slippage": "-0.01"}, "invalid_max_slippage"),
-        ({"valuation_tolerance": "0"}, "invalid_valuation_tolerance"),
-        ({"valuation_tolerance": "2"}, "invalid_valuation_tolerance"),
-        ({"units": 10**9}, "units_outside_journal_limits"),
-        ({"units": 1001}, "units_outside_journal_limits"),
-        ({"ledger": None, "hypothesis": None}, "promoted_candidate_required"),
-    ],
-)
-def test_invalid_plans_are_refused(running, tmp_path, change, reason):
-    with pytest.raises(LiveTaskError, match=reason):
-        task_plan(**inputs(running, tmp_path, **change))
+# Planning is read-only, so every refusal shares one running workspace.
+INVALID_PLANS = [
+    ({"attestation": "missing-attestation.json"}, "attestation_unavailable"),
+    ({"credential_reference": "../x"}, "invalid_credential_reference"),
+    ({"units": 0}, "invalid_units"),
+    ({"max_slippage": "inf"}, "invalid_decimal_option"),
+    ({"max_slippage": "0"}, "invalid_max_slippage"),
+    ({"max_slippage": "-0.01"}, "invalid_max_slippage"),
+    ({"valuation_tolerance": "0"}, "invalid_valuation_tolerance"),
+    ({"valuation_tolerance": "2"}, "invalid_valuation_tolerance"),
+    ({"units": 10**9}, "units_outside_journal_limits"),
+    ({"units": 1001}, "units_outside_journal_limits"),
+    ({"ledger": None, "hypothesis": None}, "promoted_candidate_required"),
+]
+
+
+def test_invalid_plans_are_refused(running, tmp_path, subtests):
+    for change, reason in INVALID_PLANS:
+        with (
+            subtests.test(reason=reason, change=change),
+            pytest.raises(LiveTaskError, match=reason),
+        ):
+            task_plan(**inputs(running, tmp_path, **change))
 
 
 def test_unregistered_journal_cannot_be_scheduled(tmp_path, capsys):
@@ -607,19 +611,14 @@ def test_destructive_output_paths_are_refused_before_anything_runs(
     assert capsys.readouterr().err == f"live_cycle_failed: {reason}\n"
 
 
-@pytest.mark.parametrize(
-    ("field", "target", "reason"),
-    [
+def test_plan_refuses_outputs_that_alias_inputs_or_each_other(running, tmp_path, subtests):
+    values = inputs(running, tmp_path)
+    for field, target, reason in [
         ("result_output", "attestation.json", "output_path_is_an_input"),
         ("quote_output", "candidate/ledger.sqlite", "output_path_is_an_input"),
         ("history_output", "cycle.json", "output_paths_collide"),
         ("dashboard_output", "doctor-state.json", "output_paths_collide"),
         ("quote_output", "fx live.toml", "output_path_is_an_input"),
-    ],
-)
-def test_plan_refuses_outputs_that_alias_inputs_or_each_other(
-    running, tmp_path, field, target, reason
-):
-    values = inputs(running, tmp_path)
-    with pytest.raises(LiveTaskError, match=reason):
-        task_plan(**{**values, field: tmp_path / target})
+    ]:
+        with subtests.test(field=field, target=target), pytest.raises(LiveTaskError, match=reason):
+            task_plan(**{**values, field: tmp_path / target})

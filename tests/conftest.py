@@ -1,7 +1,70 @@
+import os
+import sqlite3
+from functools import cache
+
 import pandas as pd
 import pytest
 
+from trading import live_journal
 from trading.config import Settings
+
+_implementation_sha256 = cache(live_journal.implementation_sha256)
+_sqlite_connect = sqlite3.connect
+
+
+class _UnsyncedConnection(sqlite3.Connection):
+    # synchronous=FULL protects committed rows from power loss; the tests only simulate
+    # process exits, which keep OS-buffered writes, so skipping the flushes is safe here.
+    # Likewise the on-disk rollback journal only matters if this process dies mid-commit.
+    # Real crashes happen in child processes, which keep it, and hot journals they leave
+    # are still rolled back on open. WAL databases created by a test keep their mode.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        super().execute("PRAGMA synchronous=OFF")
+        if super().execute("PRAGMA journal_mode").fetchone()[0] == "delete":
+            super().execute("PRAGMA journal_mode=MEMORY")
+
+    def execute(self, sql, *args):
+        if sql == "PRAGMA synchronous=FULL":
+            sql = "PRAGMA synchronous=OFF"
+        return super().execute(sql, *args)
+
+
+def _unsynced_connect(*args, factory=_UnsyncedConnection, **kwargs):
+    return _sqlite_connect(*args, factory=factory, **kwargs)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_auto_num_workers(config):
+    # Each worker imports and collects the suite before running anything, so a run of
+    # named files or tests stays in this process. Directory runs use up to eight
+    # workers, which leaves most of a large machine free.
+    if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS"):
+        return None
+    if config.args and all(arg.split("::")[0].endswith(".py") for arg in config.args):
+        return 0
+    return min(8, os.cpu_count() or 1)
+
+
+@pytest.fixture(autouse=True)
+def unsynced_sqlite(monkeypatch):
+    monkeypatch.setattr(sqlite3, "connect", _unsynced_connect)
+
+
+@pytest.fixture(autouse=True)
+def cached_implementation_sha256(monkeypatch):
+    # The live code fingerprint rehashes source files and package metadata on every
+    # check; the files cannot change mid-test, so hash once. Tests that simulate a
+    # code update still monkeypatch the same attribute, which overrides this one.
+    monkeypatch.setattr(live_journal, "implementation_sha256", _implementation_sha256)
+
+
+@pytest.fixture
+def short_owner_wait(monkeypatch):
+    """Shorten the operator wait for tests that hold the owner and expect a refusal."""
+    for module in ("stream_control", "private_sync", "private_supervisor"):
+        monkeypatch.setattr(f"trading.{module}.OPERATOR_OWNER_WAIT_SECONDS", 0.2)
+    return 0.2
 
 
 @pytest.fixture
